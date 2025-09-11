@@ -17,27 +17,38 @@ endif()
 # Find required packages
 find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
-find_package(glfw3 REQUIRED)
+find_package(GLUT REQUIRED)
+
+# Find GLM
+find_package(glm QUIET)
+if(NOT glm_FOUND)
+    # Try to find GLM in common locations
+    find_path(GLM_INCLUDE_DIR glm/glm.hpp
+        PATHS
+        /usr/include
+        /usr/local/include
+        /opt/local/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    )
+    if(GLM_INCLUDE_DIR)
+        message(STATUS "Found GLM at: ${GLM_INCLUDE_DIR}")
+    else()
+        message(FATAL_ERROR "GLM not found. Please install libglm-dev (Ubuntu/Debian) or glm-devel (CentOS/RHEL)")
+    endif()
+endif()
 
 # Include directories
 include_directories(
     ${OPENGL_INCLUDE_DIR}
     ${GLEW_INCLUDE_DIRS}
+    ${GLUT_INCLUDE_DIR}
+    ${GLM_INCLUDE_DIR}
 )
-
-# For GLM, typically you need to specify where to find it
-# You may need to adjust this path based on your system
-find_package(glm QUIET)
-if(NOT glm_FOUND)
-    # If GLM is not found through find_package, set include dir manually
-    # Uncomment and update this if needed:
-    # set(GLM_INCLUDE_DIR "path/to/glm")
-    # include_directories(${GLM_INCLUDE_DIR})
-endif()
 
 # Source files
 set(SOURCES
     single_agent_pp.cpp
+    path_planning_module.cpp
     # Add other source files here as needed
 )
 
@@ -48,18 +59,11 @@ add_executable(path_planning ${SOURCES})
 target_link_libraries(path_planning
     ${OPENGL_LIBRARIES}
     ${GLEW_LIBRARIES}
-    glfw
-    # On some systems, you might need to link explicitly with X11, dl, pthread
-    # Uncomment as needed:
-    # ${X11_LIBRARIES}
-    # dl
-    # pthread
+    ${GLUT_LIBRARIES}
+    # Linux-specific libraries
+    ${CMAKE_DL_LIBS}
+    pthread
 )
-
-# Add freeGLUT if your code uses glutSolidCube, glutSolidSphere, etc.
-find_package(GLUT REQUIRED)
-include_directories(${GLUT_INCLUDE_DIR})
-target_link_libraries(path_planning ${GLUT_LIBRARIES})
 
 # Compiler-specific options
 if(MSVC)

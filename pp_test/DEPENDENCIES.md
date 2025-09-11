@@ -1,11 +1,111 @@
-# Dependencies Installation Guide for Windows
+# Dependencies Installation Guide
 
 ## Required Libraries:
 1. OpenGL - Usually comes with your graphics drivers
 2. GLEW - GL Extension Wrangler Library
-3. GLFW - Graphics Library Framework
-4. GLM - OpenGL Mathematics
-5. FreeGLUT - For glutSolidCube, glutSolidSphere functions
+3. GLM - OpenGL Mathematics
+4. FreeGLUT - For glutSolidCube, glutSolidSphere functions
+
+---
+
+## Linux Installation
+
+### Ubuntu/Debian Systems
+
+```bash
+# Update package list
+sudo apt update
+
+# Install development tools
+sudo apt install build-essential cmake
+
+# Install OpenGL and graphics libraries
+sudo apt install libgl1-mesa-dev libglu1-mesa-dev
+
+# Install GLEW
+sudo apt install libglew-dev
+
+# Install FreeGLUT
+sudo apt install freeglut3-dev
+
+# Install GLM (OpenGL Mathematics)
+sudo apt install libglm-dev
+
+# Optional: Install Clang if you want to use it instead of GCC
+sudo apt install clang
+```
+
+### CentOS/RHEL/Fedora Systems
+
+```bash
+# For CentOS/RHEL (with EPEL repository enabled)
+sudo yum install gcc-c++ cmake
+sudo yum install mesa-libGL-devel mesa-libGLU-devel
+sudo yum install glew-devel
+sudo yum install freeglut-devel
+sudo yum install glm-devel
+
+# For Fedora
+sudo dnf install gcc-c++ cmake
+sudo dnf install mesa-libGL-devel mesa-libGLU-devel
+sudo dnf install glew-devel
+sudo dnf install freeglut-devel
+sudo dnf install glm-devel
+```
+
+### Arch Linux
+
+```bash
+sudo pacman -S base-devel cmake
+sudo pacman -S mesa glu
+sudo pacman -S glew
+sudo pacman -S freeglut
+sudo pacman -S glm
+```
+
+### Building the Project
+
+```bash
+# Make the build script executable
+chmod +x build.sh
+
+# Build in Release mode (default)
+./build.sh
+
+# Build in Debug mode
+./build.sh --debug
+
+# Build with Clang instead of GCC
+./build.sh --clang
+
+# Clean build and rebuild
+./build.sh --clean
+
+# Verbose output
+./build.sh --verbose
+
+# Show help
+./build.sh --help
+```
+
+### Running the Simulation
+
+```bash
+cd build
+./path_planning
+```
+
+### Controls:
+- **ESC** - Exit the simulation
+- **R** - Reset the simulation
+- **C** - Reset camera to default position
+- **+/=** - Zoom in
+- **-/_** - Zoom out
+- **Left Mouse + Drag** - Rotate camera around the scene
+
+---
+
+## Windows Installation (Legacy)
 
 ## Installation using VCPKG (Recommended)
 
