@@ -50,27 +50,32 @@ namespace PathPlanning {
     
     /**
      * Environment data structure containing all spatial information
-     * Optimized for path planning algorithms like APF, A*, RRT, etc.
+     * This provides all the data your path planning algorithm will need
      */
     struct Environment {
-        // World boundaries
-        BoundingBox worldBounds;
+        // === WORLD BOUNDARIES ===
+        BoundingBox worldBounds;                   // Complete world bounding box
         
-        // All obstacles with their bounding boxes
-        std::vector<BoundingBox> obstacles;
+        // === OBSTACLES ===
+        std::vector<BoundingBox> obstacles;        // All static obstacles as bounding boxes
         
-        // Agent information
-        glm::vec3 agentStart;                      // Current agent position
-        glm::vec3 goalPosition;                    // Target position
-        float agentRadius;                         // Agent collision radius
+        // === AGENT INFORMATION ===
+        glm::vec3 agentStart;                      // Current agent position (start point)
+        glm::vec3 goalPosition;                    // Target position (end point)
+        float agentRadius;                         // Agent collision radius for safety margin
         
-        // Additional data for advanced algorithms
+        // === ALGORITHM PARAMETERS ===
         float goalTolerance;                       // How close to goal counts as "reached"
-        float stepSize;                           // Recommended step size for algorithms
+        float stepSize;                           // Recommended step size for your algorithm
         
         Environment() : agentRadius(0.5f), goalTolerance(0.5f), stepSize(0.5f) {}
         
-        // Utility methods for path planning algorithms
+        // === UTILITY METHODS FOR YOUR ALGORITHM ===
+        
+        /**
+         * Check if a position is valid (within bounds and not colliding)
+         * Use this to validate waypoints and intermediate positions
+         */
         bool isPositionValid(const glm::vec3& position) const {
             // Check if position is within world bounds
             if (!worldBounds.contains(position)) {
@@ -87,7 +92,10 @@ namespace PathPlanning {
             return true;
         }
         
-        // Get distance to nearest obstacle (useful for APF)
+        /**
+         * Get distance to nearest obstacle (useful for potential field methods)
+         * Returns the minimum distance from position to any obstacle surface
+         */
         float distanceToNearestObstacle(const glm::vec3& position) const {
             float minDistance = std::numeric_limits<float>::max();
             for (const auto& obstacle : obstacles) {
@@ -97,7 +105,10 @@ namespace PathPlanning {
             return minDistance;
         }
         
-        // Get all obstacles within a certain radius (useful for local planning)
+        /**
+         * Get indices of obstacles within a certain radius (useful for local planning)
+         * Use this to optimize by only considering nearby obstacles
+         */
         std::vector<size_t> getObstaclesInRadius(const glm::vec3& position, float radius) const {
             std::vector<size_t> nearbyObstacles;
             for (size_t i = 0; i < obstacles.size(); ++i) {
@@ -109,28 +120,48 @@ namespace PathPlanning {
         }
     };
 
+    // ===== MAIN ENTRY POINTS FOR YOUR PATH PLANNING IMPLEMENTATION =====
+    
     /**
      * Initialize the path planning module
-     * Called once at startup
+     * Called once at startup - set up your algorithms here
      */
     void initialize();
     
     /**
      * Shutdown the path planning module
-     * Called once at cleanup
+     * Called once at cleanup - clean up any resources here
      */
     void shutdown();
     
     /**
-     * Plan a path for a single agent from start to goal, avoiding obstacles
+     * MAIN PATH PLANNING FUNCTION - IMPLEMENT YOUR ALGORITHM HERE
      * 
-     * @param environment Complete environment data (bounds, obstacles, agent info)
-     * @return Vector of 3D waypoints representing the path (empty if no path found)
+     * This is the primary function you need to implement. It receives complete
+     * environment data and should return a collision-free path from start to goal.
+     * 
+     * @param environment Complete environment data including:
+     *                   - agentStart: 3D starting position
+     *                   - goalPosition: 3D target position  
+     *                   - worldBounds: World boundaries (don't go outside these)
+     *                   - obstacles: All obstacles as 3D bounding boxes
+     *                   - agentRadius: Collision radius for safety margin
+     *                   - Utility methods: isPositionValid(), distanceToNearestObstacle(), etc.
+     * 
+     * @return Vector of 3D waypoints representing the path
+     *         - Return empty vector if no path found
+     *         - First waypoint can be start position or first step
+     *         - Last waypoint should be goal position (or close to it)
      */
     std::vector<glm::vec3> planPath(const Environment& environment);
     
     /**
-     * Plan paths for multiple agents simultaneously (for swarm coordination)
+     * MULTI-AGENT PATH PLANNING (OPTIONAL - ADVANCED)
+     * 
+     * Plan paths for multiple agents simultaneously. Useful for:
+     * - Swarm coordination
+     * - Avoiding inter-agent collisions
+     * - Optimizing overall system performance
      * 
      * @param environments Vector of environments, one for each agent
      * @return Vector of paths, one for each agent (index corresponds to agent index)
@@ -138,12 +169,17 @@ namespace PathPlanning {
     std::vector<std::vector<glm::vec3>> planMultiplePaths(const std::vector<Environment>& environments);
     
     /**
-     * Update dynamic path planning (for moving obstacles or real-time replanning)
-     * Called every frame if dynamic planning is enabled
+     * DYNAMIC REPLANNING (OPTIONAL - ADVANCED)
+     * 
+     * Update path planning for dynamic environments. Called every frame if enabled.
+     * Use this for:
+     * - Moving obstacles
+     * - Real-time replanning
+     * - Adaptive path optimization
      * 
      * @param environment Current environment state
-     * @param currentPath The agent's current path
-     * @param deltaTime Time since last update
+     * @param currentPath The agent's current planned path
+     * @param deltaTime Time since last update (seconds)
      * @return New path if replanning is needed, empty vector if current path is still valid
      */
     std::vector<glm::vec3> updateDynamicPlanning(const Environment& environment,
@@ -151,7 +187,10 @@ namespace PathPlanning {
                                                  float deltaTime);
     
     /**
-     * Check if a path is still valid (no new obstacles blocking it)
+     * PATH VALIDATION (OPTIONAL - UTILITY)
+     * 
+     * Check if a previously computed path is still valid.
+     * Useful for determining when replanning is necessary.
      * 
      * @param environment Current environment state
      * @param path The path to validate
@@ -159,40 +198,55 @@ namespace PathPlanning {
      */
     bool isPathValid(const Environment& environment, const std::vector<glm::vec3>& path);
     
+    // ===== CONFIGURATION SYSTEM =====
+    
     /**
      * Configuration structure for path planning parameters
+     * Customize these values to tune your algorithm's behavior
      */
     struct Config {
-        // APF (Artificial Potential Field) parameters
+        // === ALGORITHM PARAMETERS ===
+        float stepSize = 0.5f;                 // Path planning step size (smaller = more precise)
+        int maxIterations = 1000;              // Maximum planning iterations (prevent infinite loops)
+        float goalTolerance = 0.5f;            // Distance to goal considered "reached"
+        
+        // === POTENTIAL FIELD PARAMETERS (if using APF) ===
         float attractiveForceGain = 1.0f;      // Strength of attraction to goal
         float repulsiveForceGain = 10.0f;      // Strength of repulsion from obstacles
         float influenceRadius = 5.0f;          // Distance at which obstacles affect agent
         
-        // General algorithm parameters
-        float stepSize = 0.5f;                 // Path planning step size
-        int maxIterations = 1000;              // Maximum planning iterations
-        float goalTolerance = 0.5f;            // Distance to goal considered "reached"
-        
-        // Dynamic planning parameters
+        // === DYNAMIC PLANNING PARAMETERS ===
         bool enableDynamicReplanning = false;  // Enable real-time replanning
         float replanningInterval = 1.0f;       // How often to replan (seconds)
         
-        // Algorithm selection
+        // === ALGORITHM SELECTION ===
         enum Algorithm {
             APF,        // Artificial Potential Fields
-            A_STAR,     // A* algorithm
+            A_STAR,     // A* algorithm  
             RRT,        // Rapidly-exploring Random Tree
+            DIJKSTRA,   // Dijkstra's algorithm
+            RRT_STAR,   // RRT* (optimal RRT)
+            PRM,        // Probabilistic Roadmap
             CUSTOM      // Your custom algorithm
         } selectedAlgorithm = APF;
+        
+        // === ALGORITHM-SPECIFIC PARAMETERS ===
+        // Add your own parameters here as needed for your specific algorithm
+        // Examples:
+        // float heuristicWeight = 1.0f;      // For A* weighting
+        // int samplingAttempts = 100;        // For RRT sampling
+        // float connectionRadius = 2.0f;     // For PRM connections
     };
     
     /**
      * Set configuration parameters for the path planning module
+     * Call this to update algorithm parameters at runtime
      */
     void setConfig(const Config& config);
     
     /**
      * Get current configuration parameters
+     * Use this to read current settings
      */
     const Config& getConfig();
 }
