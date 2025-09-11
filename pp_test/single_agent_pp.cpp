@@ -2,13 +2,14 @@
 #include <vector>
 #include <memory>
 #include <cstdlib>
+#include <ctime>
 #include <GL/glew.h>
 #include <GL/glut.h>
 #include <GL/glu.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include "path_planning_interface.h"
+#include "path_planning_interface.hpp"
 
 // Forward declarations
 class World;
@@ -125,18 +126,6 @@ public:
     
     bool getIsMoving() const {
         return isMoving;
-    }
-    
-    // This will be called by the path planning module
-    void planPath(const std::vector<Obstacle*>& obstacles) {
-        if (pathStrategy) {
-            path = pathStrategy->planPath(position, goal, obstacles);
-            isMoving = !path.empty();
-        } else {
-            // Use the external path planning module
-            path = PathPlanning::planPath(position, goal, obstacles);
-            isMoving = !path.empty();
-        }
     }
     
     void update(float deltaTime) override {
@@ -289,38 +278,79 @@ public:
     }
     
     void setupWorld() {
-        // Create agent at a random 3D position
-        float agentX = static_cast<float>(rand() % static_cast<int>(worldSize/2)) - worldSize/4;
-        float agentY = static_cast<float>(rand() % static_cast<int>(worldSize/2)) + 2.0f; // Above ground
-        float agentZ = static_cast<float>(rand() % static_cast<int>(worldSize/2)) - worldSize/4;
+        // Seed random number generator for different scenarios each run
+        srand(static_cast<unsigned int>(time(nullptr)));
         
-        // Create goal at a random 3D position
-        float goalX = static_cast<float>(rand() % static_cast<int>(worldSize/2)) - worldSize/4;
-        float goalY = static_cast<float>(rand() % static_cast<int>(worldSize/2)) + 2.0f; // Above ground
-        float goalZ = static_cast<float>(rand() % static_cast<int>(worldSize/2)) - worldSize/4;
+        // Spawn agent in one corner and goal in diagonally opposite corner (3D diagonal)
+        float halfSize = worldSize / 2.0f;
+        float maxHeight = worldSize / 2.0f; // World height limit
+        float cornerOffset = halfSize * 0.8f; // Stay a bit away from the exact edges
+        
+        // Randomly choose which 3D diagonal to use
+        bool diagonal = rand() % 2;
+        
+        float agentX, agentY, agentZ, goalX, goalY, goalZ;
+        if (diagonal) {
+            // Agent in (-,-,-) corner, goal in (+,+,+) corner (3D diagonal)
+            agentX = -cornerOffset;
+            agentY = 2.0f; // Low position
+            agentZ = -cornerOffset;
+            goalX = cornerOffset;
+            goalY = maxHeight - 2.0f; // High position but within bounds
+            goalZ = cornerOffset;
+        } else {
+            // Agent in (-,+,-) corner, goal in (+,-,+) corner (3D diagonal)
+            agentX = -cornerOffset;
+            agentY = maxHeight - 2.0f; // High position but within bounds
+            agentZ = -cornerOffset;
+            goalX = cornerOffset;
+            goalY = 2.0f; // Low position
+            goalZ = cornerOffset;
+        }
         
         auto agentPtr = std::make_unique<Agent>(glm::vec3(agentX, agentY, agentZ), 
                                                glm::vec3(goalX, goalY, goalZ));
         agent = agentPtr.get();
         entities.push_back(std::move(agentPtr));
         
-        // Create obstacles in 3D space
-        for (int i = 0; i < 15; ++i) {
-            float x = static_cast<float>(rand() % static_cast<int>(worldSize)) - worldSize/2;
-            float y = static_cast<float>(rand() % static_cast<int>(worldSize/2)) + 1.0f; // Above ground
-            float z = static_cast<float>(rand() % static_cast<int>(worldSize)) - worldSize/2;
+        // Create obstacles in 3D space, avoiding agent and goal positions
+        glm::vec3 agentPos(agentX, agentY, agentZ);
+        glm::vec3 goalPos(goalX, goalY, goalZ);
+        float minDistance = 3.0f; // Minimum distance from agent/goal
+        
+        int obstaclesPlaced = 0;
+        int maxAttempts = 100; // Increase attempts for better obstacle placement
+        
+        while (obstaclesPlaced < 15 && maxAttempts > 0) {
+            // Ensure obstacles spawn within proper bounds
+            float x = -halfSize + static_cast<float>(rand()) / RAND_MAX * (2.0f * halfSize);
+            float y = 1.0f + static_cast<float>(rand()) / RAND_MAX * (maxHeight - 2.0f); // Within height bounds
+            float z = -halfSize + static_cast<float>(rand()) / RAND_MAX * (2.0f * halfSize);
             
-            float sizeX = 1.0f + static_cast<float>(rand() % 3);
-            float sizeY = 1.0f + static_cast<float>(rand() % 3);
-            float sizeZ = 1.0f + static_cast<float>(rand() % 3);
+            glm::vec3 obstaclePos(x, y, z);
             
-            auto obstaclePtr = std::make_unique<Obstacle>(
-                glm::vec3(x, y, z), 
-                glm::vec3(sizeX, sizeY, sizeZ)
-            );
-            obstacles.push_back(obstaclePtr.get());
-            entities.push_back(std::move(obstaclePtr));
+            // Check if obstacle is far enough from both agent and goal
+            if (glm::distance(obstaclePos, agentPos) >= minDistance && 
+                glm::distance(obstaclePos, goalPos) >= minDistance) {
+                
+                float sizeX = 1.0f + static_cast<float>(rand()) / RAND_MAX * 2.0f;
+                float sizeY = 1.0f + static_cast<float>(rand()) / RAND_MAX * 2.0f;
+                float sizeZ = 1.0f + static_cast<float>(rand()) / RAND_MAX * 2.0f;
+                
+                auto obstaclePtr = std::make_unique<Obstacle>(
+                    obstaclePos, 
+                    glm::vec3(sizeX, sizeY, sizeZ)
+                );
+                obstacles.push_back(obstaclePtr.get());
+                entities.push_back(std::move(obstaclePtr));
+                obstaclesPlaced++;
+            }
+            maxAttempts--;
         }
+        
+        std::cout << "Spawned agent at (" << agentX << ", " << agentY << ", " << agentZ << ")" << std::endl;
+        std::cout << "Spawned goal at (" << goalX << ", " << goalY << ", " << goalZ << ")" << std::endl;
+        std::cout << "Placed " << obstaclesPlaced << " obstacles" << std::endl;
         
         // Setup camera with spherical coordinates
         camera = Camera(glm::vec3(0.0f, worldSize/4, 0.0f), // Target at mid-height
@@ -447,7 +477,33 @@ public:
     // Interface for path planning module
     void triggerPathPlanning() {
         if (agent) {
-            agent->planPath(obstacles);
+            // Create structured environment data
+            PathPlanning::Environment env;
+            
+            // Set world bounds
+            float maxHeight = worldSize / 2.0f;
+            env.worldBounds = PathPlanning::BoundingBox(
+                glm::vec3(0.0f, maxHeight/2.0f, 0.0f),  // Center of world
+                glm::vec3(worldSize, maxHeight, worldSize)  // Full world size
+            );
+            
+            // Set agent info
+            env.agentStart = agent->getPosition();
+            env.goalPosition = agent->getGoal();
+            env.agentRadius = 0.5f;
+            env.goalTolerance = 1.0f;
+            env.stepSize = 0.8f;
+            
+            // Convert obstacles to bounding boxes
+            env.obstacles.reserve(obstacles.size());
+            for (const auto& obstacle : obstacles) {
+                PathPlanning::BoundingBox box(obstacle->getPosition(), obstacle->getScale());
+                env.obstacles.push_back(box);
+            }
+            
+            // Use the structured interface
+            std::vector<glm::vec3> path = PathPlanning::planPath(env);
+            agent->setPath(path);
         }
     }
     
