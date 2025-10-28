@@ -19,6 +19,9 @@ namespace PathPlanning {
         int maxSteps = 1000;
         float goalTolerance = 0.5f;
         
+        // Helper function for obstacle distance calculation
+        glm::vec3 getClosestPointOnBoundingBox(const glm::vec3& point, const BoundingBox& box) const;
+        
     public:
         std::vector<glm::vec3> planPath(const Environment& environment) override;
         void configure(const Config& config) override;
