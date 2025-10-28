@@ -41,3 +41,5 @@
 *.dwo
 
 /.vscode
+
+/pp_test/build/
