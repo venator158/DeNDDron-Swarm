@@ -11,13 +11,18 @@ namespace PathPlanning {
      */
     class APFStrategy : public PathPlanningStrategy {
     private:
-        // APF-specific parameters
-        float attractiveForceGain = 1.0f;
-        float repulsiveForceGain = 10.0f;
-        float influenceRadius = 5.0f;
-        float stepSize = 0.1f;
-        int maxSteps = 1000;
-        float goalTolerance = 0.5f;
+        // APF-specific parameters (configured from Config)
+        float attractiveForceGain = 1.0f;      // k parameter  
+        float repulsiveForceGain = 10.0f;      // General repulsive strength
+        float influenceRadius = 2.0f;          // Obstacle influence radius
+        float stepSize = 0.1f;                 // Movement step size
+        int maxSteps = 1000;                   // Maximum planning iterations
+        float goalTolerance = 0.5f;            // Goal reach tolerance
+        
+        // APF advanced parameters
+        float apfExponentialDecay = 0.8f;      // 'a' parameter for e^(-a*d)
+        float apfInverseSquareScale = 1.0f;    // 'b' parameter for 1/(b*d²)
+        float apfStuckGrowthRate = 0.1f;       // 'alpha' parameter for k growth
         
         // Helper function for obstacle distance calculation
         glm::vec3 getClosestPointOnBoundingBox(const glm::vec3& point, const BoundingBox& box) const;

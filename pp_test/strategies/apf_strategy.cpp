@@ -14,24 +14,35 @@ namespace PathPlanning {
     }
     
     void APFStrategy::configure(const Config& config) {
-        // Use config for basic parameters, but we'll use our own a, b, k
+        // Basic parameters
         influenceRadius = config.influenceRadius;
         stepSize = config.stepSize > 0 ? config.stepSize : 0.1f;
         maxSteps = config.maxIterations;
         goalTolerance = config.goalTolerance;
-        std::cout << "APF Strategy: Configured" << std::endl;
+        
+        // APF force parameters
+        attractiveForceGain = config.attractiveForceGain;
+        repulsiveForceGain = config.repulsiveForceGain;
+        
+        // APF advanced parameters (if available)
+        apfExponentialDecay = config.apfExponentialDecay;
+        apfInverseSquareScale = config.apfInverseSquareScale;  
+        apfStuckGrowthRate = config.apfStuckGrowthRate;
+        
+        std::cout << "APF Strategy: Configured with a=" << apfExponentialDecay 
+                  << ", b=" << apfInverseSquareScale << ", k=" << attractiveForceGain << std::endl;
     }
     
     std::vector<glm::vec3> APFStrategy::planPath(const Environment& environment) {
         std::cout << "APF: Planning path using potential fields..." << std::endl;
         
-        // APF Parameters
-        const float a = 1.0f;           // Exponential decay rate
-        const float b = 1.0f;           // Inverse square scaling
-        float k = 1.0f;                 // Attractive force gain (will grow if stuck)
-        const float alpha = 0.1f;       // Stuck growth rate for k
-        const float minMovement = 0.01f; // Threshold for detecting stuck condition
-        const int stuckThreshold = 5;   // Steps before considering stuck
+        // APF Parameters (now configurable)
+        const float a = apfExponentialDecay;      // Exponential decay rate
+        const float b = apfInverseSquareScale;    // Inverse square scaling
+        float k = attractiveForceGain;            // Attractive force gain (will grow if stuck)
+        const float alpha = apfStuckGrowthRate;   // Stuck growth rate for k
+        const float minMovement = 0.01f;          // Threshold for detecting stuck condition
+        const int stuckThreshold = 5;            // Steps before considering stuck
         
         std::vector<glm::vec3> path;
         glm::vec3 currentPos = environment.agentStart;
@@ -40,11 +51,19 @@ namespace PathPlanning {
         int stuckCount = 0;
         glm::vec3 lastPos = currentPos;
         
+        // Cost tracking variables
+        float totalDistanceTraveled = 0.0f;
+        glm::vec3 previousPos = currentPos;
+        
         for (int step = 0; step < maxSteps; step++) {
             // Check if we've reached the goal
             float distanceToGoal = glm::length(environment.goalPosition - currentPos);
             if (distanceToGoal <= goalTolerance) {
                 std::cout << "APF: Goal reached in " << step << " steps" << std::endl;
+                std::cout << "APF: Total distance traveled: " << totalDistanceTraveled << " units" << std::endl;
+                std::cout << "APF: Direct distance to goal: " << glm::length(environment.goalPosition - environment.agentStart) << " units" << std::endl;
+                float efficiency = (totalDistanceTraveled > 0.0f) ? (glm::length(environment.goalPosition - environment.agentStart) / totalDistanceTraveled * 100.0f) : 0.0f;
+                std::cout << "APF: Path efficiency: " << efficiency << "%" << std::endl;
                 break;
             }
             
@@ -96,7 +115,7 @@ namespace PathPlanning {
                 }
             } else {
                 stuckCount = 0; // Reset stuck counter if we're moving
-                k = 1.0f;       // Reset k to default
+                k = attractiveForceGain;       // Reset k to default
             }
             
             // Update position
@@ -104,14 +123,30 @@ namespace PathPlanning {
             currentPos = nextPos;
             path.push_back(currentPos);
             
+            // Calculate distance traveled for cost tracking
+            float stepDistance = glm::length(currentPos - previousPos);
+            totalDistanceTraveled += stepDistance;
+            previousPos = currentPos;
+            
             // Safety check for world bounds
             if (!environment.worldBounds.contains(currentPos)) {
                 std::cout << "APF: Agent moved outside world bounds, stopping" << std::endl;
+                std::cout << "APF: Total distance traveled: " << totalDistanceTraveled << " units" << std::endl;
                 break;
             }
         }
         
+        // Display final mission cost summary
+        float directDistance = glm::length(environment.goalPosition - environment.agentStart);
+        float pathEfficiency = (totalDistanceTraveled > 0.0f) ? (directDistance / totalDistanceTraveled * 100.0f) : 0.0f;
+        
         std::cout << "APF: Generated path with " << path.size() << " waypoints" << std::endl;
+        std::cout << "APF: Mission Cost Summary:" << std::endl;
+        std::cout << "  - Total distance traveled: " << totalDistanceTraveled << " units" << std::endl;
+        std::cout << "  - Direct distance to goal: " << directDistance << " units" << std::endl;
+        std::cout << "  - Path efficiency: " << pathEfficiency << "%" << std::endl;
+        std::cout << "  - Path overhead: " << (totalDistanceTraveled - directDistance) << " units" << std::endl;
+        std::cout << "  - Waypoints generated: " << path.size() << std::endl;
         return path;
     }
     

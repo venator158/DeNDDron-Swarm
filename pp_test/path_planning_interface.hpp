@@ -211,9 +211,14 @@ namespace PathPlanning {
         float goalTolerance = 0.5f;            // Distance to goal considered "reached"
         
         // === POTENTIAL FIELD PARAMETERS (if using APF) ===
-        float attractiveForceGain = 1.0f;      // Strength of attraction to goal
+        float attractiveForceGain = 1.0f;      // Strength of attraction to goal (k parameter)
         float repulsiveForceGain = 10.0f;      // Strength of repulsion from obstacles
-        float influenceRadius = 5.0f;          // Distance at which obstacles affect agent
+        float influenceRadius = 1.0f;          // Distance at which obstacles affect agent
+        
+        // === APF ADVANCED PARAMETERS ===
+        float apfExponentialDecay = 0.8f;      // APF 'a' parameter for exponential decay
+        float apfInverseSquareScale = 1.0f;    // APF 'b' parameter for inverse square scaling
+        float apfStuckGrowthRate = 0.1f;       // APF 'alpha' parameter for local minima escape
         
         // === DYNAMIC PLANNING PARAMETERS ===
         bool enableDynamicReplanning = false;  // Enable real-time replanning

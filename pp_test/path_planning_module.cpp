@@ -19,7 +19,7 @@ namespace PathPlanning {
         std::cout << "Available algorithms: APF, A*, RRT, Custom" << std::endl;
         
         // Initialize with default strategy (APF)
-        currentStrategy = std::make_unique<RRTStrategy>();
+        currentStrategy = std::make_unique<APFStrategy>();
         currentStrategy->initialize();
     }
     
