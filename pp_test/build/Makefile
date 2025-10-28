@@ -117,6 +117,19 @@ depend:
 .PHONY : depend
 
 #=============================================================================
+# Target rules for targets named path_planning_lib
+
+# Build rule for target.
+path_planning_lib: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 path_planning_lib
+.PHONY : path_planning_lib
+
+# fast build rule for target.
+path_planning_lib/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/build
+.PHONY : path_planning_lib/fast
+
+#=============================================================================
 # Target rules for targets named path_planning
 
 # Build rule for target.
@@ -129,11 +142,25 @@ path_planning/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/build
 .PHONY : path_planning/fast
 
+#=============================================================================
+# Target rules for targets named path_planning_test
+
+# Build rule for target.
+path_planning_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 path_planning_test
+.PHONY : path_planning_test
+
+# fast build rule for target.
+path_planning_test/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_test.dir/build.make CMakeFiles/path_planning_test.dir/build
+.PHONY : path_planning_test/fast
+
 path_planning_module.o: path_planning_module.cpp.o
 .PHONY : path_planning_module.o
 
 # target to build an object file
 path_planning_module.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/path_planning_module.cpp.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/path_planning_module.cpp.o
 .PHONY : path_planning_module.cpp.o
 
@@ -142,6 +169,7 @@ path_planning_module.i: path_planning_module.cpp.i
 
 # target to preprocess a source file
 path_planning_module.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/path_planning_module.cpp.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/path_planning_module.cpp.i
 .PHONY : path_planning_module.cpp.i
 
@@ -150,6 +178,7 @@ path_planning_module.s: path_planning_module.cpp.s
 
 # target to generate assembly for a file
 path_planning_module.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/path_planning_module.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/path_planning_module.cpp.s
 .PHONY : path_planning_module.cpp.s
 
@@ -177,6 +206,111 @@ single_agent_pp.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/single_agent_pp.cpp.s
 .PHONY : single_agent_pp.cpp.s
 
+strategies/apf_strategy.o: strategies/apf_strategy.cpp.o
+.PHONY : strategies/apf_strategy.o
+
+# target to build an object file
+strategies/apf_strategy.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/strategies/apf_strategy.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o
+.PHONY : strategies/apf_strategy.cpp.o
+
+strategies/apf_strategy.i: strategies/apf_strategy.cpp.i
+.PHONY : strategies/apf_strategy.i
+
+# target to preprocess a source file
+strategies/apf_strategy.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/strategies/apf_strategy.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.i
+.PHONY : strategies/apf_strategy.cpp.i
+
+strategies/apf_strategy.s: strategies/apf_strategy.cpp.s
+.PHONY : strategies/apf_strategy.s
+
+# target to generate assembly for a file
+strategies/apf_strategy.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/strategies/apf_strategy.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.s
+.PHONY : strategies/apf_strategy.cpp.s
+
+strategies/astar_strategy.o: strategies/astar_strategy.cpp.o
+.PHONY : strategies/astar_strategy.o
+
+# target to build an object file
+strategies/astar_strategy.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/strategies/astar_strategy.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o
+.PHONY : strategies/astar_strategy.cpp.o
+
+strategies/astar_strategy.i: strategies/astar_strategy.cpp.i
+.PHONY : strategies/astar_strategy.i
+
+# target to preprocess a source file
+strategies/astar_strategy.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/strategies/astar_strategy.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.i
+.PHONY : strategies/astar_strategy.cpp.i
+
+strategies/astar_strategy.s: strategies/astar_strategy.cpp.s
+.PHONY : strategies/astar_strategy.s
+
+# target to generate assembly for a file
+strategies/astar_strategy.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/strategies/astar_strategy.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.s
+.PHONY : strategies/astar_strategy.cpp.s
+
+strategies/rrt_strategy.o: strategies/rrt_strategy.cpp.o
+.PHONY : strategies/rrt_strategy.o
+
+# target to build an object file
+strategies/rrt_strategy.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/strategies/rrt_strategy.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o
+.PHONY : strategies/rrt_strategy.cpp.o
+
+strategies/rrt_strategy.i: strategies/rrt_strategy.cpp.i
+.PHONY : strategies/rrt_strategy.i
+
+# target to preprocess a source file
+strategies/rrt_strategy.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/strategies/rrt_strategy.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.i
+.PHONY : strategies/rrt_strategy.cpp.i
+
+strategies/rrt_strategy.s: strategies/rrt_strategy.cpp.s
+.PHONY : strategies/rrt_strategy.s
+
+# target to generate assembly for a file
+strategies/rrt_strategy.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_lib.dir/build.make CMakeFiles/path_planning_lib.dir/strategies/rrt_strategy.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning.dir/build.make CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.s
+.PHONY : strategies/rrt_strategy.cpp.s
+
+test_main.o: test_main.cpp.o
+.PHONY : test_main.o
+
+# target to build an object file
+test_main.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_test.dir/build.make CMakeFiles/path_planning_test.dir/test_main.cpp.o
+.PHONY : test_main.cpp.o
+
+test_main.i: test_main.cpp.i
+.PHONY : test_main.i
+
+# target to preprocess a source file
+test_main.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_test.dir/build.make CMakeFiles/path_planning_test.dir/test_main.cpp.i
+.PHONY : test_main.cpp.i
+
+test_main.s: test_main.cpp.s
+.PHONY : test_main.s
+
+# target to generate assembly for a file
+test_main.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/path_planning_test.dir/build.make CMakeFiles/path_planning_test.dir/test_main.cpp.s
+.PHONY : test_main.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -186,12 +320,26 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... path_planning"
+	@echo "... path_planning_lib"
+	@echo "... path_planning_test"
 	@echo "... path_planning_module.o"
 	@echo "... path_planning_module.i"
 	@echo "... path_planning_module.s"
 	@echo "... single_agent_pp.o"
 	@echo "... single_agent_pp.i"
 	@echo "... single_agent_pp.s"
+	@echo "... strategies/apf_strategy.o"
+	@echo "... strategies/apf_strategy.i"
+	@echo "... strategies/apf_strategy.s"
+	@echo "... strategies/astar_strategy.o"
+	@echo "... strategies/astar_strategy.i"
+	@echo "... strategies/astar_strategy.s"
+	@echo "... strategies/rrt_strategy.o"
+	@echo "... strategies/rrt_strategy.i"
+	@echo "... strategies/rrt_strategy.s"
+	@echo "... test_main.o"
+	@echo "... test_main.i"
+	@echo "... test_main.s"
 .PHONY : help
 
 

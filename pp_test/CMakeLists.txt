@@ -55,10 +55,21 @@ set(SOURCES
     # Add other source files here as needed
 )
 
-# Define the executable
+# Create a library for the path planning system
+add_library(path_planning_lib 
+    path_planning_module.cpp
+    strategies/rrt_strategy.cpp
+    strategies/astar_strategy.cpp
+    strategies/apf_strategy.cpp
+)
+
+# Define the original executable
 add_executable(path_planning ${SOURCES})
 
-# Link libraries
+# Create the test executable
+add_executable(path_planning_test test_main.cpp)
+
+# Link libraries for original executable
 target_link_libraries(path_planning
     ${OPENGL_LIBRARIES}
     ${GLEW_LIBRARIES}
@@ -67,6 +78,9 @@ target_link_libraries(path_planning
     ${CMAKE_DL_LIBS}
     pthread
 )
+
+# Link libraries for test executable (no OpenGL needed)
+target_link_libraries(path_planning_test path_planning_lib)
 
 # Compiler-specific options
 if(MSVC)

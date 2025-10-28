@@ -3,6 +3,12 @@ file(REMOVE_RECURSE
   "CMakeFiles/path_planning.dir/path_planning_module.cpp.o.d"
   "CMakeFiles/path_planning.dir/single_agent_pp.cpp.o"
   "CMakeFiles/path_planning.dir/single_agent_pp.cpp.o.d"
+  "CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o"
+  "CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o.d"
+  "CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o"
+  "CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o.d"
+  "CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o"
+  "CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o.d"
   "path_planning"
   "path_planning.pdb"
 )

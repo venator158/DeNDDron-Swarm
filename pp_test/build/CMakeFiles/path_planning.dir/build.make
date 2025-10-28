@@ -97,16 +97,64 @@ CMakeFiles/path_planning.dir/path_planning_module.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/path_planning.dir/path_planning_module.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/venator/denddron/DeNDDron-Swarm/pp_test/path_planning_module.cpp -o CMakeFiles/path_planning.dir/path_planning_module.cpp.s
 
+CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o: CMakeFiles/path_planning.dir/flags.make
+CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o: ../strategies/rrt_strategy.cpp
+CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o: CMakeFiles/path_planning.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/venator/denddron/DeNDDron-Swarm/pp_test/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o -MF CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o.d -o CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o -c /home/venator/denddron/DeNDDron-Swarm/pp_test/strategies/rrt_strategy.cpp
+
+CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/venator/denddron/DeNDDron-Swarm/pp_test/strategies/rrt_strategy.cpp > CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.i
+
+CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/venator/denddron/DeNDDron-Swarm/pp_test/strategies/rrt_strategy.cpp -o CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.s
+
+CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o: CMakeFiles/path_planning.dir/flags.make
+CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o: ../strategies/astar_strategy.cpp
+CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o: CMakeFiles/path_planning.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/venator/denddron/DeNDDron-Swarm/pp_test/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o -MF CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o.d -o CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o -c /home/venator/denddron/DeNDDron-Swarm/pp_test/strategies/astar_strategy.cpp
+
+CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/venator/denddron/DeNDDron-Swarm/pp_test/strategies/astar_strategy.cpp > CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.i
+
+CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/venator/denddron/DeNDDron-Swarm/pp_test/strategies/astar_strategy.cpp -o CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.s
+
+CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o: CMakeFiles/path_planning.dir/flags.make
+CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o: ../strategies/apf_strategy.cpp
+CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o: CMakeFiles/path_planning.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/venator/denddron/DeNDDron-Swarm/pp_test/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o -MF CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o.d -o CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o -c /home/venator/denddron/DeNDDron-Swarm/pp_test/strategies/apf_strategy.cpp
+
+CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/venator/denddron/DeNDDron-Swarm/pp_test/strategies/apf_strategy.cpp > CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.i
+
+CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/venator/denddron/DeNDDron-Swarm/pp_test/strategies/apf_strategy.cpp -o CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.s
+
 # Object files for target path_planning
 path_planning_OBJECTS = \
 "CMakeFiles/path_planning.dir/single_agent_pp.cpp.o" \
-"CMakeFiles/path_planning.dir/path_planning_module.cpp.o"
+"CMakeFiles/path_planning.dir/path_planning_module.cpp.o" \
+"CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o" \
+"CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o" \
+"CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o"
 
 # External object files for target path_planning
 path_planning_EXTERNAL_OBJECTS =
 
 path_planning: CMakeFiles/path_planning.dir/single_agent_pp.cpp.o
 path_planning: CMakeFiles/path_planning.dir/path_planning_module.cpp.o
+path_planning: CMakeFiles/path_planning.dir/strategies/rrt_strategy.cpp.o
+path_planning: CMakeFiles/path_planning.dir/strategies/astar_strategy.cpp.o
+path_planning: CMakeFiles/path_planning.dir/strategies/apf_strategy.cpp.o
 path_planning: CMakeFiles/path_planning.dir/build.make
 path_planning: /usr/lib/x86_64-linux-gnu/libGL.so
 path_planning: /usr/lib/x86_64-linux-gnu/libGLU.so
@@ -115,7 +163,7 @@ path_planning: /usr/lib/x86_64-linux-gnu/libglut.so
 path_planning: /usr/lib/x86_64-linux-gnu/libXmu.so
 path_planning: /usr/lib/x86_64-linux-gnu/libXi.so
 path_planning: CMakeFiles/path_planning.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/home/venator/denddron/DeNDDron-Swarm/pp_test/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Linking CXX executable path_planning"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --bold --progress-dir=/home/venator/denddron/DeNDDron-Swarm/pp_test/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Linking CXX executable path_planning"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/path_planning.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

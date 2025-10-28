@@ -11,6 +11,9 @@ namespace PathPlanning {
     static Config currentConfig;
     static std::unique_ptr<PathPlanningStrategy> currentStrategy;
     
+    // Forward declaration of helper function
+    bool shouldReplan(const Environment& environment, const std::vector<glm::vec3>& currentPath, float deltaTime);
+    
     void initialize() {
         std::cout << "Path Planning Module: Initialized" << std::endl;
         std::cout << "Available algorithms: APF, A*, RRT, Custom" << std::endl;
@@ -91,7 +94,25 @@ namespace PathPlanning {
                 paths = currentStrategy->planMultipleAgentPaths(environments);
             } else {
                 // Plan paths with coordination using single-agent strategy
-                paths = planCoordinatedPaths(environments);
+                // Simple sequential planning with obstacle avoidance
+                for (size_t i = 0; i < environments.size(); ++i) {
+                    Environment modifiedEnv = environments[i];
+                    
+                    // Add previously planned agent paths as obstacles
+                    for (size_t j = 0; j < i; ++j) {
+                        for (const auto& waypoint : paths[j]) {
+                            // Add agent radius around each waypoint as obstacle
+                            BoundingBox agentObstacle;
+                            agentObstacle.min = waypoint - glm::vec3(environments[i].agentRadius);
+                            agentObstacle.max = waypoint + glm::vec3(environments[i].agentRadius);
+                            agentObstacle.center = waypoint;
+                            agentObstacle.size = glm::vec3(environments[i].agentRadius * 2.0f);
+                            modifiedEnv.obstacles.push_back(agentObstacle);
+                        }
+                    }
+                    
+                    paths.push_back(planPath(modifiedEnv));
+                }
             }
         } else {
             // Independent planning using current strategy
@@ -128,16 +149,9 @@ namespace PathPlanning {
     }
     
     bool isPathValid(const Environment& environment, const std::vector<glm::vec3>& path) {
-        // TODO: Implement path validation here
-        // This function should check:
-        // 1. Each waypoint is within world bounds
-        // 2. Each waypoint doesn't collide with obstacles
-        // 3. Line segments between waypoints are collision-free
-        // 4. Path is still reachable given current environment
-        
         if (path.empty()) return false;
         
-        // Placeholder: use environment's position validation
+        // Check each waypoint for validity
         for (const auto& waypoint : path) {
             if (!environment.isPositionValid(waypoint)) {
                 return false;
@@ -168,60 +182,23 @@ namespace PathPlanning {
         return currentConfig;
     }
 
-// Helper functions for MAPF coordination
-std::vector<std::vector<glm::vec3>> planCoordinatedPaths(const std::vector<Environment>& environments) {
-    std::vector<std::vector<glm::vec3>> paths;
-    paths.reserve(environments.size());
-    
-    // Plan first agent normally
-    if (!environments.empty()) {
-        paths.push_back(planPath(environments[0]));
-    }
-    
-    // Plan subsequent agents with collision avoidance
-    for (size_t i = 1; i < environments.size(); ++i) {
-        Environment modifiedEnv = environments[i];
-        
-        // Add other agents' paths as dynamic obstacles
-        addAgentPathsAsObstacles(modifiedEnv, paths);
-        
-        // Plan path for current agent
-        paths.push_back(planPath(modifiedEnv));
-    }
-    
-    return paths;
-}
-
-void addAgentPathsAsObstacles(Environment& env, const std::vector<std::vector<glm::vec3>>& existingPaths) {
-    // Convert existing agent paths to temporary obstacles
-    for (const auto& path : existingPaths) {
-        for (const auto& waypoint : path) {
-            // Add agent radius around each waypoint as obstacle
-            BoundingBox agentObstacle;
-            agentObstacle.min = waypoint - glm::vec3(env.agentRadius);
-            agentObstacle.max = waypoint + glm::vec3(env.agentRadius);
-            agentObstacle.center = waypoint;
-            agentObstacle.size = glm::vec3(env.agentRadius * 2.0f);
-            env.obstacles.push_back(agentObstacle);
+    // Helper function for replanning decisions
+    bool shouldReplan(const Environment& environment, const std::vector<glm::vec3>& currentPath, float deltaTime) {
+        // Check if path is still valid
+        if (!isPathValid(environment, currentPath)) {
+            return true;
         }
+        
+        // Check replanning interval
+        static float timeSinceLastReplan = 0.0f;
+        timeSinceLastReplan += deltaTime;
+        
+        if (currentConfig.enableDynamicReplanning && 
+            timeSinceLastReplan >= currentConfig.replanningInterval) {
+            timeSinceLastReplan = 0.0f;
+            return true;
+        }
+        
+        return false;
     }
-}
-
-bool shouldReplan(const Environment& environment, const std::vector<glm::vec3>& currentPath, float deltaTime) {
-    // Check if path is still valid
-    if (!isPathValid(environment, currentPath)) {
-        return true;
-    }
-    
-    // Check replanning interval
-    static float timeSinceLastReplan = 0.0f;
-    timeSinceLastReplan += deltaTime;
-    
-    if (timeSinceLastReplan >= currentConfig.replanningInterval) {
-        timeSinceLastReplan = 0.0f;
-        return true;
-    }
-    
-    return false;
-}
 }
