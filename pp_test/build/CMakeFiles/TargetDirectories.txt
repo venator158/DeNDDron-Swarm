@@ -1,5 +1,0 @@
-/home/pes2ug23cs666/DeNDDron-Swarm/pp_test/build/CMakeFiles/path_planning_lib.dir
-/home/pes2ug23cs666/DeNDDron-Swarm/pp_test/build/CMakeFiles/path_planning.dir
-/home/pes2ug23cs666/DeNDDron-Swarm/pp_test/build/CMakeFiles/path_planning_test.dir
-/home/pes2ug23cs666/DeNDDron-Swarm/pp_test/build/CMakeFiles/edit_cache.dir
-/home/pes2ug23cs666/DeNDDron-Swarm/pp_test/build/CMakeFiles/rebuild_cache.dir
