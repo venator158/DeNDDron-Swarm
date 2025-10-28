@@ -222,13 +222,16 @@ namespace PathPlanning {
         // === ALGORITHM SELECTION ===
         enum Algorithm {
             APF,        // Artificial Potential Fields
-            A_STAR,     // A* algorithm  
+            AStar,      // A* algorithm  
             RRT,        // Rapidly-exploring Random Tree
             DIJKSTRA,   // Dijkstra's algorithm
             RRT_STAR,   // RRT* (optimal RRT)
             PRM,        // Probabilistic Roadmap
             CUSTOM      // Your custom algorithm
-        } selectedAlgorithm = APF;
+        } algorithm = APF;
+        
+        // === MULTI-AGENT PARAMETERS ===
+        bool enableMAPF = false;               // Enable Multi-Agent Path Finding coordination
         
         // === ALGORITHM-SPECIFIC PARAMETERS ===
         // Add your own parameters here as needed for your specific algorithm
@@ -237,6 +240,12 @@ namespace PathPlanning {
         // int samplingAttempts = 100;        // For RRT sampling
         // float connectionRadius = 2.0f;     // For PRM connections
     };
+    
+    /**
+     * Set the path planning strategy/algorithm
+     * Call this to switch between different algorithms at runtime
+     */
+    void setStrategy(Config::Algorithm algorithm);
     
     /**
      * Set configuration parameters for the path planning module

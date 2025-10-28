@@ -49,6 +49,9 @@ include_directories(
 set(SOURCES
     single_agent_pp.cpp
     path_planning_module.cpp
+    strategies/rrt_strategy.cpp
+    strategies/astar_strategy.cpp
+    strategies/apf_strategy.cpp
     # Add other source files here as needed
 )
 
