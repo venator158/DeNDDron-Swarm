@@ -86,13 +86,34 @@ int main() {
     env3.goalPosition = glm::vec3(5.0f, 10.0f, 0.0f);
     environments.push_back(env3);
     
-    // Plan paths for all agents
+    // Test with APF MAPF strategy for true multi-agent coordination
+    std::cout << "\n--- Testing APF MAPF (True Multi-Agent Coordination) ---" << std::endl;
+    std::cout << "This strategy considers ALL agents simultaneously during planning!" << std::endl;
+    PathPlanning::setStrategy(PathPlanning::Config::Algorithm::APF_MAPF);
+    auto mapfPaths = PathPlanning::planMultiplePaths(environments);
+    
+    std::cout << "APF MAPF planned paths for " << mapfPaths.size() << " agents:" << std::endl;
+    for (size_t i = 0; i < mapfPaths.size(); ++i) {
+        std::cout << "  Agent " << i << ": " << mapfPaths[i].size() << " waypoints" << std::endl;
+        if (mapfPaths[i].size() > 1) {
+            std::cout << "    Start: (" << mapfPaths[i][0].x << ", " << mapfPaths[i][0].y << ")" << std::endl;
+            std::cout << "    End: (" << mapfPaths[i].back().x << ", " << mapfPaths[i].back().y << ")" << std::endl;
+        }
+    }
+    
+    // Compare with sequential APF planning
+    std::cout << "\n--- Testing Regular APF (Sequential Planning) ---" << std::endl;
+    std::cout << "This strategy plans each agent independently, one after another." << std::endl;
     PathPlanning::setStrategy(PathPlanning::Config::Algorithm::APF);
     auto multiPaths = PathPlanning::planMultiplePaths(environments);
     
-    std::cout << "Planned paths for " << multiPaths.size() << " agents:" << std::endl;
+    std::cout << "Regular APF planned paths for " << multiPaths.size() << " agents:" << std::endl;
     for (size_t i = 0; i < multiPaths.size(); ++i) {
         std::cout << "  Agent " << i << ": " << multiPaths[i].size() << " waypoints" << std::endl;
+        if (multiPaths[i].size() > 1) {
+            std::cout << "    Start: (" << multiPaths[i][0].x << ", " << multiPaths[i][0].y << ")" << std::endl;
+            std::cout << "    End: (" << multiPaths[i].back().x << ", " << multiPaths[i].back().y << ")" << std::endl;
+        }
     }
     
     std::cout << "\n=== Testing Path Validation ===" << std::endl;

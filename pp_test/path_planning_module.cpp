@@ -3,6 +3,7 @@
 #include "strategies/rrt_strategy.hpp"
 #include "strategies/astar_strategy.hpp"
 #include "strategies/apf_strategy.hpp"
+#include "strategies/apf_mapf_strategy.hpp"
 #include <iostream>
 #include <memory>
 
@@ -16,10 +17,10 @@ namespace PathPlanning {
     
     void initialize() {
         std::cout << "Path Planning Module: Initialized" << std::endl;
-        std::cout << "Available algorithms: APF, A*, RRT, Custom" << std::endl;
+        std::cout << "Available algorithms: APF, APF-MAPF, A*, RRT, Custom" << std::endl;
         
-        // Initialize with default strategy (APF)
-        currentStrategy = std::make_unique<APFStrategy>();
+        // Initialize with default strategy (APF MAPF)
+        currentStrategy = std::make_unique<APFMAPFStrategy>();
         currentStrategy->initialize();
     }
     
@@ -45,6 +46,9 @@ namespace PathPlanning {
                 break;
             case Config::Algorithm::APF:
                 currentStrategy = std::make_unique<APFStrategy>();
+                break;
+            case Config::Algorithm::APF_MAPF:
+                currentStrategy = std::make_unique<APFMAPFStrategy>();
                 break;
             default:
                 currentStrategy = std::make_unique<APFStrategy>();
@@ -88,14 +92,18 @@ namespace PathPlanning {
         if (currentConfig.enableMAPF && environments.size() > 1 && currentStrategy) {
             // Multi-agent coordination using the selected strategy
             std::cout << "MAPF: Using " << currentStrategy->getAlgorithmName() << " with coordination" << std::endl;
+            std::cout << "MAPF: Strategy supports multi-agent: " << (currentStrategy->supportsMultiAgent() ? "YES" : "NO") << std::endl;
             
             if (currentStrategy->supportsMultiAgent()) {
                 // Use strategy's native multi-agent support
+                std::cout << "MAPF: Using NATIVE multi-agent planning (all agents planned simultaneously)" << std::endl;
                 paths = currentStrategy->planMultipleAgentPaths(environments);
             } else {
                 // Plan paths with coordination using single-agent strategy
                 // Simple sequential planning with obstacle avoidance
+                std::cout << "MAPF: Using SEQUENTIAL planning (agents planned one after another)" << std::endl;
                 for (size_t i = 0; i < environments.size(); ++i) {
+                    std::cout << "MAPF: Planning for agent " << i << " (considering " << paths.size() << " previous agents as obstacles)" << std::endl;
                     Environment modifiedEnv = environments[i];
                     
                     // Add previously planned agent paths as obstacles
@@ -116,6 +124,7 @@ namespace PathPlanning {
             }
         } else {
             // Independent planning using current strategy
+            std::cout << "MAPF: MAPF disabled or single agent - using independent planning" << std::endl;
             for (const auto& env : environments) {
                 paths.push_back(planPath(env));
             }

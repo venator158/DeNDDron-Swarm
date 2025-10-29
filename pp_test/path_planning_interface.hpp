@@ -227,6 +227,7 @@ namespace PathPlanning {
         // === ALGORITHM SELECTION ===
         enum Algorithm {
             APF,        // Artificial Potential Fields
+            APF_MAPF,   // APF Multi-Agent Path Finding
             AStar,      // A* algorithm  
             RRT,        // Rapidly-exploring Random Tree
             DIJKSTRA,   // Dijkstra's algorithm
@@ -236,7 +237,7 @@ namespace PathPlanning {
         } algorithm = APF;
         
         // === MULTI-AGENT PARAMETERS ===
-        bool enableMAPF = false;               // Enable Multi-Agent Path Finding coordination
+        bool enableMAPF = true;               // Enable Multi-Agent Path Finding coordination
         
         // === ALGORITHM-SPECIFIC PARAMETERS ===
         // Add your own parameters here as needed for your specific algorithm
