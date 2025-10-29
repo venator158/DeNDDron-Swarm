@@ -1,26 +1,28 @@
-# 3D Agent Navigation Simulation - Linux Port
+# 3D Path Planning Simulation Suite - Linux Port
 
-This is a 3D OpenGL-based agent navigation simulation, ported to Linux. The simulation demonstrates direct agent movement in 3D space towards goals while avoiding obstacles.
+This is a comprehensive 3D OpenGL-based path planning simulation suite, featuring both single-agent and multi-agent scenarios. The system demonstrates various path planning algorithms using the Strategy Pattern.
 
 ## Features
 
+### Single-Agent Simulation (`path_planning`)
 - 3D visualization using OpenGL and FreeGLUT
-- Single agent (green sphere) direct navigation to goal
-- Random 3D obstacle generation (red cubes)
-- Real-time goal visualization (red sphere)
+- Multiple algorithms: APF, A*, RRT
+- Single agent navigation with obstacle avoidance
+- Real-time path visualization
 - Interactive camera controls
-- 3D environment with grid boundariesing Simulation - Linux Port
 
-This is a 3D OpenGL-based path planning simulation for a single agent, ported to Linux. The simulation demonstrates the Strategy Pattern for path planning algorithms.
+### Multi-Agent Simulation (`multi_agent_planning`)
+- **Multi-Agent Path Finding (MAPF)** with simultaneous planning
+- **APF MAPF Strategy** - True multi-agent coordination with agent-to-agent repulsion
+- **Regular APF Strategy** - Sequential planning for comparison
+- Multiple colored agents with individual goals
+- Real-time algorithm switching
+- Visual comparison of coordination approaches
 
-## Features
-
-- 3D visualization using OpenGL and FreeGLUT
-- Single agent (green sphere) navigation
-- Random obstacle generation (red cubes)
-- Real-time path visualization (yellow lines)
-- Goal visualization (red sphere)
-- Interactive controls
+### Test Suite (`path_planning_test`)
+- Comprehensive algorithm testing
+- Performance comparison between strategies
+- Multi-agent coordination validation
 
 ## Quick Start
 
@@ -36,13 +38,26 @@ This is a 3D OpenGL-based path planning simulation for a single agent, ported to
    ./build.sh
    ```
 
-3. **Run the simulation:**
+3. **Run the simulations:**
    ```bash
    cd build
-   ./path_planning
+   ./path_planning          # Single-agent simulation
+   ./multi_agent_planning   # Multi-agent simulation (recommended!)
+   ./path_planning_test     # Test suite
    ```
 
-## Controls
+## Multi-Agent Simulation Controls
+
+- **P** - Plan paths for all agents
+- **S** - Start agent movement
+- **T** - Stop agent movement  
+- **A** - Switch between APF MAPF and Regular APF algorithms
+- **R** - Reset scenario with new random setup
+- **ESC** - Exit the simulation
+- **+/-** - Zoom in/out
+- **Mouse drag** - Rotate camera
+
+## Single-Agent Simulation Controls
 
 - **ESC** - Exit the simulation
 - **R** - Reset the simulation (generates new random obstacles and agent/goal positions)

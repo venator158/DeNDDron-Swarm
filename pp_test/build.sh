@@ -133,10 +133,15 @@ fi
 
 if [ $? -eq 0 ]; then
     echo "Build successful!"
-    echo "Executable: build/path_planning"
+    echo "Executables:"
+    echo "  build/path_planning (Single-agent simulation)"
+    echo "  build/multi_agent_planning (Multi-agent simulation)"
+    echo "  build/path_planning_test (Test suite)"
     echo
-    echo "To run the simulation:"
-    echo "  cd build && ./path_planning"
+    echo "To run the simulations:"
+    echo "  cd build && ./path_planning          # Single-agent APF/A*/RRT"
+    echo "  cd build && ./multi_agent_planning   # Multi-agent APF MAPF vs APF"
+    echo "  cd build && ./path_planning_test     # Test algorithms"
 else
     echo "Build failed!"
     exit 1
