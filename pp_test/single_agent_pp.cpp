@@ -17,16 +17,15 @@ class Entity;
 class Agent;
 class Obstacle;
 class Camera;
-class PathPlanningStrategy;
-
-// Strategy Pattern: Abstract strategy for path planning
+// This class is not used by the new module, but we leave it
+// here so the rest of the file doesn't break.
 class PathPlanningStrategy {
 public:
     virtual ~PathPlanningStrategy() = default;
     virtual std::vector<glm::vec3> planPath(const glm::vec3& start, const glm::vec3& goal, const std::vector<Obstacle*>& obstacles) = 0;
 };
 
-// Concrete strategies would be implemented in separate files later
+// --- *** CLASS DEFINITIONS ARE BACK *** ---
 
 // Entity class - base for all objects in the world
 class Entity {
@@ -88,7 +87,10 @@ class Agent : public Entity {
 private:
     glm::vec3 goal;
     std::vector<glm::vec3> path;
-    std::unique_ptr<PathPlanningStrategy> pathStrategy;
+    // This 'pathStrategy' is from the OLD v1 design.
+    // The new module (path_planning_module.cpp) ignores this.
+    // We leave it here so the file compiles.
+    std::unique_ptr<PathPlanningStrategy> pathStrategy; 
     float speed;
     bool isMoving;
     
@@ -99,6 +101,7 @@ public:
           const glm::vec3& clr = glm::vec3(0.2f, 0.7f, 0.2f))
         : Entity(pos, glm::vec3(0.5f), clr), goal(gl), speed(spd), isMoving(false) {}
     
+    // This function is no longer used by the new module
     void setPathPlanningStrategy(std::unique_ptr<PathPlanningStrategy> strategy) {
         pathStrategy = std::move(strategy);
     }
@@ -263,7 +266,7 @@ public:
     const glm::vec3& getTarget() const { return target; }
 };
 
-// World class - container for all entities and simulation logic
+// World class
 class World {
 private:
     std::vector<std::unique_ptr<Entity>> entities;
@@ -474,7 +477,7 @@ public:
     const std::vector<Obstacle*>& getObstacles() const { return obstacles; }
     Camera& getCamera() { return camera; }
     
-    // Interface for path planning module
+    // This function calls the new 'path_planning_module.cpp'
     void triggerPathPlanning() {
         if (agent) {
             // Create structured environment data
@@ -482,26 +485,39 @@ public:
             
             // Set world bounds
             float maxHeight = worldSize / 2.0f;
-            env.worldBounds = PathPlanning::BoundingBox(
-                glm::vec3(0.0f, maxHeight/2.0f, 0.0f),  // Center of world
-                glm::vec3(worldSize, maxHeight, worldSize)  // Full world size
-            );
-            
+            // Note: The BoundingBox constructor might be different.
+            // We assume it takes (center, size)
+            env.worldBounds.center = glm::vec3(0.0f, maxHeight/2.0f, 0.0f);
+            env.worldBounds.size = glm::vec3(worldSize, maxHeight, worldSize);
+            env.worldBounds.min = env.worldBounds.center - env.worldBounds.size * 0.5f;
+            env.worldBounds.max = env.worldBounds.center + env.worldBounds.size * 0.5f;
+
             // Set agent info
             env.agentStart = agent->getPosition();
-            env.goalPosition = agent->getGoal();
+            // --- *** THIS IS THE FIX *** ---
+            env.goalPosition = agent->getGoal(); // Changed back from agentGoal
+            // --- *** END OF FIX *** ---
             env.agentRadius = 0.5f;
             env.goalTolerance = 1.0f;
-            env.stepSize = 0.8f;
+            
+            // These might be set via Config now, but we can provide defaults
+            PathPlanning::Config config = PathPlanning::getConfig();
+            config.stepSize = 0.8f;
+            PathPlanning::setConfig(config);
+
             
             // Convert obstacles to bounding boxes
             env.obstacles.reserve(obstacles.size());
             for (const auto& obstacle : obstacles) {
-                PathPlanning::BoundingBox box(obstacle->getPosition(), obstacle->getScale());
+                PathPlanning::BoundingBox box;
+                box.center = obstacle->getPosition();
+                box.size = obstacle->getScale();
+                box.min = box.center - box.size * 0.5f;
+                box.max = box.center + box.size * 0.5f;
                 env.obstacles.push_back(box);
             }
             
-            // Use the structured interface
+            // Use the structured interface from the new module
             std::vector<glm::vec3> path = PathPlanning::planPath(env);
             agent->setPath(path);
         }
@@ -548,14 +564,31 @@ int main(int argc, char** argv) {
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(windowWidth, windowHeight);
-    glutCreateWindow("3D Agent Navigation Simulation");
+    glutCreateWindow("3D Agent Navigation Simulation (v2 Module)"); // Renamed window
     
     // Initialize OpenGL
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glEnable(GL_DEPTH_TEST);
     
-    // Initialize path planning module
+    // Initialize glew for modern OpenGL features (if needed, though not strictly by this file)
+    GLenum glewError = glewInit();
+    if (glewError != GLEW_OK) {
+        std::cerr << "Error initializing GLEW: " << glewGetErrorString(glewError) << std::endl;
+    }
+
+    // Initialize path planning module (from path_planning_module.cpp)
     PathPlanning::initialize();
+    
+    // Set default algorithm to RRT*
+    // We assume path_planning_interface.hpp gives us access to
+    // Config, setConfig, and the Algorithm enum.
+    PathPlanning::Config defaultConfig;
+    defaultConfig.algorithm = PathPlanning::Config::Algorithm::RRT;
+    // Set some defaults that might be needed
+    defaultConfig.maxIterations = 5000;
+    defaultConfig.stepSize = 1.0f;
+    defaultConfig.goalTolerance = 1.5f;
+    PathPlanning::setConfig(defaultConfig);
     
     // Setup world
     world = new World(20.0f);
@@ -593,7 +626,14 @@ void reshape(int width, int height) {
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     gluPerspective(45.0f, static_cast<float>(width)/static_cast<float>(height), 0.1f, 100.0f);
+    glMatrixMode(GL_MODELVIEW); // Switch back to modelview
 }
+
+// --- *** MODIFICATION IS HERE *** ---
+
+// This static variable will remember our choice
+// We default to RRT (which is our RRT* now)
+static PathPlanning::Config::Algorithm currentAlgorithm = PathPlanning::Config::Algorithm::RRT;
 
 void keyboard(unsigned char key, int x, int y) {
     switch (key) {
@@ -632,7 +672,7 @@ void keyboard(unsigned char key, int x, int y) {
             break;
         case 'p':
         case 'P':
-            // Trigger path planning (placeholder for your module)
+            // Trigger path planning
             if (world) {
                 world->triggerPathPlanning();
             }
@@ -651,6 +691,45 @@ void keyboard(unsigned char key, int x, int y) {
                 world->stopAgentMovement();
             }
             break;
+        
+        // --- NEW CASE TO CHANGE ALGORITHM ---
+        case 'a':
+        case 'A':
+            { // Use braces to allow new variable declarations
+                // Get the current configuration
+                PathPlanning::Config config = PathPlanning::getConfig();
+                
+                // Cycle to the next algorithm in the list
+                switch (currentAlgorithm) {
+                    case PathPlanning::Config::Algorithm::RRT:
+                        currentAlgorithm = PathPlanning::Config::Algorithm::AStar;
+                        break;
+                    case PathPlanning::Config::Algorithm::AStar:
+                        currentAlgorithm = PathPlanning::Config::Algorithm::APF;
+                        break;
+                    case PathPlanning::Config::Algorithm::APF:
+                        currentAlgorithm = PathPlanning::Config::Algorithm::APF_MAPF;
+                        break;
+                    case PathPlanning::Config::Algorithm::APF_MAPF:
+                    default:
+                        currentAlgorithm = PathPlanning::Config::Algorithm::RRT;
+                        break;
+                }
+                
+                // Set the new algorithm in the config
+                config.algorithm = currentAlgorithm;
+                
+                // This call tells path_planning_module.cpp to swap strategies
+                PathPlanning::setConfig(config); 
+                
+                // Clear the agent's old path
+                if (world && world->getAgent()) {
+                    world->getAgent()->setPath({}); 
+                }
+            }
+            break;
+        // --- END OF NEW CASE ---
+            
         default:
             break;
     }
@@ -710,3 +789,4 @@ void cleanup() {
     // Shutdown path planning module
     PathPlanning::shutdown();
 }
+
