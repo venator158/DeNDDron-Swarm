@@ -68,6 +68,7 @@ This is a comprehensive 3D OpenGL-based path planning simulation suite, featurin
 - **S** - Start agent movement (agent follows planned path)
 - **T** - Stop agent movement (agent becomes stationary)
 - **Left Mouse + Drag** - Rotate camera around the scene
+- **A** - Cycle through the algorithms.
 
 ## Visual Indicators
 - **Green Sphere** - Agent (bright green when moving, normal green when stationary)
