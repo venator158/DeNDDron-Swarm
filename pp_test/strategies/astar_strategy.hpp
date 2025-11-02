@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../path_planning_strategy.hpp"
+#include <string> // Added this include
 
 namespace PathPlanning {
     
@@ -12,8 +13,12 @@ namespace PathPlanning {
     class AStarStrategy : public PathPlanningStrategy {
     private:
         // A* specific parameters
-        float gridResolution = 0.5f;
-        int maxIterations = 10000;
+        // Renamed from 'gridResolution' to 'discretizationStep' 
+        // to match the final .cpp implementation logic
+        float discretizationStep = 0.5f; 
+        
+        // This was not necessary for A* but kept it for consistency with Config handling
+        int maxIterations = 10000; 
         
     public:
         std::vector<glm::vec3> planPath(const Environment& environment) override;
