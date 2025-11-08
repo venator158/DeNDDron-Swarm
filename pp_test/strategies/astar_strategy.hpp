@@ -13,9 +13,7 @@ namespace PathPlanning {
     class AStarStrategy : public PathPlanningStrategy {
     private:
         // A* specific parameters
-        // Renamed from 'gridResolution' to 'discretizationStep' 
-        // to match the final .cpp implementation logic
-        float discretizationStep = 0.5f; 
+        float gridResolution = 0.5f;  // Grid discretization step for A* pathfinding
         
         // This was not necessary for A* but kept it for consistency with Config handling
         int maxIterations = 10000; 
