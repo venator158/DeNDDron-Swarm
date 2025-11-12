@@ -707,10 +707,6 @@ void keyboard(unsigned char key, int x, int y) {
                     case PathPlanning::Config::Algorithm::AStar:
                         currentAlgorithm = PathPlanning::Config::Algorithm::APF;
                         break;
-                    case PathPlanning::Config::Algorithm::APF:
-                        currentAlgorithm = PathPlanning::Config::Algorithm::APF_MAPF;
-                        break;
-                    case PathPlanning::Config::Algorithm::APF_MAPF:
                     default:
                         currentAlgorithm = PathPlanning::Config::Algorithm::RRT;
                         break;
