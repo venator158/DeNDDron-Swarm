@@ -228,6 +228,7 @@ namespace PathPlanning {
         enum Algorithm {
             APF,        // Artificial Potential Fields
             APF_MAPF,   // APF Multi-Agent Path Finding
+            ORCA,
             AStar,      // A* algorithm  
             RRT,        // Rapidly-exploring Random Tree
             DIJKSTRA,   // Dijkstra's algorithm

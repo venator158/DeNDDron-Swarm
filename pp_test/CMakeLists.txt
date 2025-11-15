@@ -53,6 +53,7 @@ set(SINGLE_AGENT_SOURCES
     strategies/astar_strategy.cpp
     strategies/apf_strategy.cpp
     strategies/apf_mapf_strategy.cpp
+    strategies/orca_mapf_strategy.cpp
 )
 
 # Source files for multi agent simulation
@@ -63,6 +64,8 @@ set(MULTI_AGENT_SOURCES
     strategies/astar_strategy.cpp
     strategies/apf_strategy.cpp
     strategies/apf_mapf_strategy.cpp
+    strategies/orca_mapf_strategy.cpp
+
 )
 
 # Create a library for the path planning system
@@ -72,6 +75,7 @@ add_library(path_planning_lib
     strategies/astar_strategy.cpp
     strategies/apf_strategy.cpp
     strategies/apf_mapf_strategy.cpp
+    strategies/orca_mapf_strategy.cpp
 )
 
 # Define the single agent executable

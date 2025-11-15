@@ -4,6 +4,7 @@
 #include "strategies/astar_strategy.hpp"
 #include "strategies/apf_strategy.hpp"
 #include "strategies/apf_mapf_strategy.hpp"
+#include "strategies/orca_mapf_strategy.hpp"  
 #include <iostream>
 #include <memory>
 
@@ -49,6 +50,9 @@ namespace PathPlanning {
                 break;
             case Config::Algorithm::APF_MAPF:
                 currentStrategy = std::make_unique<APFMAPFStrategy>();
+                break;
+            case Config::Algorithm::ORCA:
+                currentStrategy = std::make_unique<ORCAMAPFStrategy>();
                 break;
             default:
                 currentStrategy = std::make_unique<APFStrategy>();
