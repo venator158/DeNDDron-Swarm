@@ -470,26 +470,39 @@ public:
         std::cout << "All agents stopped" << std::endl;
     }
     
-    void switchStrategy() {
-        // Toggle between APF MAPF and regular APF
-        static bool useAPFMAPF = true;
-        
-        PathPlanning::Config config = PathPlanning::getConfig();
-        if (useAPFMAPF) {
-            config.algorithm = PathPlanning::Config::Algorithm::APF;
-            std::cout << "Switched to Regular APF (Sequential Planning)" << std::endl;
-        } else {
+void switchStrategy() {
+    // Toggle between algorithms
+    static int algorithmIndex = 0;
+    
+    PathPlanning::Config config = PathPlanning::getConfig();
+    
+    const char* algorithmNames[] = {
+        "APF MAPF (Multi-Agent Potential Fields)",
+        "ORCA (Optimal Reciprocal Collision Avoidance)",
+        "APF (Sequential Planning)"
+    };
+    
+    algorithmIndex = (algorithmIndex + 1) % 3;
+    
+    switch (algorithmIndex) {
+        case 0:
             config.algorithm = PathPlanning::Config::Algorithm::APF_MAPF;
-            std::cout << "Switched to APF MAPF (Multi-Agent Coordination)" << std::endl;
-        }
-        PathPlanning::setConfig(config);
-        useAPFMAPF = !useAPFMAPF;
-        
-        // Reset planning state
-        pathsPlanned = false;
-        stopAgentMovement();
-        std::cout << "Press 'P' to plan paths with new strategy" << std::endl;
+            break;
+        case 1:
+            config.algorithm = PathPlanning::Config::Algorithm::ORCA;
+            break;
+        case 2:
+            config.algorithm = PathPlanning::Config::Algorithm::APF;
+            break;
     }
+    
+    std::cout << "Switched to: " << algorithmNames[algorithmIndex] << std::endl;
+    PathPlanning::setConfig(config);
+    
+    pathsPlanned = false;
+    stopAgentMovement();
+    std::cout << "Press 'P' to plan paths with new strategy" << std::endl;
+}
     
     void toggleForceMode() {
         simState.useRealTimeForces = !simState.useRealTimeForces;
@@ -702,7 +715,7 @@ int main(int argc, char** argv) {
     std::cout << "  P - Plan paths for all agents" << std::endl;
     std::cout << "  S - Start agent movement" << std::endl;
     std::cout << "  T - Stop agent movement" << std::endl;
-    std::cout << "  A - Switch between APF MAPF and Regular APF" << std::endl;
+    std::cout << "  A - Switch between APF MAPF and Regular APF and ORCA " << std::endl;
     std::cout << "  F - Toggle between Real-Time Forces and Waypoint Following" << std::endl;
     std::cout << "  R - Reset scenario" << std::endl;
     std::cout << "  +/- - Zoom in/out" << std::endl;
