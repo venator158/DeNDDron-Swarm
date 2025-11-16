@@ -140,7 +140,7 @@ if [ $? -eq 0 ]; then
     echo
     echo "To run the simulations:"
     echo "  cd build && ./path_planning          # Single-agent APF/A*/RRT"
-    echo "  cd build && ./multi_agent_planning   # Multi-agent APF MAPF vs APF"
+    echo "  cd build && ./multi_agent_planning   # Multi-agent APF MAPF vs APF and ORCA"
     echo "  cd build && ./path_planning_test     # Test algorithms"
 else
     echo "Build failed!"
