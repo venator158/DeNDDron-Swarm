@@ -65,6 +65,7 @@ set(MULTI_AGENT_SOURCES
     multi_agent_pp.cpp
     path_planning_module.cpp
     config_loader.cpp
+    mapf_metrics.cpp
     strategies/rrt_strategy.cpp
     strategies/astar_strategy.cpp
     strategies/apf_strategy.cpp

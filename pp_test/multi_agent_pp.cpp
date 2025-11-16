@@ -3,6 +3,9 @@
 #include <memory>
 #include <cstdlib>
 #include <ctime>
+#include <chrono>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <GL/glew.h>
 #include <GL/glut.h>
 #include <GL/glu.h>
@@ -12,6 +15,7 @@
 #include "path_planning_interface.hpp"
 #include "strategies/apf_mapf_strategy.hpp"
 #include "config_loader.hpp"
+#include "mapf_metrics.hpp"
 
 // Forward declarations
 class MultiAgentWorld;
@@ -59,6 +63,7 @@ struct SimulationState {
 class Agent : public Entity {
 private:
     glm::vec3 goalPosition;
+    glm::vec3 startPosition;  // Track starting position for metrics
     std::vector<glm::vec3> path;
     size_t currentPathIndex;
     bool isMoving;
@@ -66,14 +71,18 @@ private:
     float speed;
     int agentId;
     SimulationState* simState;
+    float totalDistanceTraveled;
+    float movementStartTime;
+    float completionTime;
     
 public:
     Agent(int id, const glm::vec3& pos = glm::vec3(0.0f),
           const glm::vec3& goal = glm::vec3(0.0f),
           const glm::vec3& clr = glm::vec3(0.0f, 1.0f, 0.0f))
         : Entity(pos, glm::vec3(0.5f), clr), goalPosition(goal), 
-          currentPathIndex(0), isMoving(false), hasReachedGoal(false), 
-          speed(2.0f), agentId(id), simState(nullptr) {}
+          startPosition(pos), currentPathIndex(0), isMoving(false), 
+          hasReachedGoal(false), speed(2.0f), agentId(id), simState(nullptr),
+          totalDistanceTraveled(0.0f), movementStartTime(0.0f), completionTime(0.0f) {}
     
     void setSimulationState(SimulationState* state) { simState = state; }
     
@@ -81,22 +90,33 @@ public:
         path = newPath;
         currentPathIndex = 0;
         hasReachedGoal = false;
+        totalDistanceTraveled = 0.0f;
+        completionTime = 0.0f;
     }
     
-    void startMovement() { isMoving = true; }
+    void startMovement() { 
+        isMoving = true;
+        movementStartTime = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+    }
     void stopMovement() { isMoving = false; }
     bool getIsMoving() const { return isMoving; }
     bool getHasReachedGoal() const { return hasReachedGoal; }
     const glm::vec3& getGoalPosition() const { return goalPosition; }
+    const glm::vec3& getStartPosition() const { return startPosition; }
     const std::vector<glm::vec3>& getPath() const { return path; }
     int getId() const { return agentId; }
+    float getCompletionTime() const { return completionTime; }
+    float getTotalDistanceTraveled() const { return totalDistanceTraveled; }
     
     void update(float deltaTime) override {
         if (!isMoving || hasReachedGoal) return;
         
+        glm::vec3 previousPosition = position;
+        
         // Check if we've reached the goal
         float distanceToGoal = glm::length(goalPosition - position);
         if (distanceToGoal < 0.2f) {
+            completionTime = (glutGet(GLUT_ELAPSED_TIME) / 1000.0f) - movementStartTime;
             hasReachedGoal = true;
             isMoving = false;
             std::cout << "Agent " << agentId << " reached goal!" << std::endl;
@@ -143,6 +163,9 @@ public:
             direction = glm::normalize(direction);
             position += direction * speed * deltaTime;
         }
+        
+        // Track distance traveled
+        totalDistanceTraveled += glm::length(position - previousPosition);
     }
     
     void render() override {
@@ -190,6 +213,8 @@ public:
     Obstacle(const glm::vec3& pos, const glm::vec3& size, 
              const glm::vec3& clr = glm::vec3(0.6f, 0.3f, 0.1f))
         : Entity(pos, size, clr) {}
+    
+    const glm::vec3& getSize() const { return scale; }
     
     void render() override {
         glPushMatrix();
@@ -254,10 +279,14 @@ private:
     bool agentsMoving;
     SimulationState simState;
     ConfigLoader::SimulationConfig loadedConfig;
+    MAPFMetrics::MetricsTracker metricsTracker;
+    std::string currentAlgorithm;
+    bool metricsFinalized;
     
 public:
     MultiAgentWorld(const ConfigLoader::SimulationConfig& config) 
-        : pathsPlanned(false), agentsMoving(false), loadedConfig(config) {
+        : pathsPlanned(false), agentsMoving(false), loadedConfig(config),
+          currentAlgorithm("APF-MAPF"), metricsFinalized(false) {
         // Calculate world size from bounds
         glm::vec3 worldDimensions = config.world.boundsMax - config.world.boundsMin;
         worldSize = std::max(std::max(worldDimensions.x, worldDimensions.y), worldDimensions.z);
@@ -368,6 +397,10 @@ public:
         
         std::cout << "\n=== MULTI-AGENT PATH PLANNING ===" << std::endl;
         
+        // Initialize metrics tracker
+        metricsTracker.initialize(currentAlgorithm, agents.size(), obstacles.size());
+        metricsFinalized = false;
+        
         // Create environments for each agent
         std::vector<PathPlanning::Environment> environments;
         
@@ -399,8 +432,14 @@ public:
         config.influenceRadius = 3.0f;
         PathPlanning::setConfig(config);
         
+        // Start planning timer
+        metricsTracker.startPlanningTimer();
+        
         // Plan paths for all agents
         auto paths = PathPlanning::planMultiplePaths(environments);
+        
+        // Stop planning timer
+        metricsTracker.stopPlanningTimer();
         
         // Assign paths to agents
         for (size_t i = 0; i < std::min(paths.size(), agents.size()); ++i) {
@@ -441,9 +480,9 @@ void switchStrategy() {
     PathPlanning::Config config = PathPlanning::getConfig();
     
     const char* algorithmNames[] = {
-        "APF MAPF (Multi-Agent Potential Fields)",
-        "ORCA (Optimal Reciprocal Collision Avoidance)",
-        "APF (Sequential Planning)"
+        "APF-MAPF",
+        "ORCA",
+        "APF"
     };
     
     algorithmIndex = (algorithmIndex + 1) % 3;
@@ -451,19 +490,23 @@ void switchStrategy() {
     switch (algorithmIndex) {
         case 0:
             config.algorithm = PathPlanning::Config::Algorithm::APF_MAPF;
+            currentAlgorithm = "APF-MAPF";
             break;
         case 1:
             config.algorithm = PathPlanning::Config::Algorithm::ORCA;
+            currentAlgorithm = "ORCA";
             break;
         case 2:
             config.algorithm = PathPlanning::Config::Algorithm::APF;
+            currentAlgorithm = "APF";
             break;
     }
     
-    std::cout << "Switched to: " << algorithmNames[algorithmIndex] << std::endl;
+    std::cout << "Switched to: " << currentAlgorithm << std::endl;
     PathPlanning::setConfig(config);
     
     pathsPlanned = false;
+    metricsFinalized = false;
     stopAgentMovement();
     std::cout << "Press 'P' to plan paths with new strategy" << std::endl;
 }
@@ -494,8 +537,69 @@ void switchStrategy() {
             entity->update(deltaTime);
         }
         
+        // Detect collisions during movement
+        if (agentsMoving && !metricsFinalized) {
+            // Gather agent positions and radii
+            std::vector<glm::vec3> agentPositions;
+            std::vector<float> agentRadii;
+            
+            for (const auto& agent : agents) {
+                agentPositions.push_back(agent->getPosition());
+                agentRadii.push_back(0.5f);  // Agent radius
+            }
+            
+            // Detect agent-agent collisions
+            std::vector<std::pair<int, int>> collisionPairs;
+            int collisions = MAPFMetrics::MetricsCalculator::detectAgentCollisions(
+                agentPositions, agentRadii, 1.0f, &collisionPairs
+            );
+            
+            // Record collisions
+            for (const auto& pair : collisionPairs) {
+                metricsTracker.recordCollision(pair.first, true);
+                metricsTracker.recordCollision(pair.second, true);
+            }
+            
+            // Detect near misses (with larger safety margin)
+            std::vector<std::pair<int, int>> nearMissPairs;
+            int nearMisses = MAPFMetrics::MetricsCalculator::detectAgentCollisions(
+                agentPositions, agentRadii, 1.5f, &nearMissPairs
+            );
+            
+            // Record near misses (exclude actual collisions)
+            for (const auto& pair : nearMissPairs) {
+                bool isCollision = false;
+                for (const auto& cPair : collisionPairs) {
+                    if ((pair.first == cPair.first && pair.second == cPair.second) ||
+                        (pair.first == cPair.second && pair.second == cPair.first)) {
+                        isCollision = true;
+                        break;
+                    }
+                }
+                if (!isCollision) {
+                    metricsTracker.recordNearMiss(pair.first);
+                    metricsTracker.recordNearMiss(pair.second);
+                }
+            }
+            
+            // Check obstacle collisions
+            std::vector<glm::vec3> obstaclePositions;
+            std::vector<glm::vec3> obstacleSizes;
+            for (const auto& obs : obstacles) {
+                obstaclePositions.push_back(obs->getPosition());
+                obstacleSizes.push_back(obs->getSize());
+            }
+            
+            for (size_t i = 0; i < agents.size(); ++i) {
+                if (MAPFMetrics::MetricsCalculator::checkObstacleCollision(
+                    agentPositions[i], agentRadii[i], obstaclePositions, obstacleSizes)) {
+                    metricsTracker.recordCollision(i, false);
+                }
+            }
+        }
+        
         // Check if all agents reached their goals
-        if (agentsMoving) {
+        if (agentsMoving && !metricsFinalized) {
             bool allReached = true;
             for (const auto& agent : agents) {
                 if (!agent->getHasReachedGoal()) {
@@ -505,10 +609,74 @@ void switchStrategy() {
             }
             
             if (allReached) {
-                std::cout << "All agents reached their goals!" << std::endl;
+                std::cout << "\nAll agents reached their goals!" << std::endl;
                 agentsMoving = false;
+                
+                // Calculate and display metrics
+                finalizeMetrics();
             }
         }
+    }
+    
+    void finalizeMetrics() {
+        if (metricsFinalized) return;
+        
+        std::cout << "\n=== Calculating Metrics ===" << std::endl;
+        
+        // Calculate metrics for each agent
+        std::vector<MAPFMetrics::AgentMetrics> allAgentMetrics;
+        
+        for (const auto& agent : agents) {
+            MAPFMetrics::AgentMetrics agentMetrics = 
+                MAPFMetrics::MetricsCalculator::calculateAgentMetrics(
+                    agent->getId(),
+                    agent->getStartPosition(),
+                    agent->getGoalPosition(),
+                    agent->getPath(),
+                    agent->getCompletionTime(),
+                    agent->getHasReachedGoal()
+                );
+            
+            // Use actual distance traveled if greater than planned path length
+            // (actual simulation distance is more accurate than waypoint sum)
+            float actualDistance = agent->getTotalDistanceTraveled();
+            if (actualDistance > agentMetrics.pathLength) {
+                agentMetrics.pathLength = actualDistance;
+            }
+            
+            // Recalculate efficiency - ensure it cannot exceed 100%
+            if (agentMetrics.pathLength > 0.0f && agentMetrics.directDistance > 0.0f) {
+                agentMetrics.efficiency = std::min(100.0f, 
+                    (agentMetrics.directDistance / agentMetrics.pathLength) * 100.0f);
+            }
+            
+            allAgentMetrics.push_back(agentMetrics);
+        }
+        
+        // Set metrics and finalize
+        metricsTracker.setAgentMetrics(allAgentMetrics);
+        MAPFMetrics::SystemMetrics systemMetrics = metricsTracker.finalize();
+        
+        // Display metrics
+        systemMetrics.print();
+        
+        // Create metrics directory if it doesn't exist
+        mkdir("metrics", 0755);
+        
+        // Generate filename with timestamp and algorithm
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        std::tm* tm_now = std::localtime(&time_t_now);
+        char timestamp[64];
+        std::strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", tm_now);
+        
+        std::string filename = "metrics/" + currentAlgorithm + "_" + std::string(timestamp) + ".csv";
+        systemMetrics.saveToCSV(filename, false);
+        
+        // Also save to aggregate file
+        systemMetrics.saveToCSV("metrics/all_metrics.csv", true);
+        
+        metricsFinalized = true;
     }
     
     void render() {
