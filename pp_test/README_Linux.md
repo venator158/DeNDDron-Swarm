@@ -14,10 +14,14 @@ This is a comprehensive 3D OpenGL-based path planning simulation suite, featurin
 ### Multi-Agent Simulation (`multi_agent_planning`)
 - **Multi-Agent Path Finding (MAPF)** with simultaneous planning
 - **APF MAPF Strategy** - True multi-agent coordination with agent-to-agent repulsion
+- **ORCA Strategy** - Optimal Reciprocal Collision Avoidance
 - **Regular APF Strategy** - Sequential planning for comparison
+- **YAML Configuration** - Define agents, obstacles, and world bounds in `config.yaml`
 - Multiple colored agents with individual goals
 - Real-time algorithm switching
 - Visual comparison of coordination approaches
+- Support for any number of agents
+- Random obstacle generation or explicit positioning
 
 ### Test Suite (`path_planning_test`)
 - Comprehensive algorithm testing
@@ -30,7 +34,7 @@ This is a comprehensive 3D OpenGL-based path planning simulation suite, featurin
    ```bash
    # Ubuntu/Debian
    sudo apt update
-   sudo apt install build-essential cmake libgl1-mesa-dev libglu1-mesa-dev libglew-dev freeglut3-dev libglm-dev
+   sudo apt install build-essential cmake libgl1-mesa-dev libglu1-mesa-dev libglew-dev freeglut3-dev libglm-dev libyaml-cpp-dev
    ```
 
 2. **Build the project:**
@@ -51,11 +55,13 @@ This is a comprehensive 3D OpenGL-based path planning simulation suite, featurin
 - **P** - Plan paths for all agents
 - **S** - Start agent movement
 - **T** - Stop agent movement  
-- **A** - Switch between APF MAPF and Regular APF algorithms
-- **R** - Reset scenario with new random setup
+- **A** - Switch between APF MAPF, ORCA, and Regular APF algorithms
+- **F** - Toggle between Real-Time Forces and Waypoint Following
+- **R** - Reset scenario and reload configuration from config.yaml
+- **C** - Reset camera to default view (centered on world)
+- **+/- or Mouse Wheel** - Zoom in/out
+- **Left Mouse Drag** - Rotate camera around the scene
 - **ESC** - Exit the simulation
-- **+/-** - Zoom in/out
-- **Mouse drag** - Rotate camera
 
 ## Single-Agent Simulation Controls
 
@@ -125,3 +131,56 @@ The code is structured with a clean separation between simulation and path plann
 ## Troubleshooting
 
 If you encounter missing dependency errors, check `DEPENDENCIES.md` for detailed installation instructions for your Linux distribution.
+
+## Configuration (Multi-Agent Simulation)
+
+The multi-agent simulation uses a YAML configuration file (`config.yaml`) to define:
+- World boundaries
+- Obstacles (with optional random generation)
+- Agent start/goal positions and properties
+
+### Configuration File Format
+
+Create or edit `config.yaml` in the `pp_test` directory:
+
+```yaml
+world:
+  bounds:
+    min: [-20.0, -20.0, -5.0]  # World minimum corner [x, y, z]
+    max: [20.0, 20.0, 5.0]     # World maximum corner [x, y, z]
+
+obstacles:
+  count: 5                       # Total number of obstacles
+  default_size: [2.0, 2.0, 2.0]  # Default size [x, y, z]
+  positions:                     # Optional: specific obstacle placements
+    - center: [5.0, 5.0, 0.0]
+      size: [2.0, 2.0, 2.0]
+    - center: [8.0, 3.0, 0.0]
+      size: [2.0, 2.0, 2.0]
+  # If count > positions.length, remaining obstacles are randomly generated
+
+agents:
+  default_radius: 0.5            # Default agent radius
+  default_speed: 2.0             # Default agent speed
+  
+  agent_list:
+    - id: 0
+      start: [0.0, 0.0, 0.0]     # Starting position [x, y, z]
+      goal: [10.0, 10.0, 0.0]    # Goal position [x, y, z]
+      color: [0.0, 1.0, 0.0]     # RGB color (0.0-1.0)
+      radius: 0.5                # Optional: override default
+      speed: 2.0                 # Optional: override default
+      
+    - id: 1
+      start: [10.0, 0.0, 0.0]
+      goal: [0.0, 10.0, 0.0]
+      color: [0.0, 0.5, 1.0]
+    
+    # Add as many agents as needed!
+```
+
+### Notes:
+- You can define **any number of agents** in the configuration
+- Obstacles can be explicitly positioned or randomly generated
+- Press **'R'** to reload the configuration file during runtime
+- The simulation will fail to start if `config.yaml` is missing or invalid

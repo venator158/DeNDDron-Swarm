@@ -5,6 +5,7 @@
 2. GLEW - GL Extension Wrangler Library
 3. GLM - OpenGL Mathematics
 4. FreeGLUT - For glutSolidCube, glutSolidSphere functions
+5. yaml-cpp - YAML configuration file parser
 
 ---
 
@@ -31,6 +32,9 @@ sudo apt install freeglut3-dev
 # Install GLM (OpenGL Mathematics)
 sudo apt install libglm-dev
 
+# Install yaml-cpp (for configuration file support)
+sudo apt install libyaml-cpp-dev
+
 # Optional: Install Clang if you want to use it instead of GCC
 sudo apt install clang
 ```
@@ -44,6 +48,7 @@ sudo yum install mesa-libGL-devel mesa-libGLU-devel
 sudo yum install glew-devel
 sudo yum install freeglut-devel
 sudo yum install glm-devel
+sudo yum install yaml-cpp-devel
 
 # For Fedora
 sudo dnf install gcc-c++ cmake
@@ -51,6 +56,7 @@ sudo dnf install mesa-libGL-devel mesa-libGLU-devel
 sudo dnf install glew-devel
 sudo dnf install freeglut-devel
 sudo dnf install glm-devel
+sudo dnf install yaml-cpp-devel
 ```
 
 ### Arch Linux
@@ -61,6 +67,7 @@ sudo pacman -S mesa glu
 sudo pacman -S glew
 sudo pacman -S freeglut
 sudo pacman -S glm
+sudo pacman -S yaml-cpp
 ```
 
 ### Building the Project

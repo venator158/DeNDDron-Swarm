@@ -1,0 +1,49 @@
+# DeNDDron-Swarm Multi-Agent Path Planning Configuration
+# This file defines the world, obstacles, and agents for the simulation
+
+world:
+  bounds:
+    min: [-20.0, -20.0, -20.0]
+    max: [20.0, 20.0, 20.0]
+
+obstacles:
+  count: 20
+  default_size: [2.0, 2.0, 2.0]  # Default dimensions [x, y, z] if not specified per obstacle
+  positions:  # Optional - if fewer than 'count', remaining obstacles are generated randomly
+    - center: [5.0, 5.0, 0.0]
+      size: [2.0, 2.0, 2.0]
+    - center: [8.0, 3.0, 0.0]
+      size: [2.0, 2.0, 2.0]
+    - center: [-5.0, 8.0, 0.0]
+      size: [1.5, 1.5, 1.5]
+  # Since count=5 and only 3 are specified, 2 more will be generated randomly
+
+agents:
+  default_radius: 0.5
+  default_speed: 2.0
+  
+  agent_list:
+    - id: 0
+      start: [0.0, 0.0, 0.0]
+      goal: [10.0, 0.0, 0.0]
+      color: [0.0, 1.0, 0.0]  # Green (RGB values 0.0-1.0)
+      
+    - id: 1
+      start: [10.0, 0.0, 0.0]
+      goal: [5.0, 10.0, 0.0]
+      color: [0.0, 0.5, 1.0]  # Blue
+      
+    - id: 2
+      start: [5.0, 0.0, 0.0]
+      goal: [5.0, 10.0, 8.0]
+      color: [1.0, 0.0, 0.0]  # Red
+      
+    - id: 3
+      start: [-5.0, -5.0, 0.0]
+      goal: [8.0, 8.0, 0.0]
+      color: [1.0, 1.0, 0.0]  # Yellow
+      
+    - id: 4
+      start: [8.0, -5.0, 0.0]
+      goal: [-8.0, 8.0, 4.0]
+      color: [1.0, 0.0, 1.0]  # Magenta

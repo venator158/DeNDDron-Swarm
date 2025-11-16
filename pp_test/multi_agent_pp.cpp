@@ -11,6 +11,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include "path_planning_interface.hpp"
 #include "strategies/apf_mapf_strategy.hpp"
+#include "config_loader.hpp"
 
 // Forward declarations
 class MultiAgentWorld;
@@ -252,9 +253,15 @@ private:
     bool pathsPlanned;
     bool agentsMoving;
     SimulationState simState;
+    ConfigLoader::SimulationConfig loadedConfig;
     
 public:
-    MultiAgentWorld(float size = 20.0f) : worldSize(size), pathsPlanned(false), agentsMoving(false) {
+    MultiAgentWorld(const ConfigLoader::SimulationConfig& config) 
+        : pathsPlanned(false), agentsMoving(false), loadedConfig(config) {
+        // Calculate world size from bounds
+        glm::vec3 worldDimensions = config.world.boundsMax - config.world.boundsMin;
+        worldSize = std::max(std::max(worldDimensions.x, worldDimensions.y), worldDimensions.z);
+        
         // Initialize APF strategy
         simState.apfStrategy = new PathPlanning::APFMAPFStrategy();
         setupMultiAgentScenario();
@@ -272,96 +279,56 @@ public:
         pathsPlanned = false;
         agentsMoving = false;
         
-        // Define agent colors
-        std::vector<glm::vec3> agentColors = {
-            glm::vec3(1.0f, 0.2f, 0.2f), // Red
-            glm::vec3(0.2f, 1.0f, 0.2f), // Green
-            glm::vec3(0.2f, 0.2f, 1.0f), // Blue
-            glm::vec3(1.0f, 1.0f, 0.2f), // Yellow
-            glm::vec3(1.0f, 0.2f, 1.0f)  // Magenta
-        };
+        std::cout << "\n=== Loading Scenario from Configuration ===" << std::endl;
         
-        // Create multiple agents with challenging scenarios
-        float cornerOffset = worldSize * 0.4f;
-        
-        // Agent 0: Bottom-left to top-right
-        auto agent0 = std::make_unique<Agent>(0,
-            glm::vec3(-cornerOffset, 2.0f, -cornerOffset),
-            glm::vec3(cornerOffset, worldSize * 0.8f, cornerOffset),
-            agentColors[0]);
-        agents.push_back(agent0.get());
-        entities.push_back(std::move(agent0));
-        
-        // Agent 1: Bottom-right to top-left
-        auto agent1 = std::make_unique<Agent>(1,
-            glm::vec3(cornerOffset, 2.0f, -cornerOffset),
-            glm::vec3(-cornerOffset, worldSize * 0.8f, cornerOffset),
-            agentColors[1]);
-        agents.push_back(agent1.get());
-        entities.push_back(std::move(agent1));
-        
-        // Agent 2: Center-bottom to center-top
-        auto agent2 = std::make_unique<Agent>(2,
-            glm::vec3(0.0f, 2.0f, 0.0f),
-            glm::vec3(0.0f, worldSize * 0.8f, 0.0f),
-            agentColors[2]);
-        agents.push_back(agent2.get());
-        entities.push_back(std::move(agent2));
-        
-        // Create obstacles
-        int obstaclesPlaced = 0;
-        int maxObstacles = 10;
-        int maxAttempts = 100;
-        
-        while (obstaclesPlaced < maxObstacles && maxAttempts > 0) {
-            // Random position
-            float x = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * worldSize * 0.8f;
-            float y = static_cast<float>(rand()) / RAND_MAX * (worldSize * 0.6f) + 2.0f;
-            float z = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * worldSize * 0.8f;
-            glm::vec3 obstaclePos(x, y, z);
+        // Create agents from configuration
+        std::cout << "Creating " << loadedConfig.agents.size() << " agents..." << std::endl;
+        for (const auto& agentConfig : loadedConfig.agents) {
+            auto agent = std::make_unique<Agent>(
+                agentConfig.id,
+                agentConfig.start,
+                agentConfig.goal,
+                agentConfig.color
+            );
             
-            // Random size
-            float sizeX = static_cast<float>(rand()) / RAND_MAX * 2.0f + 1.0f;
-            float sizeY = static_cast<float>(rand()) / RAND_MAX * 3.0f + 1.0f;
-            float sizeZ = static_cast<float>(rand()) / RAND_MAX * 2.0f + 1.0f;
+            // Note: Agent speed is set in the Agent class, could be extended to use agentConfig.speed
+            agents.push_back(agent.get());
+            entities.push_back(std::move(agent));
             
-            // Check if obstacle is too close to any agent start/goal
-            bool tooClose = false;
-            float minDistance = 4.0f;
-            
-            for (const auto& agent : agents) {
-                if (glm::length(obstaclePos - agent->getPosition()) < minDistance ||
-                    glm::length(obstaclePos - agent->getGoalPosition()) < minDistance) {
-                    tooClose = true;
-                    break;
-                }
-            }
-            
-            if (!tooClose) {
-                auto obstacle = std::make_unique<Obstacle>(obstaclePos, glm::vec3(sizeX, sizeY, sizeZ));
-                obstacles.push_back(obstacle.get());
-                entities.push_back(std::move(obstacle));
-                obstaclesPlaced++;
-            }
-            maxAttempts--;
+            std::cout << "  Agent " << agentConfig.id << ": (" 
+                      << agentConfig.start.x << ", " << agentConfig.start.y << ", " << agentConfig.start.z 
+                      << ") -> (" 
+                      << agentConfig.goal.x << ", " << agentConfig.goal.y << ", " << agentConfig.goal.z 
+                      << ")" << std::endl;
         }
         
-        std::cout << "Multi-Agent Scenario Setup:" << std::endl;
-        for (size_t i = 0; i < agents.size(); ++i) {
-            const auto& pos = agents[i]->getPosition();
-            const auto& goal = agents[i]->getGoalPosition();
-            std::cout << "  Agent " << i << ": (" << pos.x << ", " << pos.y << ", " << pos.z 
-                      << ") -> (" << goal.x << ", " << goal.y << ", " << goal.z << ")" << std::endl;
+        // Create obstacles from configuration
+        std::cout << "Creating " << loadedConfig.obstacles.size() << " obstacles..." << std::endl;
+        for (const auto& obstacleConfig : loadedConfig.obstacles) {
+            auto obstacle = std::make_unique<Obstacle>(
+                obstacleConfig.center,
+                obstacleConfig.size
+            );
+            obstacles.push_back(obstacle.get());
+            entities.push_back(std::move(obstacle));
+            
+            std::cout << "  Obstacle at (" 
+                      << obstacleConfig.center.x << ", " 
+                      << obstacleConfig.center.y << ", " 
+                      << obstacleConfig.center.z 
+                      << ") size=(" 
+                      << obstacleConfig.size.x << ", " 
+                      << obstacleConfig.size.y << ", " 
+                      << obstacleConfig.size.z << ")" << std::endl;
         }
-        std::cout << "  Obstacles: " << obstaclesPlaced << std::endl;
         
         // Configure simulation state for real-time force calculations
         simState.agents = agents;
         simState.obstacles.clear();
-        for (const auto& obstacle : obstacles) {
+        for (const auto& obstacleConfig : loadedConfig.obstacles) {
             PathPlanning::BoundingBox bbox;
-            bbox.center = obstacle->getPosition();
-            bbox.size = glm::vec3(2.0f, 4.0f, 2.0f); // Match obstacle scale
+            bbox.center = obstacleConfig.center;
+            bbox.size = obstacleConfig.size;
             bbox.min = bbox.center - bbox.size * 0.5f;
             bbox.max = bbox.center + bbox.size * 0.5f;
             simState.obstacles.push_back(bbox);
@@ -384,9 +351,13 @@ public:
             agent->setSimulationState(&simState);
         }
         
-        // Setup camera to look at the center of action (midpoint between agents)
-        glm::vec3 cameraTarget(0.0f, worldSize * 0.4f, 0.0f); // Focus on middle height where agents are
-        camera = Camera(cameraTarget, worldSize * 1.5f, 0.0f, glm::radians(45.0f));
+        // Setup camera to look at the center of the world
+        glm::vec3 worldCenter = (loadedConfig.world.boundsMin + loadedConfig.world.boundsMax) * 0.5f;
+        camera = Camera(worldCenter, worldSize * 1.5f, 0.0f, glm::radians(45.0f));
+        
+        std::cout << "Scenario setup complete!" << std::endl;
+        std::cout << "  Total agents: " << agents.size() << std::endl;
+        std::cout << "  Total obstacles: " << obstacles.size() << std::endl;
     }
     
     void triggerMultiAgentPathPlanning() {
@@ -407,19 +378,12 @@ public:
             env.agentRadius = 0.5f;
             env.goalTolerance = 0.5f;
             
-            // Set world bounds
-            env.worldBounds.min = glm::vec3(-worldSize/2, 0.0f, -worldSize/2);
-            env.worldBounds.max = glm::vec3(worldSize/2, worldSize, worldSize/2);
+            // Set world bounds from configuration
+            env.worldBounds.min = loadedConfig.world.boundsMin;
+            env.worldBounds.max = loadedConfig.world.boundsMax;
             
-            // Add obstacles
-            for (const auto& obstacle : obstacles) {
-                PathPlanning::BoundingBox bbox;
-                bbox.center = obstacle->getPosition();
-                bbox.size = glm::vec3(2.0f, 3.0f, 2.0f); // Approximate size
-                bbox.min = bbox.center - bbox.size * 0.5f;
-                bbox.max = bbox.center + bbox.size * 0.5f;
-                env.obstacles.push_back(bbox);
-            }
+            // Add obstacles from configuration
+            env.obstacles = simState.obstacles;
             
             environments.push_back(env);
         }
@@ -515,6 +479,16 @@ void switchStrategy() {
         }
     }
     
+    void resetCamera() {
+        // Reset camera to view entire world based on loaded config
+        glm::vec3 worldCenter = (loadedConfig.world.boundsMin + loadedConfig.world.boundsMax) * 0.5f;
+        float cameraRadius = worldSize * 1.5f;
+        camera = Camera(worldCenter, cameraRadius, 0.0f, glm::radians(45.0f));
+        std::cout << "Camera reset to world center: (" 
+                  << worldCenter.x << ", " << worldCenter.y << ", " << worldCenter.z 
+                  << ") radius: " << cameraRadius << std::endl;
+    }
+    
     void update(float deltaTime) {
         for (auto& entity : entities) {
             entity->update(deltaTime);
@@ -564,42 +538,45 @@ void switchStrategy() {
         glColor3f(0.5f, 0.5f, 0.5f);
         glLineWidth(1.0f);
         
-        float half = worldSize / 2.0f;
+        // Get bounds from config
+        glm::vec3 minBounds = loadedConfig.world.boundsMin;
+        glm::vec3 maxBounds = loadedConfig.world.boundsMax;
         
-        // Draw grid on the floor
+        // Draw grid on the floor (at minBounds.y)
         glBegin(GL_LINES);
         for (int i = -10; i <= 10; ++i) {
-            float pos = i * (worldSize / 20.0f);
+            float posX = minBounds.x + (i + 10) * (maxBounds.x - minBounds.x) / 20.0f;
+            float posZ = minBounds.z + (i + 10) * (maxBounds.z - minBounds.z) / 20.0f;
             // X lines
-            glVertex3f(-half, 0.0f, pos);
-            glVertex3f(half, 0.0f, pos);
+            glVertex3f(minBounds.x, minBounds.y, posZ);
+            glVertex3f(maxBounds.x, minBounds.y, posZ);
             // Z lines
-            glVertex3f(pos, 0.0f, -half);
-            glVertex3f(pos, 0.0f, half);
+            glVertex3f(posX, minBounds.y, minBounds.z);
+            glVertex3f(posX, minBounds.y, maxBounds.z);
         }
         glEnd();
         
         // Draw world box
         glBegin(GL_LINE_LOOP);
-        glVertex3f(-half, 0.0f, -half);
-        glVertex3f(half, 0.0f, -half);
-        glVertex3f(half, 0.0f, half);
-        glVertex3f(-half, 0.0f, half);
+        glVertex3f(minBounds.x, minBounds.y, minBounds.z);
+        glVertex3f(maxBounds.x, minBounds.y, minBounds.z);
+        glVertex3f(maxBounds.x, minBounds.y, maxBounds.z);
+        glVertex3f(minBounds.x, minBounds.y, maxBounds.z);
         glEnd();
         
         glBegin(GL_LINE_LOOP);
-        glVertex3f(-half, worldSize, -half);
-        glVertex3f(half, worldSize, -half);
-        glVertex3f(half, worldSize, half);
-        glVertex3f(-half, worldSize, half);
+        glVertex3f(minBounds.x, maxBounds.y, minBounds.z);
+        glVertex3f(maxBounds.x, maxBounds.y, minBounds.z);
+        glVertex3f(maxBounds.x, maxBounds.y, maxBounds.z);
+        glVertex3f(minBounds.x, maxBounds.y, maxBounds.z);
         glEnd();
         
         // Vertical edges
         glBegin(GL_LINES);
-        glVertex3f(-half, 0.0f, -half); glVertex3f(-half, worldSize, -half);
-        glVertex3f(half, 0.0f, -half); glVertex3f(half, worldSize, -half);
-        glVertex3f(half, 0.0f, half); glVertex3f(half, worldSize, half);
-        glVertex3f(-half, 0.0f, half); glVertex3f(-half, worldSize, half);
+        glVertex3f(minBounds.x, minBounds.y, minBounds.z); glVertex3f(minBounds.x, maxBounds.y, minBounds.z);
+        glVertex3f(maxBounds.x, minBounds.y, minBounds.z); glVertex3f(maxBounds.x, maxBounds.y, minBounds.z);
+        glVertex3f(maxBounds.x, minBounds.y, maxBounds.z); glVertex3f(maxBounds.x, maxBounds.y, maxBounds.z);
+        glVertex3f(minBounds.x, minBounds.y, maxBounds.z); glVertex3f(minBounds.x, maxBounds.y, maxBounds.z);
         glEnd();
     }
     
@@ -649,6 +626,7 @@ void switchStrategy() {
 
 // Global variables
 MultiAgentWorld* world = nullptr;
+ConfigLoader::SimulationConfig globalConfig;  // Store config globally for reset functionality
 bool mousePressed = false;
 int lastMouseX = 0, lastMouseY = 0;
 float lastFrameTime = 0.0f;
@@ -666,6 +644,20 @@ void cleanup();
 int main(int argc, char** argv) {
     // Initialize random seed
     srand(static_cast<unsigned int>(time(nullptr)));
+    
+    // Load configuration from YAML file
+    const std::string configPath = "config.yaml";
+    
+    try {
+        std::cout << "Loading configuration from: " << configPath << std::endl;
+        globalConfig = ConfigLoader::loadConfig(configPath);
+        std::cout << "Configuration loaded successfully!" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: Failed to load configuration file '" << configPath << "'" << std::endl;
+        std::cerr << "Reason: " << e.what() << std::endl;
+        std::cerr << "\nMake sure config.yaml exists in the pp_test directory!" << std::endl;
+        return -1;
+    }
     
     // Initialize GLUT
     glutInit(&argc, argv);
@@ -699,8 +691,8 @@ int main(int argc, char** argv) {
     // Initialize path planning module
     PathPlanning::initialize();
     
-    // Create world
-    world = new MultiAgentWorld(20.0f);
+    // Create world with loaded configuration
+    world = new MultiAgentWorld(globalConfig);
     
     // Setup GLUT callbacks
     glutDisplayFunc(display);
@@ -717,10 +709,11 @@ int main(int argc, char** argv) {
     std::cout << "  T - Stop agent movement" << std::endl;
     std::cout << "  A - Switch between APF MAPF and Regular APF and ORCA " << std::endl;
     std::cout << "  F - Toggle between Real-Time Forces and Waypoint Following" << std::endl;
-    std::cout << "  R - Reset scenario" << std::endl;
-    std::cout << "  +/- - Zoom in/out" << std::endl;
+    std::cout << "  R - Reset scenario and reload config.yaml" << std::endl;
+    std::cout << "  C - Reset camera to default view" << std::endl;
+    std::cout << "  +/- (or Mouse Wheel) - Zoom in/out" << std::endl;
     std::cout << "  ESC - Exit" << std::endl;
-    std::cout << "  Mouse drag - Rotate camera" << std::endl;
+    std::cout << "  Left Mouse Drag - Rotate camera" << std::endl;
     
     // Start main loop
     glutMainLoop();
@@ -749,17 +742,26 @@ void keyboard(unsigned char key, int x, int y) {
             break;
         case 'r':
         case 'R':
-            // Reset simulation
+            // Reset simulation - reload from config
             if (world) {
                 delete world;
-                world = new MultiAgentWorld(20.0f);
+                try {
+                    std::cout << "\nReloading configuration from config.yaml..." << std::endl;
+                    globalConfig = ConfigLoader::loadConfig("config.yaml");
+                    world = new MultiAgentWorld(globalConfig);
+                    std::cout << "Scenario reset with new configuration!" << std::endl;
+                } catch (const std::exception& e) {
+                    std::cerr << "Failed to reload config: " << e.what() << std::endl;
+                    std::cerr << "Using previous configuration..." << std::endl;
+                    world = new MultiAgentWorld(globalConfig);
+                }
             }
             break;
         case 'c':
         case 'C':
-            // Reset camera to default position
+            // Reset camera to default position based on world bounds
             if (world) {
-                world->getCamera() = Camera(glm::vec3(0.0f, 8.0f, 0.0f), 30.0f, 0.0f, glm::radians(45.0f));
+                world->resetCamera();
             }
             break;
         case '+':
@@ -824,6 +826,19 @@ void mouse(int button, int state, int x, int y) {
             lastMouseY = y;
         } else if (state == GLUT_UP) {
             mousePressed = false;
+        }
+    }
+    // Mouse wheel support for zooming
+    else if (button == 3) { // Scroll up
+        if (state == GLUT_DOWN && world) {
+            world->getCamera().zoom(-2.0f);
+            glutPostRedisplay();
+        }
+    }
+    else if (button == 4) { // Scroll down
+        if (state == GLUT_DOWN && world) {
+            world->getCamera().zoom(2.0f);
+            glutPostRedisplay();
         }
     }
 }

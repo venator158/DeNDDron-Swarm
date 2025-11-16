@@ -78,6 +78,10 @@ if ! dpkg -l | grep -q libgl1-mesa-dev && ! rpm -q mesa-libGL-devel &>/dev/null;
     missing_deps+=("OpenGL development libraries")
 fi
 
+if ! dpkg -l | grep -q libyaml-cpp-dev && ! rpm -q yaml-cpp-devel &>/dev/null; then
+    missing_deps+=("yaml-cpp development libraries")
+fi
+
 if [ ${#missing_deps[@]} -ne 0 ]; then
     echo "Missing dependencies:"
     for dep in "${missing_deps[@]}"; do

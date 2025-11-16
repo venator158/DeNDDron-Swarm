@@ -19,6 +19,9 @@ find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
 find_package(GLUT REQUIRED)
 
+# Find yaml-cpp
+find_package(yaml-cpp REQUIRED)
+
 # Find GLM
 find_package(glm QUIET)
 if(NOT glm_FOUND)
@@ -43,6 +46,7 @@ include_directories(
     ${GLEW_INCLUDE_DIRS}
     ${GLUT_INCLUDE_DIR}
     ${GLM_INCLUDE_DIR}
+    ${YAML_CPP_INCLUDE_DIR}
 )
 
 # Source files for single agent simulation
@@ -60,12 +64,12 @@ set(SINGLE_AGENT_SOURCES
 set(MULTI_AGENT_SOURCES
     multi_agent_pp.cpp
     path_planning_module.cpp
+    config_loader.cpp
     strategies/rrt_strategy.cpp
     strategies/astar_strategy.cpp
     strategies/apf_strategy.cpp
     strategies/apf_mapf_strategy.cpp
     strategies/orca_mapf_strategy.cpp
-
 )
 
 # Create a library for the path planning system
@@ -102,6 +106,7 @@ target_link_libraries(multi_agent_planning
     ${OPENGL_LIBRARIES}
     ${GLEW_LIBRARIES}
     ${GLUT_LIBRARIES}
+    yaml-cpp
     # Linux-specific libraries
     ${CMAKE_DL_LIBS}
     pthread
