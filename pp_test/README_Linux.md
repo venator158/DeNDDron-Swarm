@@ -178,9 +178,21 @@ agents:
     
     # Add as many agents as needed!
 ```
+# Running the python script for generation of agents/obstacles
+## if 10 agents with existing obstacles
+```bash
+python3 generate_random_agents.py -n 10
+```
+## if 20 agents with 15 obstacles 
+```bash
+python3 generate_random_agents.py -n 20 -o 15
+```
+so and so forth..
 
 ### Notes:
 - You can define **any number of agents** in the configuration
 - Obstacles can be explicitly positioned or randomly generated
 - Press **'R'** to reload the configuration file during runtime
 - The simulation will fail to start if `config.yaml` is missing or invalid
+
+

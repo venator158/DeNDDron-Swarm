@@ -1,49 +1,136 @@
-# DeNDDron-Swarm Multi-Agent Path Planning Configuration
-# This file defines the world, obstacles, and agents for the simulation
-
 world:
   bounds:
-    min: [-20.0, -20.0, -20.0]
-    max: [20.0, 20.0, 20.0]
-
+    min:
+    - -20.0
+    - -20.0
+    - -20.0
+    max:
+    - 20.0
+    - 20.0
+    - 20.0
 obstacles:
-  count: 20
-  default_size: [2.0, 2.0, 2.0]  # Default dimensions [x, y, z] if not specified per obstacle
-  positions:  # Optional - if fewer than 'count', remaining obstacles are generated randomly
-    - center: [5.0, 5.0, 0.0]
-      size: [2.0, 2.0, 2.0]
-    - center: [8.0, 3.0, 0.0]
-      size: [2.0, 2.0, 2.0]
-    - center: [-5.0, 8.0, 0.0]
-      size: [1.5, 1.5, 1.5]
-  # Since count=5 and only 3 are specified, 2 more will be generated randomly
-
+  count: 5
+  default_size:
+  - 2.0
+  - 2.0
+  - 2.0
+  positions:
+  - center:
+    - 5.04
+    - 9.65
+    - 10.24
+    size:
+    - 1.67
+    - 1.67
+    - 1.67
+  - center:
+    - -4.47
+    - 6.0
+    - 0.69
+    size:
+    - 1.43
+    - 1.43
+    - 1.43
+  - center:
+    - -13.75
+    - 11.14
+    - 6.23
+    size:
+    - 1.67
+    - 1.67
+    - 1.67
+  - center:
+    - 12.46
+    - 6.35
+    - 11.84
+    size:
+    - 1.58
+    - 1.58
+    - 1.58
+  - center:
+    - -16.32
+    - -8.18
+    - -11.71
+    size:
+    - 2.4
+    - 2.4
+    - 2.4
 agents:
   default_radius: 0.5
   default_speed: 2.0
-  
   agent_list:
-    - id: 0
-      start: [0.0, 0.0, 0.0]
-      goal: [10.0, 0.0, 0.0]
-      color: [0.0, 1.0, 0.0]  # Green (RGB values 0.0-1.0)
-      
-    - id: 1
-      start: [10.0, 0.0, 0.0]
-      goal: [5.0, 10.0, 0.0]
-      color: [0.0, 0.5, 1.0]  # Blue
-      
-    - id: 2
-      start: [5.0, 0.0, 0.0]
-      goal: [5.0, 10.0, 8.0]
-      color: [1.0, 0.0, 0.0]  # Red
-      
-    - id: 3
-      start: [-5.0, -5.0, 0.0]
-      goal: [8.0, 8.0, 0.0]
-      color: [1.0, 1.0, 0.0]  # Yellow
-      
-    - id: 4
-      start: [8.0, -5.0, 0.0]
-      goal: [-8.0, 8.0, 4.0]
-      color: [1.0, 0.0, 1.0]  # Magenta
+  - id: 0
+    start:
+    - -9.26
+    - 17.2
+    - -5.23
+    goal:
+    - 12.25
+    - -4.59
+    - -8.31
+    color:
+    - 0.73
+    - 0.86
+    - 0.61
+    radius: 0.5
+    speed: 2.0
+  - id: 1
+    start:
+    - 5.15
+    - -13.7
+    - 3.99
+    goal:
+    - 16.35
+    - 16.97
+    - 15.08
+    color:
+    - 0.13
+    - 0.79
+    - 0.66
+    radius: 0.5
+    speed: 2.0
+  - id: 2
+    start:
+    - -7.9
+    - 10.11
+    - -16.84
+    goal:
+    - -0.24
+    - -16.93
+    - -16.39
+    color:
+    - 0.35
+    - 0.55
+    - 0.24
+    radius: 0.5
+    speed: 2.0
+  - id: 3
+    start:
+    - 13.96
+    - 1.27
+    - 0.59
+    goal:
+    - 6.31
+    - 14.05
+    - 1.78
+    color:
+    - 0.65
+    - 0.19
+    - 0.38
+    radius: 0.5
+    speed: 2.0
+  - id: 4
+    start:
+    - -9.33
+    - -6.5
+    - -17.87
+    goal:
+    - -0.44
+    - 9.11
+    - 15.28
+    color:
+    - 0.9
+    - 0.36
+    - 0.92
+    radius: 0.5
+    speed: 2.0

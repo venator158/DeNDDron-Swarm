@@ -108,8 +108,6 @@ void SystemMetrics::print() const {
     std::cout << "║ Avg Efficiency:     " << std::setprecision(2) << std::setw(6) 
               << avgEfficiency << "% (Min: " << std::setw(6) << minEfficiency 
               << "% Max: " << std::setw(6) << maxEfficiency << "%) ║\n";
-    std::cout << "║ Avg Smoothness:     " << std::setw(10) << avgPathSmoothness 
-              << " degrees                           ║\n";
     std::cout << "║ Direction Changes:  " << std::setw(10) << totalDirectionChanges 
               << " total                              ║\n";
     std::cout << "╠════════════════════════════════════════════════════════════════╣\n";
@@ -129,20 +127,19 @@ void SystemMetrics::print() const {
     // Per-Agent Details
     if (!agentMetrics.empty()) {
         std::cout << "Per-Agent Details:\n";
-        std::cout << "┌──────┬──────────┬────────┬──────────┬──────────┬───────────┐\n";
-        std::cout << "│ Agt  │ Path Len │ Effic. │ Complet. │ Smoothns │ Collision │\n";
-        std::cout << "├──────┼──────────┼────────┼──────────┼──────────┼───────────┤\n";
+        std::cout << "┌──────┬──────────┬────────┬──────────┬───────────┐\n";
+        std::cout << "│ Agt  │ Path Len │ Effic. │ Complet. │ Collision │\n";
+        std::cout << "├──────┼──────────┼────────┼──────────┼───────────┤\n";
         
         for (const auto& agent : agentMetrics) {
             std::cout << "│ " << std::setw(4) << agent.agentId << " │ "
                       << std::fixed << std::setprecision(2) << std::setw(8) << agent.pathLength << " │ "
                       << std::setw(5) << agent.efficiency << "% │ "
                       << std::setw(8) << agent.completionTime << " │ "
-                      << std::setw(7) << agent.pathSmoothness << "° │ "
                       << std::setw(9) << (agent.agentCollisions + agent.obstacleCollisions) << " │\n";
         }
         
-        std::cout << "└──────┴──────────┴────────┴──────────┴──────────┴───────────┘\n";
+        std::cout << "└──────┴──────────┴────────┴──────────┴───────────┘\n";
     }
 }
 
