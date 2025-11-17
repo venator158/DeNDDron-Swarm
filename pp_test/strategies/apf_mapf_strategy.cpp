@@ -55,6 +55,8 @@ namespace PathPlanning {
         
         int stuckCount = 0;
         glm::vec3 lastPos = currentPos;
+        bool usingHexagonMode = false;
+        glm::vec3 hexagonWaypoint = glm::vec3(0.0f);
         
         // Cost tracking variables
         float totalDistanceTraveled = 0.0f;
@@ -72,11 +74,23 @@ namespace PathPlanning {
                 break;
             }
             
-            // Calculate attractive force (constant magnitude towards goal)
-            glm::vec3 toGoal = environment.goalPosition - currentPos;
+            // Check if we've reached the hexagon waypoint
+            if (usingHexagonMode) {
+                float distanceToWaypoint = glm::length(hexagonWaypoint - currentPos);
+                if (distanceToWaypoint <= goalTolerance) {
+                    std::cout << "APF MAPF: Hexagon waypoint reached, switching back to normal APF" << std::endl;
+                    usingHexagonMode = false;
+                    stuckCount = 0; // Reset stuck counter
+                    k = attractiveForceGain; // Reset force gain
+                }
+            }
+            
+            // Calculate attractive force (towards goal or hexagon waypoint)
+            glm::vec3 targetPos = usingHexagonMode ? hexagonWaypoint : environment.goalPosition;
+            glm::vec3 toTarget = targetPos - currentPos;
             glm::vec3 attractiveForce = glm::vec3(0.0f);
-            if (glm::length(toGoal) > 0.0f) {
-                attractiveForce = k * glm::normalize(toGoal);
+            if (glm::length(toTarget) > 0.0f) {
+                attractiveForce = k * glm::normalize(toTarget);
             }
             
             // Calculate repulsive forces from obstacles
@@ -96,10 +110,22 @@ namespace PathPlanning {
             float movement = glm::length(nextPos - lastPos);
             if (movement < minMovement) {
                 stuckCount++;
+                
                 if (stuckCount >= stuckThreshold) {
-                    // Exponentially increase attractive force to escape local minima
-                    k = std::exp(alpha * stuckCount);
-                    std::cout << "APF MAPF: Stuck detected, increasing k to " << k << std::endl;
+                    if (!usingHexagonMode) {
+                        // Local minima detected - render virtual hexagon and select waypoint
+                        std::cout << "APF MAPF: Local minima detected (stuck for " << stuckCount << " ticks)" << std::endl;
+                        hexagonWaypoint = findHexagonWaypoint(currentPos, environment.goalPosition, environment.obstacles);
+                        usingHexagonMode = true;
+                        std::cout << "APF MAPF: Virtual hexagon rendered, waypoint selected at (" << hexagonWaypoint.x << ", " 
+                                  << hexagonWaypoint.y << ", " << hexagonWaypoint.z << ")" << std::endl;
+                    }
+                    
+                    // Also apply force ramping to overcome GNRON (Goal Non-Reachable Obstacle Nearby)
+                    k = attractiveForceGain * std::exp(alpha * (stuckCount - stuckThreshold));
+                    if (stuckCount % 10 == 0) { // Log every 10 ticks to avoid spam
+                        std::cout << "APF MAPF: Force ramping active (k = " << k << ") to overcome GNRON" << std::endl;
+                    }
                 }
             } else {
                 stuckCount = 0; // Reset stuck counter if we're moving
@@ -196,6 +222,8 @@ namespace PathPlanning {
                 allReached = false;
                 
                 // Calculate total force for this agent
+                // Note: For multi-agent, we use force ramping for dynamic collisions (other agents)
+                // but static obstacles could use hexagon method if stuck (not implemented in MAPF yet)
                 glm::vec3 totalForce = calculateTotalForceForAgent(i, currentPositions, 
                                                                   goalPositions, allObstacles, agentRadii);
                 
@@ -342,6 +370,124 @@ namespace PathPlanning {
         }
         
         return repulsiveForce;
+    }
+    
+    // Virtual hexagon method for static obstacle avoidance
+    glm::vec3 APFMAPFStrategy::findHexagonWaypoint(const glm::vec3& currentPos, const glm::vec3& goalPos,
+                                                   const std::vector<BoundingBox>& obstacles) const {
+        
+        // Create a virtual regular hexagon around the current position
+        // The hexagon vertices represent potential waypoints to escape local minima
+        const int numVertices = 6;
+        const float hexagonRadius = influenceRadius * 1.5f; // Radius slightly larger than obstacle influence
+        
+        std::vector<glm::vec3> hexagonVertices;
+        hexagonVertices.reserve(numVertices);
+        
+        // Calculate hexagon vertices in the XY plane
+        for (int i = 0; i < numVertices; i++) {
+            float angle = (M_PI / 3.0f) * i; // 60-degree intervals
+            glm::vec3 vertex = currentPos;
+            vertex.x += hexagonRadius * std::cos(angle);
+            vertex.y += hexagonRadius * std::sin(angle);
+            // Keep Z coordinate same as current position
+            hexagonVertices.push_back(vertex);
+        }
+        
+        // Find the best vertex based on:
+        // 1. Clear path from current position to vertex
+        // 2. Clear path from vertex to goal
+        // 3. Distance to goal (prefer vertices closer to goal)
+        // 4. Distance from obstacles
+        
+        glm::vec3 bestWaypoint = currentPos;
+        float bestScore = -1.0f;
+        
+        for (const auto& vertex : hexagonVertices) {
+            // Check if paths are clear
+            bool pathToClear = isPathClear(currentPos, vertex, obstacles);
+            bool pathToGoalClear = isPathClear(vertex, goalPos, obstacles);
+            
+            if (!pathToClear) continue; // Must be able to reach the vertex
+            
+            // Calculate score
+            float distanceToGoal = glm::length(goalPos - vertex);
+            float distanceFromObstacles = getObstacleDistance(vertex, obstacles);
+            
+            // Score function: prefer points closer to goal and farther from obstacles
+            // Normalize and weight the factors
+            float goalScore = 1.0f / (1.0f + distanceToGoal); // Higher score for closer to goal
+            float obstacleScore = distanceFromObstacles; // Higher score for farther from obstacles
+            float clearPathBonus = pathToGoalClear ? 2.0f : 0.0f; // Bonus if direct path to goal is clear
+            
+            float totalScore = goalScore + obstacleScore * 0.5f + clearPathBonus;
+            
+            if (totalScore > bestScore) {
+                bestScore = totalScore;
+                bestWaypoint = vertex;
+            }
+        }
+        
+        // If no good waypoint found, try extending the hexagon radius
+        if (bestScore < 0.0f) {
+            float extendedRadius = hexagonRadius * 2.0f;
+            for (int i = 0; i < numVertices; i++) {
+                float angle = (M_PI / 3.0f) * i;
+                glm::vec3 vertex = currentPos;
+                vertex.x += extendedRadius * std::cos(angle);
+                vertex.y += extendedRadius * std::sin(angle);
+                
+                if (isPathClear(currentPos, vertex, obstacles)) {
+                    float distanceToGoal = glm::length(goalPos - vertex);
+                    float score = 1.0f / (1.0f + distanceToGoal);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestWaypoint = vertex;
+                    }
+                }
+            }
+        }
+        
+        return bestWaypoint;
+    }
+    
+    // Check if a straight-line path between two points is clear of obstacles
+    bool APFMAPFStrategy::isPathClear(const glm::vec3& from, const glm::vec3& to,
+                                     const std::vector<BoundingBox>& obstacles) const {
+        const int numSamples = 10; // Sample points along the path
+        glm::vec3 direction = to - from;
+        float pathLength = glm::length(direction);
+        
+        if (pathLength < 0.001f) return true; // Same point
+        
+        glm::vec3 step = direction / static_cast<float>(numSamples);
+        
+        for (int i = 0; i <= numSamples; i++) {
+            glm::vec3 samplePoint = from + step * static_cast<float>(i);
+            
+            // Check if sample point is inside any obstacle
+            for (const auto& obstacle : obstacles) {
+                if (obstacle.contains(samplePoint)) {
+                    return false;
+                }
+            }
+        }
+        
+        return true;
+    }
+    
+    // Get minimum distance from a point to all obstacles
+    float APFMAPFStrategy::getObstacleDistance(const glm::vec3& point,
+                                               const std::vector<BoundingBox>& obstacles) const {
+        float minDistance = std::numeric_limits<float>::max();
+        
+        for (const auto& obstacle : obstacles) {
+            glm::vec3 closestPoint = getClosestPointOnBoundingBox(point, obstacle);
+            float distance = glm::length(closestPoint - point);
+            minDistance = std::min(minDistance, distance);
+        }
+        
+        return minDistance;
     }
     
     std::vector<glm::vec3> APFMAPFStrategy::replanPath(const Environment& environment,

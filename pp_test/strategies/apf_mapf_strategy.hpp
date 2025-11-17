@@ -35,6 +35,14 @@ namespace PathPlanning {
         glm::vec3 calculateObstacleRepulsiveForce(const glm::vec3& currentPos,
                                                  const std::vector<BoundingBox>& obstacles) const;
         
+        // Virtual hexagon method for static obstacle local minima
+        glm::vec3 findHexagonWaypoint(const glm::vec3& currentPos, const glm::vec3& goalPos,
+                                     const std::vector<BoundingBox>& obstacles) const;
+        bool isPathClear(const glm::vec3& from, const glm::vec3& to,
+                        const std::vector<BoundingBox>& obstacles) const;
+        float getObstacleDistance(const glm::vec3& point,
+                                 const std::vector<BoundingBox>& obstacles) const;
+        
     public:
         std::vector<glm::vec3> planPath(const Environment& environment) override;
         void configure(const Config& config) override;
