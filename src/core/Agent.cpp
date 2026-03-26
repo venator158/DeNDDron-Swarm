@@ -39,11 +39,29 @@ void Agent::setup_comms() {
 
     // --- PUBLISHERS ---
     // Publishes Velocity Vectors (Reflex output)
+    // Topic: drone/{agent_id}/cmd_vel
+    // Format: JSON {"linear": {"x", "y", "z"}, "angular": {"z"}}
     std::string key_cmd = "drone/" + _config.agent_id + "/cmd_vel";
     _pub_cmd_vel = z_declare_publisher(_session, z_keyexpr(key_cmd.c_str()), NULL);
 
     // Publishes Gossip (State/Position)
+    // Topic: swarm/gossip
+    // Format: JSON peer state information
     _pub_gossip = z_declare_publisher(_session, z_keyexpr("swarm/gossip"), NULL);
+
+    // Publishes Agent Join Notification
+    // Topic: swarm/agents/join
+    // Purpose: Signals the Gazebo simulator that a new agent has come online
+    // Format: JSON {"agent_id": "...", "timestamp": ...}
+    z_publisher_t* _pub_agent_join = z_declare_publisher(_session, z_keyexpr("swarm/agents/join"), NULL);
+    
+    // Publish join event to signal Gazebo simulator
+    json join_event = {
+        {"agent_id", _config.agent_id},
+        {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()}
+    };
+    std::string join_payload = join_event.dump();
+    z_publisher_put(_pub_agent_join, (const uint8_t*)join_payload.data(), join_payload.size(), NULL);
 
     // --- SUBSCRIBERS ---
     // 1. Proprioception (Sensors from Gazebo/Hardware)

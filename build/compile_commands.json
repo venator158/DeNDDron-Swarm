@@ -1,0 +1,32 @@
+[
+{
+  "directory": "/home/venator/denddron/DeNDDron-Swarm/build",
+  "command": "/usr/bin/clang++ -DBOOST_TEST_DYN_LINK -DLIBBULLET_VERSION=3.05 -DLIBBULLET_VERSION_GT_282 -I/home/venator/denddron/DeNDDron-Swarm/src -I/home/venator/denddron/DeNDDron-Swarm/extern/json/include -g -std=gnu++17 -o CMakeFiles/denddron_agent.dir/src/main.cpp.o -c /home/venator/denddron/DeNDDron-Swarm/src/main.cpp",
+  "file": "/home/venator/denddron/DeNDDron-Swarm/src/main.cpp"
+},
+{
+  "directory": "/home/venator/denddron/DeNDDron-Swarm/build",
+  "command": "/usr/bin/clang++ -DBOOST_TEST_DYN_LINK -DLIBBULLET_VERSION=3.05 -DLIBBULLET_VERSION_GT_282 -I/home/venator/denddron/DeNDDron-Swarm/src -I/home/venator/denddron/DeNDDron-Swarm/extern/json/include -g -std=gnu++17 -o CMakeFiles/denddron_agent.dir/src/core/Agent.cpp.o -c /home/venator/denddron/DeNDDron-Swarm/src/core/Agent.cpp",
+  "file": "/home/venator/denddron/DeNDDron-Swarm/src/core/Agent.cpp"
+},
+{
+  "directory": "/home/venator/denddron/DeNDDron-Swarm/build",
+  "command": "/usr/bin/clang++ -DBOOST_ALL_NO_LIB -DBOOST_ATOMIC_DYN_LINK -DBOOST_DATE_TIME_DYN_LINK -DBOOST_FILESYSTEM_DYN_LINK -DBOOST_IOSTREAMS_DYN_LINK -DBOOST_PROGRAM_OPTIONS_DYN_LINK -DBOOST_REGEX_DYN_LINK -DBOOST_SYSTEM_DYN_LINK -DBOOST_TEST_DYN_LINK -DBOOST_THREAD_DYN_LINK -DJSON_DIAGNOSTICS=0 -DJSON_USE_IMPLICIT_CONVERSIONS=1 -DLIBBULLET_VERSION=3.05 -DLIBBULLET_VERSION_GT_282 -I/usr/include/gazebo-11 -I/usr/include/bullet -I/usr/include/sdformat-9.7 -I/usr/include/OGRE -I/usr/include/OGRE/Terrain -I/usr/include/OGRE/Paging -I/home/venator/denddron/DeNDDron-Swarm/sim -isystem /usr/include/simbody -isystem /usr/include/ignition/math6 -isystem /usr/include/ignition/transport8 -isystem /usr/include/ignition/msgs5 -isystem /usr/include/ignition/common3 -isystem /usr/include/ignition/fuel_tools4 -isystem /usr/include/eigen3 -isystem /opt/ros/humble/include -isystem /usr/include/sdformat-9.7/sdf/.. -isystem /usr/include/ignition/cmake2 -isystem /usr/include/uuid -g -I/usr/include/uuid -std=gnu++17 -o sim/CMakeFiles/gazebo_simulator_lib.dir/GazeboSimulator.cpp.o -c /home/venator/denddron/DeNDDron-Swarm/sim/GazeboSimulator.cpp",
+  "file": "/home/venator/denddron/DeNDDron-Swarm/sim/GazeboSimulator.cpp"
+},
+{
+  "directory": "/home/venator/denddron/DeNDDron-Swarm/build",
+  "command": "/usr/bin/clang++ -DBOOST_ALL_NO_LIB -DBOOST_ATOMIC_DYN_LINK -DBOOST_DATE_TIME_DYN_LINK -DBOOST_FILESYSTEM_DYN_LINK -DBOOST_IOSTREAMS_DYN_LINK -DBOOST_PROGRAM_OPTIONS_DYN_LINK -DBOOST_REGEX_DYN_LINK -DBOOST_SYSTEM_DYN_LINK -DBOOST_TEST_DYN_LINK -DBOOST_THREAD_DYN_LINK -DJSON_DIAGNOSTICS=0 -DJSON_USE_IMPLICIT_CONVERSIONS=1 -DLIBBULLET_VERSION=3.05 -DLIBBULLET_VERSION_GT_282 -I/usr/include/gazebo-11 -I/usr/include/bullet -I/usr/include/sdformat-9.7 -I/usr/include/OGRE -I/usr/include/OGRE/Terrain -I/usr/include/OGRE/Paging -I/home/venator/denddron/DeNDDron-Swarm/sim -isystem /usr/include/simbody -isystem /usr/include/ignition/math6 -isystem /usr/include/ignition/transport8 -isystem /usr/include/ignition/msgs5 -isystem /usr/include/ignition/common3 -isystem /usr/include/ignition/fuel_tools4 -isystem /usr/include/eigen3 -isystem /opt/ros/humble/include -isystem /usr/include/sdformat-9.7/sdf/.. -isystem /usr/include/ignition/cmake2 -isystem /usr/include/uuid -g -I/usr/include/uuid -std=gnu++17 -o sim/CMakeFiles/gazebo_simulator.dir/simulator_main.cpp.o -c /home/venator/denddron/DeNDDron-Swarm/sim/simulator_main.cpp",
+  "file": "/home/venator/denddron/DeNDDron-Swarm/sim/simulator_main.cpp"
+},
+{
+  "directory": "/home/venator/denddron/DeNDDron-Swarm/build",
+  "command": "/usr/bin/clang++ -DBOOST_TEST_DYN_LINK -DJSON_DIAGNOSTICS=0 -DJSON_USE_IMPLICIT_CONVERSIONS=1 -DLIBBULLET_VERSION=3.05 -DLIBBULLET_VERSION_GT_282 -I/home/venator/denddron/DeNDDron-Swarm/src/metrics -g -std=gnu++17 -o src/metrics/CMakeFiles/metrics_lib.dir/MetricsNode.cpp.o -c /home/venator/denddron/DeNDDron-Swarm/src/metrics/MetricsNode.cpp",
+  "file": "/home/venator/denddron/DeNDDron-Swarm/src/metrics/MetricsNode.cpp"
+},
+{
+  "directory": "/home/venator/denddron/DeNDDron-Swarm/build",
+  "command": "/usr/bin/clang++ -DBOOST_TEST_DYN_LINK -DJSON_DIAGNOSTICS=0 -DJSON_USE_IMPLICIT_CONVERSIONS=1 -DLIBBULLET_VERSION=3.05 -DLIBBULLET_VERSION_GT_282 -I/home/venator/denddron/DeNDDron-Swarm/src/metrics -g -std=gnu++17 -o src/metrics/CMakeFiles/metrics_node.dir/metrics_main.cpp.o -c /home/venator/denddron/DeNDDron-Swarm/src/metrics/metrics_main.cpp",
+  "file": "/home/venator/denddron/DeNDDron-Swarm/src/metrics/metrics_main.cpp"
+}
+]

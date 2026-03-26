@@ -1,0 +1,126 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <world name="ocean_swarm">
+    
+    <!-- Physics engine configuration
+         ODE physics provides stable rigid body dynamics for drone simulation.
+         Step size of 0.001s gives 1000Hz physics updates.
+         Real time factor of 1 means simulation runs at real-world speed.
+    -->
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+
+    <!-- Gravity: Disabled (0) - Flight controller will handle hover state
+         When agents disconnect, FC automatically hovers the drone.
+         With gravity = 0, disconnected drones remain stationary at last velocity.
+    -->
+    <gravity>0 0 0</gravity>
+
+    <!-- Global ambient lighting for scene -->
+    <ambient>0.5 0.5 0.5 1</ambient>
+
+    <!-- Directional light simulating sun
+         Provides primary illumination with shadows for visual feedback.
+    -->
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 50 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Water surface model
+         A large flat plane at z=0 representing the ocean surface.
+         Static (non-moving) body with minimal friction.
+         Size: 2000x2000 meters provides large play area.
+    -->
+    <model name="ocean_surface">
+      <static>true</static>
+      <link name="surface">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>2000 2000</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>0.1</mu>
+                <mu2>0.1</mu2>
+              </ode>
+            </friction>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>2000 2000</size>
+            </plane>
+          </geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Water</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Ship obstacle at origin (0, 0, 0)
+         This represents the vessel that drones must avoid.
+         Modeled as a static box: 50m long, 20m wide, 15m tall.
+         Extends from z=0 to z=15 (15m above water surface).
+         Positioned at (0, 0, 0) with origin at center of box.
+    -->
+    <model name="ship_obstacle">
+      <static>true</static>
+      <pose>0 0 7.5 0 0 0</pose>
+      <link name="hull">
+        <!-- Collision shape for physics simulation -->
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>50 20 15</size>
+            </box>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>0.5</mu>
+                <mu2>0.5</mu2>
+              </ode>
+            </friction>
+          </surface>
+        </collision>
+        <!-- Visual representation (gray ship hull) -->
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>50 20 15</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.4 0.4 0.4 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
+            <specular>0.3 0.3 0.3 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

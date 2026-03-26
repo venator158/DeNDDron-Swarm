@@ -1,0 +1,148 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						2
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10.2"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0
+					]
+				},
+				{
+					"build" : "sim",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-sim-Debug-ca4724674ec6e1184d94.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "sim",
+					"targetIndexes" : 
+					[
+						1,
+						2
+					]
+				},
+				{
+					"build" : "src/metrics",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-src.metrics-Debug-753346bc4735323e6fb8.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "src/metrics",
+					"targetIndexes" : 
+					[
+						3,
+						4
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1
+					],
+					"directoryIndexes" : 
+					[
+						0,
+						2
+					],
+					"name" : "DeNDDron-Swarm",
+					"targetIndexes" : 
+					[
+						0,
+						3,
+						4
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						1
+					],
+					"name" : "denddron_gazebo_simulator",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "denddron_agent::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-denddron_agent-Debug-807813f38f84c863576c.json",
+					"name" : "denddron_agent",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "gazebo_simulator::@b622755370c2a46d4cb5",
+					"jsonFile" : "target-gazebo_simulator-Debug-542129e4f04bf981a897.json",
+					"name" : "gazebo_simulator",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "gazebo_simulator_lib::@b622755370c2a46d4cb5",
+					"jsonFile" : "target-gazebo_simulator_lib-Debug-c0004f5d700edec3f7f1.json",
+					"name" : "gazebo_simulator_lib",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "metrics_lib::@062d0d7d36f236955c01",
+					"jsonFile" : "target-metrics_lib-Debug-29064fc92a459a3ac521.json",
+					"name" : "metrics_lib",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "metrics_node::@062d0d7d36f236955c01",
+					"jsonFile" : "target-metrics_node-Debug-39151e1b5c6c603e3588.json",
+					"name" : "metrics_node",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/venator/denddron/DeNDDron-Swarm/build",
+		"source" : "/home/venator/denddron/DeNDDron-Swarm"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

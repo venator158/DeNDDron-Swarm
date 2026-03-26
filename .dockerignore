@@ -1,0 +1,51 @@
+# Exclude build directories to prevent CMake cache conflicts
+build/
+Build/
+.build/
+cmake-build-debug/
+cmake-build-release/
+
+# Exclude version control (400MB+ wasted)
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+
+# Exclude external dependencies (60MB+ wasted, rebuilt in container)
+extern/
+
+# Exclude IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Exclude temporary files
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+CMakeFiles/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+
+# Exclude documentation
+*.md
+docs/
+
+# Exclude test files
+test/
+tests/
+
+# Exclude package files
+*.tar.gz
+*.zip
+
+# Exclude simulation files (not needed in agent containers)
+sim/
