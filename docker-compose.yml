@@ -1,0 +1,190 @@
+# ===========================================================================
+# DeNDDron Swarm Docker Compose Configuration (Optimized 2026)
+# ===========================================================================
+
+services:
+  # ===========================================================================
+  # DeNDDron Base (Shared Dependency)
+  # ===========================================================================
+  denddron-base:
+    build:
+      context: .
+      dockerfile: docker/base.Dockerfile
+    image: denddron-base:latest
+
+  # ===========================================================================
+  # Zenoh Router
+  # ===========================================================================
+  zenoh_router:
+    image: eclipse/zenoh:latest
+    container_name: zenoh_router
+    ports:
+      - "7447:7447/tcp"
+      - "7447:7447/udp"
+    environment:
+      RUST_LOG: info
+    networks:
+      - swarm_network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7447"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    command: >
+      zenohd
+      --listen tcp/0.0.0.0:7447
+      --listen udp/0.0.0.0:7447
+
+  # ===========================================================================
+  # Gazebo Simulator
+  # ===========================================================================
+  gazebo_simulator:
+    build:
+      context: .
+      dockerfile: docker/gazebo.Dockerfile
+      additional_contexts:
+        denddron_base: service:denddron-base
+    container_name: gazebo_simulator
+    environment:
+      ZENOH_ROUTER_IP: zenoh_router
+      GAZEBO_RESOURCE_PATH: /home/app/sim
+    networks:
+      - swarm_network
+    depends_on:
+      - zenoh_router
+      - denddron-base
+    healthcheck:
+      test: ["CMD", "pgrep", "gazebo_simulator"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    expose:
+      - "11345"
+
+  # ===========================================================================
+  # Agent Services
+  # ===========================================================================
+  agent_1:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    container_name: agent_1
+    environment:
+      AGENT_ID: drone_1
+      ZENOH_ROUTER_IP: zenoh_router
+      LOOP_RATE_HZ: "50"
+    networks:
+      - swarm_network
+    depends_on:
+      - denddron-base
+      - zenoh_router
+      - gazebo_simulator
+    healthcheck:
+      test: ["CMD", "pgrep", "denddron_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    volumes:
+      - swarm_state:/state
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  agent_2:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    container_name: agent_2
+    environment:
+      AGENT_ID: drone_2
+      ZENOH_ROUTER_IP: zenoh_router
+      LOOP_RATE_HZ: "50"
+    networks:
+      - swarm_network
+    depends_on:
+      - denddron-base
+      - zenoh_router
+      - gazebo_simulator
+    healthcheck:
+      test: ["CMD", "pgrep", "denddron_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    volumes:
+      - swarm_state:/state
+    logging: &agent_logging
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  agent_3:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    container_name: agent_3
+    environment:
+      AGENT_ID: drone_3
+      ZENOH_ROUTER_IP: zenoh_router
+      LOOP_RATE_HZ: "50"
+    networks:
+      - swarm_network
+    depends_on:
+      - denddron-base
+      - zenoh_router
+      - gazebo_simulator
+    healthcheck:
+      test: ["CMD", "pgrep", "denddron_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    volumes:
+      - swarm_state:/state
+    logging: *agent_logging
+
+  # ===========================================================================
+  # Metrics Node
+  # ===========================================================================
+  metrics_node:
+    build:
+      context: .
+      dockerfile: docker/metrics.Dockerfile
+    container_name: metrics_node
+    environment:
+      ZENOH_ROUTER_IP: zenoh_router
+    networks:
+      - swarm_network
+    depends_on:
+      - denddron-base
+      - zenoh_router
+      - gazebo_simulator
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "metrics_node"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    logging: *agent_logging
+    volumes:
+      - swarm_state:/state
+      - /tmp:/tmp
+
+# ===========================================================================
+# Network Configuration
+# ===========================================================================
+networks:
+  swarm_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  swarm_state:
