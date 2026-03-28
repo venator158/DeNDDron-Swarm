@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /tmp
 RUN git clone --depth 1 --branch 1.0.4 https://github.com/eclipse-zenoh/zenoh-c.git && \
     cd zenoh-c && \
+    rustup update stable && \
     mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local .. && \
     cmake --build . --parallel $(nproc) && \

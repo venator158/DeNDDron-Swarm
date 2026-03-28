@@ -41,7 +41,7 @@ COPY --from=builder /usr/local/include/zenoh* /usr/local/include/
 RUN ldconfig
 
 # Copy compiled simulator from builder
-COPY --from=builder /home/app/build/gazebo_simulator /usr/local/bin/gazebo_simulator
+COPY --from=builder /home/app/build/sim/gazebo_simulator /usr/local/bin/gazebo_simulator
 COPY --from=builder /home/app/sim /home/app/sim
 
 WORKDIR /home/app
