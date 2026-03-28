@@ -4,9 +4,6 @@
 [submodule "extern/yaml-cpp"]
 	path = extern/yaml-cpp
 	url = https://github.com/jbeder/yaml-cpp.git
-[submodule "extern/zenoh-c"]
-	path = extern/zenoh-c
-	url = https://github.com/eclipse-zenoh/zenoh-c.git
 [submodule "extern/glm"]
 	path = extern/glm
 	url = https://github.com/g-truc/glm.git

@@ -1,3 +1,4 @@
+find_package(nlohmann_json REQUIRED)
 # ============================================================================
 # Metrics Node Build Configuration
 # ============================================================================
@@ -20,8 +21,6 @@ cmake_minimum_required(VERSION 3.20)
 # Find Dependencies
 # ============================================================================
 
-find_package(zenohc REQUIRED)
-find_package(nlohmann_json REQUIRED)
 
 # ============================================================================
 # Metrics Library
@@ -38,7 +37,7 @@ target_include_directories(metrics_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(metrics_lib 
     PUBLIC
-        zenohc::lib
+        zenohcpp
         nlohmann_json::nlohmann_json
 )
 
