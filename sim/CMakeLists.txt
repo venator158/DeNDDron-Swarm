@@ -1,3 +1,4 @@
+find_package(nlohmann_json REQUIRED)
 cmake_minimum_required(VERSION 3.10)
 project(denddron_gazebo_simulator)
 
@@ -12,8 +13,6 @@ find_package(gazebo REQUIRED)
 find_package(nlohmann_json 3.2.0 REQUIRED)
 
 # Zenoh-C - for distributed messaging
-find_package(zenohc REQUIRED)
-
 # Include directories
 include_directories(
     ${GAZEBO_INCLUDE_DIRS}
@@ -45,7 +44,7 @@ target_include_directories(gazebo_simulator_lib PUBLIC
 target_link_libraries(gazebo_simulator_lib PUBLIC
     ${GAZEBO_LIBRARIES}
     nlohmann_json::nlohmann_json
-    zenohc
+    zenohcpp
 )
 
 # ============================================================================

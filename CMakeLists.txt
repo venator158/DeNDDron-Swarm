@@ -17,9 +17,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find Dependencies
 # ============================================================================
 
-find_package(zenohc REQUIRED)
-find_package(nlohmann_json REQUIRED)
-find_package(gazebo REQUIRED)
+if(NOT TARGET zenohcpp)
+    find_package(gazebo)
+endif()
 
 # ============================================================================
 # Add Subdirectories
@@ -56,7 +56,7 @@ target_include_directories(denddron_agent PRIVATE
 )
 
 target_link_libraries(denddron_agent PRIVATE
-    zenohc::lib
+    zenohcpp
     pthread
 )
 
