@@ -24,14 +24,10 @@ int main(int argc, char* argv[]) {
     // ========================================================================
     // Initialize Gazebo Simulator Bridge
     // ========================================================================
-    denddron::GazeboSimulator simulator;
+    GazeboSimulator simulator;
 
     // Connect to Gazebo and Zenoh
-    if (!simulator.connect()) {
-        std::cerr << "[Main] Failed to connect to Gazebo simulator!" << std::endl;
-        std::cerr << "[Main] Make sure gzserver is running in this container" << std::endl;
-        return 1;
-    }
+    simulator.init();
 
     std::cout << "[Main] Simulator bridge initialized successfully" << std::endl;
     std::cout << "[Main] Waiting for agents to join..." << std::endl;
@@ -42,7 +38,9 @@ int main(int argc, char* argv[]) {
     // The simulator runs in the main thread.
     // Zenoh callbacks will fire when messages arrive on subscribed topics.
     // The simulator publishes sensor data and metrics at fixed intervals.
-    simulator.run();
+    while (g_running) {
+        simulator.step();
+    }
 
     // ========================================================================
     // Shutdown
