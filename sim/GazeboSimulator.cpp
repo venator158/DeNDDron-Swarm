@@ -39,8 +39,7 @@ void GazeboSimulator::init() {
 
 void GazeboSimulator::on_motor_cmd(const zenoh::Sample& sample) {
     std::string key = sample.get_keyexpr().as_string();
-    std::string payload(reinterpret_cast<const char*>(sample.get_payload().buffers[0].buffer), 
-                        sample.get_payload().buffers[0].len);
+    std::string payload = sample.get_payload().as_string(); 
     
     // Extract drone ID from key expr (e.g., swarm/drone_1/cmd_vel)
     size_t first_slash = key.find('/');
@@ -73,7 +72,7 @@ void GazeboSimulator::publish_state() {
         auto put_opt = zenoh::Session::PutOptions::create_default();
         _session.put(
             zenoh::KeyExpr(topic),
-            zenoh::Bytes(payload.c_str(), payload.length()),
+            zenoh::Bytes(payload),
             std::move(put_opt)
         );
     }

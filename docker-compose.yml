@@ -43,8 +43,6 @@ services:
     build:
       context: .
       dockerfile: docker/gazebo.Dockerfile
-      additional_contexts:
-        denddron_base: service:denddron-base
     container_name: gazebo_simulator
     environment:
       ZENOH_ROUTER_IP: zenoh_router
@@ -70,8 +68,6 @@ services:
     build:
       context: .
       dockerfile: docker/agent.Dockerfile
-      additional_contexts:
-        denddron_base: service:denddron-base
     container_name: agent_1
     environment:
       AGENT_ID: drone_1
@@ -80,42 +76,10 @@ services:
     networks:
       - swarm_network
     depends_on:
-      - denddron-base
       - zenoh_router
       - gazebo_simulator
     healthcheck:
-      test: ["CMD", "pgrep", "denddron_agent"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    restart: unless-stopped
-    volumes:
-      - swarm_state:/state
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  agent_2:
-    build:
-      context: .
-      dockerfile: docker/agent.Dockerfile
-      additional_contexts:
-        denddron_base: service:denddron-base
-    container_name: agent_2
-    environment:
-      AGENT_ID: drone_2
-      ZENOH_ROUTER_IP: zenoh_router
-      LOOP_RATE_HZ: "50"
-    networks:
-      - swarm_network
-    depends_on:
-      - denddron-base
-      - zenoh_router
-      - gazebo_simulator
-    healthcheck:
-      test: ["CMD", "pgrep", "denddron_agent"]
+      test: ["CMD", "pgrep", "-f", "python"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -128,12 +92,34 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  agent_2:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    container_name: agent_2
+    environment:
+      AGENT_ID: drone_2
+      ZENOH_ROUTER_IP: zenoh_router
+      LOOP_RATE_HZ: "50"
+    networks:
+      - swarm_network
+    depends_on:
+      - zenoh_router
+      - gazebo_simulator
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "python"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    volumes:
+      - swarm_state:/state
+    logging: *agent_logging
+
   agent_3:
     build:
       context: .
       dockerfile: docker/agent.Dockerfile
-      additional_contexts:
-        denddron_base: service:denddron-base
     container_name: agent_3
     environment:
       AGENT_ID: drone_3
@@ -142,11 +128,10 @@ services:
     networks:
       - swarm_network
     depends_on:
-      - denddron-base
       - zenoh_router
       - gazebo_simulator
     healthcheck:
-      test: ["CMD", "pgrep", "denddron_agent"]
+      test: ["CMD", "pgrep", "-f", "python"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -162,19 +147,16 @@ services:
     build:
       context: .
       dockerfile: docker/metrics.Dockerfile
-      additional_contexts:
-        denddron_base: service:denddron-base
     container_name: metrics_node
     environment:
       ZENOH_ROUTER_IP: zenoh_router
     networks:
       - swarm_network
     depends_on:
-      - denddron-base
       - zenoh_router
       - gazebo_simulator
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "metrics_node"]
+      test: ["CMD", "pgrep", "-f", "python"]
       interval: 10s
       timeout: 5s
       retries: 3
