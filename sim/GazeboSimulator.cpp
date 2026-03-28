@@ -117,13 +117,13 @@ std::string GazeboSimulator::generate_drone_sdf(const std::string& agent_id, dou
         << "        </inertia>"
         << "      </inertial>"
         << "      <collision name='collision'>"
-        << "        <geometry><sphere><radius>0.25</radius></sphere></geometry>"
+        << "        <geometry><sphere><radius>1.25</radius></sphere></geometry>"
         << "      </collision>"
         << "      <visual name='visual'>"
-        << "        <geometry><sphere><radius>0.25</radius></sphere></geometry>"
+        << "        <geometry><sphere><radius>1.25</radius></sphere></geometry>"
         << "        <material>"
-        << "          <ambient>0.1 0.5 0.8 1.0</ambient>"
-        << "          <diffuse>0.2 0.6 1.0 1.0</diffuse>"
+        << "          <ambient>1.0 0.1 0.1 1.0</ambient>"
+        << "          <diffuse>1.0 0.2 0.2 1.0</diffuse>"
         << "        </material>"
         << "      </visual>"
         << "    </link>"
@@ -139,16 +139,16 @@ void GazeboSimulator::spawn_drone(const std::string& agent_id, const json& initi
     if (!_factory_pub) return;
 
     // Hardcode spawning locations outside the ship based on agent_id
-    double x = -30.0;
+    double x = -45.0; // Moved further away from ship (-25 is edge)
     double y = 0.0;
-    double z = 5.0;
+    double z = 20.0;  // Moved higher to make them easier to spot above water/ship
 
     if (agent_id == "drone_1" || agent_id == "1") {
-        y = -10.0;
+        y = -20.0;
     } else if (agent_id == "drone_2" || agent_id == "2") {
         y = 0.0;
     } else if (agent_id == "drone_3" || agent_id == "3") {
-        y = 10.0;
+        y = 20.0;
     } else {
         x = initial_pos.value("x", 0.0) + (std::rand() % 10 - 5) * 1.0; 
         y = initial_pos.value("y", 0.0) + (std::rand() % 10 - 5) * 1.0;
