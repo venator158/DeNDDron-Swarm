@@ -12,7 +12,6 @@ cmake-build-release/
 .gitmodules
 
 # Exclude external dependencies (60MB+ wasted, rebuilt in container)
-extern/
 
 # Exclude IDE files
 .vscode/
@@ -48,4 +47,3 @@ tests/
 *.zip
 
 # Exclude simulation files (not needed in agent containers)
-sim/

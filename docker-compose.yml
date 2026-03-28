@@ -70,6 +70,8 @@ services:
     build:
       context: .
       dockerfile: docker/agent.Dockerfile
+      additional_contexts:
+        denddron_base: service:denddron-base
     container_name: agent_1
     environment:
       AGENT_ID: drone_1
@@ -99,6 +101,8 @@ services:
     build:
       context: .
       dockerfile: docker/agent.Dockerfile
+      additional_contexts:
+        denddron_base: service:denddron-base
     container_name: agent_2
     environment:
       AGENT_ID: drone_2
@@ -128,6 +132,8 @@ services:
     build:
       context: .
       dockerfile: docker/agent.Dockerfile
+      additional_contexts:
+        denddron_base: service:denddron-base
     container_name: agent_3
     environment:
       AGENT_ID: drone_3
@@ -156,6 +162,8 @@ services:
     build:
       context: .
       dockerfile: docker/metrics.Dockerfile
+      additional_contexts:
+        denddron_base: service:denddron-base
     container_name: metrics_node
     environment:
       ZENOH_ROUTER_IP: zenoh_router

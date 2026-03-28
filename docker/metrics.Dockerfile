@@ -1,19 +1,27 @@
-FROM ubuntu:22.04
+# STAGE 1: Builder
+FROM denddron_base AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    bash \
-    coreutils \
+    build-essential cmake pkg-config nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-ENV HEARTBEAT_DIR=/state \
-    ALIVE_WINDOW_SEC=5
+WORKDIR /home/app
+COPY src ./src
+COPY extern ./extern
+COPY CMakeLists.txt .
 
-WORKDIR /metrics
+RUN mkdir -p build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    cmake --build . --target metrics_node -j$(nproc) && \
+    strip src/metrics/metrics_node || strip metrics_node || true
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
-    CMD test -d "$HEARTBEAT_DIR" || exit 1
+# STAGE 2: Runtime
+FROM denddron_base
 
-CMD ["bash", "-lc", "echo '[Metrics] Monitoring agent heartbeats'; while true; do now=$(date +%s); echo '--- metrics ---'; found=0; for hb in \"$HEARTBEAT_DIR\"/*.heartbeat; do if [ ! -e \"$hb\" ]; then continue; fi; found=1; agent=$(basename \"$hb\" .heartbeat); last=$(cat \"$hb\" 2>/dev/null || echo 0); age=$((now-last)); if [ \"$age\" -le \"$ALIVE_WINDOW_SEC\" ]; then state='ALIVE'; else state='STALE'; fi; echo \"$agent: $state (age=${age}s)\"; done; if [ \"$found\" -eq 0 ]; then echo 'no agents reporting yet'; fi; sleep 2; done"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY --from=builder /home/app/build/src/metrics/metrics_node /usr/local/bin/metrics_node
+
+CMD ["sh", "-c", "exec metrics_node --zenoh-router ${ZENOH_ROUTER_IP:-zenoh_router}"]

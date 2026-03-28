@@ -1,18 +1,28 @@
-FROM ubuntu:22.04
+# STAGE 1: Builder
+FROM denddron_base AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    bash \
-    coreutils \
+    build-essential cmake pkg-config nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-ENV AGENT_ID=drone_default \
-    HEARTBEAT_DIR=/state \
-    HEARTBEAT_INTERVAL=2
+WORKDIR /home/app
+COPY src ./src
+COPY extern ./extern
+COPY CMakeLists.txt .
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
-    CMD test -f "${HEARTBEAT_DIR}/${AGENT_ID}.heartbeat" || exit 1
+RUN mkdir -p build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    cmake --build . --target denddron_agent -j$(nproc) && \
+    strip denddron_agent || true
 
-CMD ["bash", "-lc", "mkdir -p \"$HEARTBEAT_DIR\"; echo \"[Agent] Starting $AGENT_ID (placeholder)\"; while true; do date +%s > \"$HEARTBEAT_DIR/$AGENT_ID.heartbeat\"; echo \"[$(date -Iseconds)] $AGENT_ID alive\"; sleep \"$HEARTBEAT_INTERVAL\"; done"]
+# STAGE 2: Runtime
+FROM denddron_base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY --from=builder /home/app/build/denddron_agent /usr/local/bin/denddron_agent
+
+# Use a shell script to pass env vars to the binary
+CMD ["sh", "-c", "exec denddron_agent --agent-id ${AGENT_ID:-drone_default} --zenoh-router ${ZENOH_ROUTER_IP:-zenoh_router} --loop-rate ${LOOP_RATE_HZ:-50.0}"]
