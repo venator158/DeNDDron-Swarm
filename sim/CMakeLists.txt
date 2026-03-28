@@ -37,4 +37,5 @@ add_executable(gazebo_simulator
 
 target_link_libraries(gazebo_simulator
     gazebo_simulator_lib
+    tbb
 )

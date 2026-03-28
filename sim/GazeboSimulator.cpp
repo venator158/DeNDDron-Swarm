@@ -1,84 +1,245 @@
 #include "GazeboSimulator.hpp"
 #include <iostream>
-#include <unistd.h>
-#include <thread>
+#include <sstream>
 #include <chrono>
-
-using json = nlohmann::json;
+#include <thread>
+#include <cmath>
 
 GazeboSimulator::GazeboSimulator() {
+    std::cout << "[GazeboSimulator] Initializing..." << std::endl;
 }
 
 GazeboSimulator::~GazeboSimulator() {
+    disconnect();
 }
 
 void GazeboSimulator::init() {
-    zenoh::Config config;
-    std::cout << "[Gazebo] Initializing Zenoh..." << std::endl;
-    _session = zenoh::Session::open(std::move(config));
+    std::cout << "[GazeboSimulator] Connecting to Gazebo..." << std::endl;
 
-    std::cout << "[Gazebo] Registering publisher..." << std::endl;
-    auto pub_opt = zenoh::Session::PublisherOptions::create_default();
-    _pub_state = _session.declare_publisher(
-        zenoh::KeyExpr("swarm/+/state"), 
-        std::move(pub_opt)
-    );
+    try {
+        gazebo::client::setup();
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] Failed to setup Gazebo client: " << e.what() << std::endl;
+        return;
+    }
 
-    std::cout << "[Gazebo] Registering subscriber..." << std::endl;
+    _gznode = gazebo::transport::NodePtr(new gazebo::transport::Node());
+    _gznode->Init();
+
+    _factory_pub = _gznode->Advertise<gazebo::msgs::Factory>("~/factory");
+    _factory_pub->WaitForConnection();
+
+    _physics_pub = _gznode->Advertise<gazebo::msgs::LinkData>("~/link/modify");
+    
+    std::cout << "[GazeboSimulator] Connected to Gazebo transport" << std::endl;
+
+    // Zenoh Init
+    auto config = zenoh::Config::create_default();
+    _session.emplace(zenoh::Session::open(std::move(config)));
+
+    std::cout << "[Gazebo] Registering subscribers..." << std::endl;
     auto sub_opt = zenoh::Session::SubscriberOptions::create_default();
-    _sub_motors = _session.declare_subscriber(
-        zenoh::KeyExpr("swarm/+/cmd_vel"),
-        std::bind(&GazeboSimulator::on_motor_cmd, this, std::placeholders::_1),
+    
+    _sub_agent_join.emplace(_session->declare_subscriber(
+        zenoh::KeyExpr("swarm/agents/join"),
+        std::bind(&GazeboSimulator::on_agent_join, this, std::placeholders::_1),
         [](){},
         std::move(sub_opt)
-    );
+    ));
 
-    _drone_states["drone_1"] = {0.0, 0.0};
-    _drone_states["drone_2"] = {1.0, 1.0};
+    auto sub_opt_cmd = zenoh::Session::SubscriberOptions::create_default();
+    _sub_cmd_vel.emplace(_session->declare_subscriber(
+        zenoh::KeyExpr("swarm/+/cmd_vel"),
+        std::bind(&GazeboSimulator::on_cmd_vel, this, std::placeholders::_1),
+        [](){},
+        std::move(sub_opt_cmd)
+    ));
+
+    auto pub_opt = zenoh::Session::PublisherOptions::create_default();
+    _pub_metrics.emplace(_session->declare_publisher(
+        zenoh::KeyExpr("swarm/metrics"), 
+        std::move(pub_opt)
+    ));
+
+    std::cout << "[GazeboSimulator] Ready. Waiting for agents..." << std::endl;
 }
 
-void GazeboSimulator::on_motor_cmd(const zenoh::Sample& sample) {
-    std::string key = sample.get_keyexpr().as_string();
-    std::string payload = sample.get_payload().as_string(); 
-    
-    // Extract drone ID from key expr (e.g., swarm/drone_1/cmd_vel)
-    size_t first_slash = key.find('/');
-    size_t second_slash = key.find('/', first_slash + 1);
-    if(first_slash != std::string::npos && second_slash != std::string::npos) {
-        std::string drone_id = key.substr(first_slash + 1, second_slash - first_slash - 1);
-        std::lock_guard<std::mutex> lock(_state_mtx);
-        
-        try {
-            json data = json::parse(payload);
-            _drone_states[drone_id].first += data.value("vx", 0.0) * 0.1;
-            _drone_states[drone_id].second += data.value("vy", 0.0) * 0.1;
-            std::cout << "[Gazebo] Applied cmd to " << drone_id << "\n";
-        } catch(...) {
-            // Drop invalid commands
-        }
+void GazeboSimulator::disconnect() {
+    _session.reset();
+    try {
+        gazebo::client::shutdown();
+    } catch (...) {}
+}
+
+void GazeboSimulator::on_agent_join(const zenoh::Sample& sample) {
+    try {
+        std::string payload = sample.get_payload().as_string();
+        auto join_msg = json::parse(payload);
+        std::string agent_id = join_msg["agent_id"];
+
+        std::cout << "[GazeboSimulator] Received join event from: " << agent_id << std::endl;
+
+        json initial_pos = {{"x", 0.0}, {"y", 0.0}, {"z", 1.0}};
+        spawn_drone(agent_id, initial_pos);
+
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] Error processing agent join: " << e.what() << std::endl;
     }
 }
 
-void GazeboSimulator::publish_state() {
+void GazeboSimulator::on_cmd_vel(const zenoh::Sample& sample) {
+    std::string key = std::string(sample.get_keyexpr().as_string_view());
+    std::string payload = sample.get_payload().as_string();
+    
+    size_t first_slash = key.find('/');
+    size_t second_slash = key.find('/', first_slash + 1);
+    if(first_slash != std::string::npos && second_slash != std::string::npos) {
+        std::string agent_id = key.substr(first_slash + 1, second_slash - first_slash - 1);
+        try {
+            auto cmd_msg = json::parse(payload);
+            update_drone_velocity(agent_id, cmd_msg);
+        } catch(...) {}
+    }
+}
+
+std::string GazeboSimulator::generate_drone_sdf(const std::string& agent_id, double x, double y, double z) {
+    std::stringstream sdf;
+    sdf << "<?xml version='1.0'?>"
+        << "<sdf version='1.6'>"
+        << "  <model name='" << agent_id << "'>"
+        << "    <pose>" << x << " " << y << " " << z << " 0 0 0</pose>"
+        << "    <link name='base'>"
+        << "      <inertial>"
+        << "        <mass>1.0</mass>"
+        << "        <inertia>"
+        << "          <ixx>0.0083</ixx><ixy>0</ixy><ixz>0</ixz>"
+        << "          <iyy>0.0083</iyy><iyz>0</iyz><izz>0.0083</izz>"
+        << "        </inertia>"
+        << "      </inertial>"
+        << "      <collision name='collision'>"
+        << "        <geometry><sphere><radius>0.25</radius></sphere></geometry>"
+        << "      </collision>"
+        << "      <visual name='visual'>"
+        << "        <geometry><sphere><radius>0.25</radius></sphere></geometry>"
+        << "        <material>"
+        << "          <ambient>0.1 0.5 0.8 1.0</ambient>"
+        << "          <diffuse>0.2 0.6 1.0 1.0</diffuse>"
+        << "        </material>"
+        << "      </visual>"
+        << "    </link>"
+        << "  </model>"
+        << "</sdf>";
+    return sdf.str();
+}
+
+void GazeboSimulator::spawn_drone(const std::string& agent_id, const json& initial_pos) {
     std::lock_guard<std::mutex> lock(_state_mtx);
-    for (const auto& [drone_id, pos] : _drone_states) {
-        json state;
-        state["x"] = pos.first;
-        state["y"] = pos.second;
-        
-        std::string payload = state.dump();
-        std::string topic = "swarm/" + drone_id + "/state";
-        
-        auto put_opt = zenoh::Session::PutOptions::create_default();
-        _session.put(
-            zenoh::KeyExpr(topic),
-            zenoh::Bytes(payload),
-            std::move(put_opt)
-        );
+    if (_spawned_agents.find(agent_id) != _spawned_agents.end()) return;
+
+    if (!_factory_pub) return;
+
+    // Hardcode spawning locations outside the ship based on agent_id
+    double x = -30.0;
+    double y = 0.0;
+    double z = 5.0;
+
+    if (agent_id == "drone_1" || agent_id == "1") {
+        y = -10.0;
+    } else if (agent_id == "drone_2" || agent_id == "2") {
+        y = 0.0;
+    } else if (agent_id == "drone_3" || agent_id == "3") {
+        y = 10.0;
+    } else {
+        x = initial_pos.value("x", 0.0) + (std::rand() % 10 - 5) * 1.0; 
+        y = initial_pos.value("y", 0.0) + (std::rand() % 10 - 5) * 1.0;
+        z = initial_pos.value("z", 1.0);
+    }
+
+    std::string sdf_str = generate_drone_sdf(agent_id, x, y, z);
+    gazebo::msgs::Factory factory_msg;
+    factory_msg.set_sdf(sdf_str);
+    _factory_pub->Publish(factory_msg);
+
+    _spawned_agents[agent_id] = true;
+    _drone_states[agent_id] = DroneState{
+        ignition::math::Vector3d(x, y, z),
+        ignition::math::Vector3d(0, 0, 0),
+        ignition::math::Vector3d(0, 0, 0),
+        ignition::math::Quaterniond()
+    };
+
+    std::cout << "[GazeboSimulator] Spawned drone: " << agent_id << " at (" << x << ", " << y << ")" << std::endl;
+}
+
+void GazeboSimulator::update_drone_velocity(const std::string& agent_id, const json& cmd_msg) {
+    try {
+        double vx = cmd_msg["linear"]["x"].get<double>();
+        double vy = cmd_msg["linear"]["y"].get<double>();
+        double vz = cmd_msg["linear"]["z"].get<double>();
+        double yaw_rate = cmd_msg["angular"]["z"].get<double>();
+
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        if (_drone_states.find(agent_id) != _drone_states.end()) {
+            _drone_states[agent_id].linear_velocity = ignition::math::Vector3d(vx, vy, vz);
+            _drone_states[agent_id].angular_velocity = ignition::math::Vector3d(0, 0, yaw_rate);
+            
+            // Simple physics integration for visual feedback (since we aren't subscribing to gazebo poses yet)
+            _drone_states[agent_id].position += ignition::math::Vector3d(vx*0.1, vy*0.1, vz*0.1);
+        }
+    } catch (...) {}
+}
+
+json GazeboSimulator::simulate_lidar(const std::string& agent_id) {
+    json lidar_data = json::array();
+    for (int i = 0; i < 16; ++i) {
+        lidar_data.push_back({
+            {"angle", (2.0 * M_PI * i) / 16.0},
+            {"distance", 50.0},
+            {"intensity", 0.5},
+            {"ray_id", i}
+        });
+    }
+    return lidar_data;
+}
+
+json GazeboSimulator::get_drone_pose(const std::string& agent_id) {
+    std::lock_guard<std::mutex> lock(_state_mtx);
+    if (_drone_states.find(agent_id) != _drone_states.end()) {
+        const auto& state = _drone_states[agent_id];
+        return {
+            {"x", state.position.X()},
+            {"y", state.position.Y()},
+            {"z", state.position.Z()},
+            {"roll", 0.0},
+            {"pitch", 0.0},
+            {"yaw", 0.0},
+            {"vx", state.linear_velocity.X()},
+            {"vy", state.linear_velocity.Y()},
+            {"vz", state.linear_velocity.Z()}
+        };
+    }
+    return {{"x",0},{"y",0},{"z",1},{"roll",0},{"pitch",0},{"yaw",0},{"vx",0},{"vy",0},{"vz",0}};
+}
+
+void GazeboSimulator::publish_sensor_data(const std::string& agent_id, const json& sensor_data) {
+    std::string topic = "drone/" + agent_id + "/sensors";
+    std::string payload = sensor_data.dump();
+    auto put_opt = zenoh::Session::PutOptions::create_default();
+    if (_session) {
+        _session->put(zenoh::KeyExpr(topic), zenoh::Bytes(payload), std::move(put_opt));
     }
 }
 
 void GazeboSimulator::step() {
-    publish_state();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 10Hz
+    auto now = std::chrono::steady_clock::now();
+    for (const auto& [agent_id, spawned] : _spawned_agents) {
+        if (spawned) {
+            json sensor_data = {
+                {"pose", get_drone_pose(agent_id)},
+                {"lidar", simulate_lidar(agent_id)}
+            };
+            publish_sensor_data(agent_id, sensor_data);
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // 50 Hz
 }

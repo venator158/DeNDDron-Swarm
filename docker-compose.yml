@@ -32,7 +32,6 @@ services:
       retries: 3
     restart: unless-stopped
     command: >
-      zenohd
       --listen tcp/0.0.0.0:7447
       --listen udp/0.0.0.0:7447
 
@@ -45,8 +44,14 @@ services:
       dockerfile: docker/gazebo.Dockerfile
     container_name: gazebo_simulator
     environment:
-      ZENOH_ROUTER_IP: zenoh_router
-      GAZEBO_RESOURCE_PATH: /home/app/sim
+      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
+      GAZEBO_RESOURCE_PATH: /usr/share/gazebo-11:/home/app/sim
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: 1
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    devices:
+      - /dev/dri:/dev/dri
     networks:
       - swarm_network
     depends_on:
@@ -58,8 +63,8 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
-    expose:
-      - "11345"
+    ports:
+      - "11345:11345"
 
   # ===========================================================================
   # Agent Services
@@ -71,7 +76,7 @@ services:
     container_name: agent_1
     environment:
       AGENT_ID: drone_1
-      ZENOH_ROUTER_IP: zenoh_router
+      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
       LOOP_RATE_HZ: "50"
     networks:
       - swarm_network
@@ -99,7 +104,7 @@ services:
     container_name: agent_2
     environment:
       AGENT_ID: drone_2
-      ZENOH_ROUTER_IP: zenoh_router
+      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
       LOOP_RATE_HZ: "50"
     networks:
       - swarm_network
@@ -123,7 +128,7 @@ services:
     container_name: agent_3
     environment:
       AGENT_ID: drone_3
-      ZENOH_ROUTER_IP: zenoh_router
+      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
       LOOP_RATE_HZ: "50"
     networks:
       - swarm_network
@@ -149,7 +154,7 @@ services:
       dockerfile: docker/metrics.Dockerfile
     container_name: metrics_node
     environment:
-      ZENOH_ROUTER_IP: zenoh_router
+      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
     networks:
       - swarm_network
     depends_on:
