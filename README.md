@@ -5,13 +5,16 @@ Codebase for DeNDDron Swarm
 
 To build and run:
 ```bash
-docker compose build gazebo_simulator && docker compose up -d gazebo_simulator && docker compose restart agent_1 agent_2 agent_3
+docker compose up --build  
 ```
 To view the Gazebo simulation GUI while the containers are running, execute:
 ```bash
+xhost +local:docker
 docker exec -it gazebo_simulator gzclient
-```
 
+docker compose restart agent_1 agent_2 agent_3
+```
+wait for containers to restart to view in the sim
 
 
 ### Recent Updates
