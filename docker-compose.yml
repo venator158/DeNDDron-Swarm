@@ -25,11 +25,6 @@ services:
       RUST_LOG: info
     networks:
       - swarm_network
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "7447"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
     restart: unless-stopped
     command: >
       --listen tcp/0.0.0.0:7447
@@ -58,10 +53,10 @@ services:
       - zenoh_router
       - denddron-base
     healthcheck:
-      test: ["CMD", "pgrep", "gazebo_simulator"]
-      interval: 10s
+      test: ["CMD-SHELL", "grep -a gazebo_simulator /proc/[0-9]*/cmdline >/dev/null 2>&1 || exit 1"]
+      interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 5
     restart: unless-stopped
     ports:
       - "11345:11345"
@@ -81,8 +76,10 @@ services:
     networks:
       - swarm_network
     depends_on:
-      - zenoh_router
-      - gazebo_simulator
+      zenoh_router:
+        condition: service_started
+      gazebo_simulator:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "pgrep", "-f", "python"]
       interval: 10s
@@ -109,8 +106,10 @@ services:
     networks:
       - swarm_network
     depends_on:
-      - zenoh_router
-      - gazebo_simulator
+      zenoh_router:
+        condition: service_started
+      gazebo_simulator:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "pgrep", "-f", "python"]
       interval: 10s
@@ -133,8 +132,10 @@ services:
     networks:
       - swarm_network
     depends_on:
-      - zenoh_router
-      - gazebo_simulator
+      zenoh_router:
+        condition: service_started
+      gazebo_simulator:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "pgrep", "-f", "python"]
       interval: 10s
@@ -158,8 +159,10 @@ services:
     networks:
       - swarm_network
     depends_on:
-      - zenoh_router
-      - gazebo_simulator
+      zenoh_router:
+        condition: service_started
+      gazebo_simulator:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "pgrep", "-f", "python"]
       interval: 10s
