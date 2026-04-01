@@ -74,7 +74,7 @@ class DenddronAgent:
         Receives point cloud / bounding box data from Gazebo.
         Updates the internal voxel map for collision avoidance.
         """
-        payload = json.loads(sample.payload.decode('utf-8'))
+        bytes(sample.payload).decode('utf-8')
         # logger.debug(f"[{self.agent_id}] Sensor data received: {payload}")
         
         # TODO: Update self.voxel_map with incoming data
