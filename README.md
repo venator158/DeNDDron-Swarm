@@ -38,7 +38,6 @@ xhost +local:docker
 docker exec -it gazebo_simulator gzclient
 
 ```
-
 After the simulation is done 
 
 close the containers with 
