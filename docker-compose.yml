@@ -41,10 +41,12 @@ services:
     environment:
       ZENOH_ROUTER_IP: tcp/zenoh_router:7447
       GAZEBO_RESOURCE_PATH: /usr/share/gazebo-11:/home/app/sim
+      SWARM_RUNTIME_CONFIG: /home/app/config/swarm_runtime.json
       DISPLAY: ${DISPLAY:-:0}
       QT_X11_NO_MITSHM: 1
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ./config:/home/app/config:ro
     devices:
       - /dev/dri:/dev/dri
     networks:
@@ -62,17 +64,19 @@ services:
       - "11345:11345"
 
   # ===========================================================================
-  # Agent Services
+  # Agent Service (Scale with: docker compose up --scale agent=<N>)
   # ===========================================================================
-  agent_1:
+  agent:
     build:
       context: .
       dockerfile: docker/agent.Dockerfile
-    container_name: agent_1
     environment:
-      AGENT_ID: drone_1
       ZENOH_ROUTER_IP: tcp/zenoh_router:7447
+      SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
+      AGENT_ID_REGISTRY: /app/config/agent_registry.json
       LOOP_RATE_HZ: "50"
+    command: >
+      sh -c 'python -u main.py --zenoh-router "$${ZENOH_ROUTER_IP}"'
     networks:
       - swarm_network
     depends_on:
@@ -88,63 +92,12 @@ services:
     restart: unless-stopped
     volumes:
       - swarm_state:/state
+      - ./config:/app/config
     logging: &agent_logging
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-
-  agent_2:
-    build:
-      context: .
-      dockerfile: docker/agent.Dockerfile
-    container_name: agent_2
-    environment:
-      AGENT_ID: drone_2
-      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
-      LOOP_RATE_HZ: "50"
-    networks:
-      - swarm_network
-    depends_on:
-      zenoh_router:
-        condition: service_started
-      gazebo_simulator:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "pgrep", "-f", "python"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    restart: unless-stopped
-    volumes:
-      - swarm_state:/state
-    logging: *agent_logging
-
-  agent_3:
-    build:
-      context: .
-      dockerfile: docker/agent.Dockerfile
-    container_name: agent_3
-    environment:
-      AGENT_ID: drone_3
-      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
-      LOOP_RATE_HZ: "50"
-    networks:
-      - swarm_network
-    depends_on:
-      zenoh_router:
-        condition: service_started
-      gazebo_simulator:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "pgrep", "-f", "python"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    restart: unless-stopped
-    volumes:
-      - swarm_state:/state
-    logging: *agent_logging
 
   # ===========================================================================
   # Metrics Node

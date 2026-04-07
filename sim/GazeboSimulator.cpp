@@ -4,6 +4,9 @@
 #include <chrono>
 #include <thread>
 #include <cmath>
+#include <cctype>
+#include <fstream>
+#include <cstdlib>
 
 GazeboSimulator::GazeboSimulator() {
     std::cout << "[GazeboSimulator] Initializing..." << std::endl;
@@ -61,7 +64,53 @@ void GazeboSimulator::init() {
         std::move(pub_opt)
     ));
 
+    load_spawn_config();
+
     std::cout << "[GazeboSimulator] Ready. Waiting for agents..." << std::endl;
+}
+
+void GazeboSimulator::load_spawn_config() {
+    const char* env_path = std::getenv("SWARM_RUNTIME_CONFIG");
+    _spawn_config_path = env_path != nullptr ? env_path : "/home/app/config/swarm_runtime.json";
+
+    std::ifstream config_file(_spawn_config_path);
+    if (!config_file.is_open()) {
+        std::cout << "[GazeboSimulator] No runtime spawn config found at "
+                  << _spawn_config_path
+                  << ". Falling back to default placement." << std::endl;
+        return;
+    }
+
+    try {
+        json cfg = json::parse(config_file);
+        if (!cfg.contains("agents") || !cfg["agents"].is_object()) {
+            std::cerr << "[GazeboSimulator] Runtime config missing 'agents' object." << std::endl;
+            return;
+        }
+
+        _spawn_config.clear();
+        for (auto it = cfg["agents"].begin(); it != cfg["agents"].end(); ++it) {
+            const std::string agent_id = it.key();
+            const json& agent_cfg = it.value();
+            if (!agent_cfg.contains("spawn") || !agent_cfg["spawn"].is_object()) {
+                continue;
+            }
+
+            const json& spawn = agent_cfg["spawn"];
+            _spawn_config[agent_id] = SpawnPoint{
+                spawn.value("x", 0.0),
+                spawn.value("y", 0.0),
+                spawn.value("z", 1.0)
+            };
+        }
+
+        std::cout << "[GazeboSimulator] Loaded spawn config for "
+                  << _spawn_config.size() << " agents from "
+                  << _spawn_config_path << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] Failed to parse runtime spawn config: "
+                  << e.what() << std::endl;
+    }
 }
 
 void GazeboSimulator::disconnect() {
@@ -138,21 +187,42 @@ void GazeboSimulator::spawn_drone(const std::string& agent_id, const json& initi
 
     if (!_factory_pub) return;
 
-    // Hardcode spawning locations outside the ship based on agent_id
-    double x = -45.0; // Moved further away from ship (-25 is edge)
+    double x = -45.0;
     double y = 0.0;
-    double z = 20.0;  // Moved higher to make them easier to spot above water/ship
+    double z = 20.0;
 
-    if (agent_id == "drone_1" || agent_id == "1") {
-        y = -20.0;
-    } else if (agent_id == "drone_2" || agent_id == "2") {
-        y = 0.0;
-    } else if (agent_id == "drone_3" || agent_id == "3") {
-        y = 20.0;
+    auto cfg_it = _spawn_config.find(agent_id);
+    if (cfg_it != _spawn_config.end()) {
+        x = cfg_it->second.x;
+        y = cfg_it->second.y;
+        z = cfg_it->second.z;
     } else {
-        x = initial_pos.value("x", 0.0) + (std::rand() % 10 - 5) * 1.0; 
-        y = initial_pos.value("y", 0.0) + (std::rand() % 10 - 5) * 1.0;
-        z = initial_pos.value("z", 1.0);
+        // For ids like "drone_7" or "7", spread drones along Y while preserving
+        // legacy positions for the first three: -20, 0, +20.
+        int trailing_number = -1;
+        int power = 1;
+        bool found_digit = false;
+        for (int i = static_cast<int>(agent_id.size()) - 1; i >= 0; --i) {
+            unsigned char c = static_cast<unsigned char>(agent_id[static_cast<size_t>(i)]);
+            if (std::isdigit(c)) {
+                if (!found_digit) {
+                    trailing_number = 0;
+                    found_digit = true;
+                }
+                trailing_number += (agent_id[static_cast<size_t>(i)] - '0') * power;
+                power *= 10;
+            } else if (found_digit) {
+                break;
+            }
+        }
+
+        if (found_digit && trailing_number > 0) {
+            y = (static_cast<double>(trailing_number) - 2.0) * 20.0;
+        } else {
+            x = initial_pos.value("x", 0.0) + (std::rand() % 10 - 5) * 1.0;
+            y = initial_pos.value("y", 0.0) + (std::rand() % 10 - 5) * 1.0;
+            z = initial_pos.value("z", 1.0);
+        }
     }
 
     std::string sdf_str = generate_drone_sdf(agent_id, x, y, z);
