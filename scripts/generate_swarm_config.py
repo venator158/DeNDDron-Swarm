@@ -23,17 +23,24 @@ def build_agent_positions(
 ):
     agents = {}
     points = []
+    quadrant_angles = [
+        (0.0, 0.5 * math.pi),
+        (0.5 * math.pi, math.pi),
+        (math.pi, 1.5 * math.pi),
+        (1.5 * math.pi, 2.0 * math.pi),
+    ]
 
     for i in range(1, agent_count + 1):
         agent_id = f"drone_{i}"
 
-        # Rejection sample until we find a point in allowed range and far enough
-        # from other agents to avoid immediate overlap.
+        # Spread agents around the ship in quadrants, while keeping a bounded
+        # radial distance and a minimum separation from other agents.
         x = center_x
         y = center_y
         for _ in range(500):
             radius = random.uniform(min_radius, max_radius)
-            theta = random.uniform(0.0, 2.0 * math.pi)
+            quadrant = quadrant_angles[(i - 1) % len(quadrant_angles)]
+            theta = random.uniform(quadrant[0], quadrant[1])
             candidate = (
                 center_x + radius * math.cos(theta),
                 center_y + radius * math.sin(theta),
@@ -56,11 +63,11 @@ def build_agent_positions(
 def main():
     parser = argparse.ArgumentParser(description="Generate runtime config for DeNDDron swarm")
     parser.add_argument("--agents", type=int, default=3, help="Number of agents to spawn")
-    parser.add_argument("--x", type=float, default=-45.0, help="Spawn area center X")
+    parser.add_argument("--x", type=float, default=0.0, help="Spawn area center X")
     parser.add_argument("--y", type=float, default=0.0, help="Spawn area center Y")
     parser.add_argument("--z", type=float, default=20.0, help="Common spawn Z coordinate")
-    parser.add_argument("--min-radius", type=float, default=12.0, help="Minimum distance from center")
-    parser.add_argument("--max-radius", type=float, default=35.0, help="Maximum distance from center")
+    parser.add_argument("--min-radius", type=float, default=30.0, help="Minimum distance from center")
+    parser.add_argument("--max-radius", type=float, default=45.0, help="Maximum distance from center")
     parser.add_argument("--min-separation", type=float, default=8.0, help="Minimum spacing between agents")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducible layouts")
     parser.add_argument(

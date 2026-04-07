@@ -19,6 +19,7 @@ This launcher does three things in order:
 3. Starts Docker Compose with `--scale agent=<N>`.
 
 Spawn positions are randomized on each run, bounded so agents are neither too near nor too far from the spawn center.
+By default, they spawn in a ring around the ship at the origin.
 
 You can change count by passing a different number:
 ```bash
@@ -27,8 +28,8 @@ bash scripts/run_swarm.sh 6
 
 To customize random spawn limits:
 ```bash
-python3 scripts/generate_swarm_config.py --agents 6 --x -45 --y 0 --z 20 --min-radius 12 --max-radius 35 --min-separation 8
-docker compose --env-file .swarm.env up --build --scale agent=6
+python3 scripts/generate_swarm_config.py --agents 6 --x 0 --y 0 --z 20 --min-radius 30 --max-radius 45 --min-separation 8
+docker compose --env-file .swarm.env up --scale agent=6
 ```
 
 To view the Gazebo simulation GUI while the containers are running, execute:
