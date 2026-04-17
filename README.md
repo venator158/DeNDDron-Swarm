@@ -5,45 +5,17 @@ Codebase for DeNDDron Swarm
 
 To build and run:
 ```bash
-bash scripts/run_swarm.sh 3
+docker compose up --build  
 ```
-
-The launcher reuses existing images by default (no forced rebuild). To rebuild images when needed:
-```bash
-bash scripts/run_swarm.sh 3 --build
-```
-
-This launcher does three things in order:
-1. Runs `scripts/generate_swarm_config.py` to create `config/swarm_runtime.json` (spawn map).
-2. Writes `.swarm.env` (runtime docker env with `AGENT_COUNT`).
-3. Starts Docker Compose with `--scale agent=<N>`.
-
-Spawn positions are randomized on each run, bounded so agents are neither too near nor too far from the spawn center.
-By default, they spawn in a ring around the ship at the origin.
-
-You can change count by passing a different number:
-```bash
-bash scripts/run_swarm.sh 6
-```
-
-To customize random spawn limits:
-```bash
-python3 scripts/generate_swarm_config.py --agents 6 --x 0 --y 0 --z 20 --min-radius 30 --max-radius 45 --min-separation 8
-docker compose --env-file .swarm.env up --scale agent=6
-```
-
 To view the Gazebo simulation GUI while the containers are running, execute:
 ```bash
 xhost +local:docker
 docker exec -it gazebo_simulator gzclient
 
+docker compose restart agent_1 agent_2 agent_3
 ```
-After the simulation is done 
+wait for containers to restart to view in the sim
 
-close the containers with 
-```bash
-docker compose down
-```
 
 ### Recent Updates
 - **Agent Initialization**: Python agents now correctly spawn in the Gazebo 3D environment upon joining the Zenoh network.

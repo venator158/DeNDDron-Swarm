@@ -47,17 +47,8 @@ private:
 
     std::map<std::string, bool> _spawned_agents;
 
-    struct SpawnPoint {
-        double x;
-        double y;
-        double z;
-    };
-    std::map<std::string, SpawnPoint> _spawn_config;
-    std::string _spawn_config_path;
-
     void on_agent_join(const zenoh::Sample& sample);
     void on_cmd_vel(const zenoh::Sample& sample);
-    void load_spawn_config();
 
     std::string generate_drone_sdf(const std::string& agent_id, double x, double y, double z);
     void spawn_drone(const std::string& agent_id, const json& initial_pos);
