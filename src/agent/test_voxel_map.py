@@ -19,6 +19,8 @@ from pathlib import Path
 # Add src/agent to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 from voxel_map import VoxelMap
 from voxel_map_visualizer import VoxelMapVisualizer
 
@@ -207,7 +209,7 @@ def main():
 
     if args.plot in ["3d_plotly", "all"]:
         print("  Generating interactive 3D Plotly plot...")
-        save_plotly = args.save if args.save and args.save.endswith(".html") else "/tmp/voxel_map.html"
+        save_plotly = args.save if args.save and args.save.endswith(".html") else str(PROJECT_ROOT / "index.html")
         result = visualizer.plot_3d_plotly(save_path=save_plotly, max_voxels=10000)
         if result:
             print(f"  ✓ Saved to {save_plotly}")

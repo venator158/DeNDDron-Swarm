@@ -168,14 +168,12 @@ class VoxelMap:
 
             # Mark intermediate voxels as free, endpoint as occupied
             if i == steps - 1:
-                self.mark_occupied(self._voxel_to_world(vx, vy, vz)[0],
-                                  self._voxel_to_world(vx, vy, vz)[1],
-                                  self._voxel_to_world(vx, vy, vz)[2],
-                                  confidence=1.0)
+                # Mark actual endpoint coordinates (not voxel center)
+                self.mark_occupied(x_end, y_end, z_end, confidence=1.0)
             else:
-                self.mark_free(self._voxel_to_world(vx, vy, vz)[0],
-                              self._voxel_to_world(vx, vy, vz)[1],
-                              self._voxel_to_world(vx, vy, vz)[2])
+                # Mark intermediate voxels as free
+                x, y, z = self._voxel_to_world(vx, vy, vz)
+                self.mark_free(x, y, z)
 
     def clear(self):
         """Clear all voxels."""
@@ -199,8 +197,10 @@ class VoxelMap:
 
     def export_to_dict(self) -> dict:
         """Export voxel map to dictionary for serialization."""
+        # Convert tuple keys to strings for JSON serialization
+        voxels_serializable = {str(k): v for k, v in self.voxels.items()}
         return {
-            "voxels": self.voxels,
+            "voxels": voxels_serializable,
             "bounds": {
                 "x": [self.MIN_X, self.MAX_X],
                 "y": [self.MIN_Y, self.MAX_Y],

@@ -8,6 +8,8 @@ To build and run:
 bash scripts/run_swarm.sh 3
 ```
 
+This starts the Gazebo simulator, the Zenoh router, and 3 agent containers. The agents read their spawn positions from `config/swarm_runtime.json` and appear in the Gazebo world as they join.
+
 The launcher reuses existing images by default (no forced rebuild). To rebuild images when needed:
 ```bash
 bash scripts/run_swarm.sh 3 --build
@@ -26,23 +28,34 @@ You can change count by passing a different number:
 bash scripts/run_swarm.sh 6
 ```
 
+### Watch Agents Spawn in Gazebo
+
+1. Allow the Docker container to open a GUI window on your host:
+	```bash
+	xhost +local:docker
+	```
+
+2. Start the swarm from the repo root:
+	```bash
+	bash scripts/run_swarm.sh 3
+	```
+
+3. If the Gazebo window does not appear automatically, open the client from another terminal:
+	```bash
+	docker exec -it gazebo_simulator gzclient
+	```
+
+4. Watch the drones appear in the world while the agents connect over Zenoh and initialize their voxel maps.
+
+5. When you are done, close the simulator and clean up the containers:
+	```bash
+	docker compose down
+	```
+
 To customize random spawn limits:
 ```bash
 python3 scripts/generate_swarm_config.py --agents 6 --x 0 --y 0 --z 20 --min-radius 30 --max-radius 45 --min-separation 8
 docker compose --env-file .swarm.env up --scale agent=6
-```
-
-To view the Gazebo simulation GUI while the containers are running, execute:
-```bash
-xhost +local:docker
-docker exec -it gazebo_simulator gzclient
-
-```
-After the simulation is done 
-
-close the containers with 
-```bash
-docker compose down
 ```
 
 ### Recent Updates

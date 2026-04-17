@@ -75,6 +75,12 @@ class VoxelMapVisualizer:
         if occupied_2d:
             occ_x, occ_y = zip(*occupied_2d)
             ax.scatter(occ_x, occ_y, s=50, c='red', alpha=0.8, label='Occupied')
+        
+        if not free_2d and not occupied_2d:
+            # No data to visualize
+            ax.text(0.5, 0.5, 'No voxel data to visualize', 
+                   horizontalalignment='center', verticalalignment='center',
+                   transform=ax.transAxes, fontsize=14)
 
         # Map boundaries
         ax.axhline(y=self.voxel_map.MIN_Y, color='k', linestyle='--', alpha=0.5)
@@ -85,7 +91,12 @@ class VoxelMapVisualizer:
         ax.set_xlabel('X (meters)')
         ax.set_ylabel('Y (meters)')
         ax.set_title(f'Voxel Map 2D Slice at Z={z_slice}m (Resolution: {resolution}m)')
-        ax.legend()
+        
+        # Only add legend if there are labeled artists
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend()
+        
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal')
 
@@ -133,12 +144,20 @@ class VoxelMapVisualizer:
         if occupied:
             occ_x, occ_y, occ_z, _ = zip(*occupied)
             ax.scatter(occ_x, occ_y, occ_z, s=20, c='red', alpha=0.8, label='Occupied')
+        
+        if not free and not occupied:
+            # No data - add a dummy point to show structure
+            ax.scatter([0], [0], [0], s=1, c='gray', alpha=0.1)
 
         ax.set_xlabel('X (meters)')
         ax.set_ylabel('Y (meters)')
         ax.set_zlabel('Z (meters)')
         ax.set_title('Voxel Map 3D Visualization')
-        ax.legend()
+        
+        # Only add legend if there are labeled artists
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend()
 
         if save_path:
             fig.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -205,6 +224,15 @@ class VoxelMapVisualizer:
                 marker=dict(size=2, color='lightblue', opacity=0.1),
                 name='Free'
             ))
+        
+        # If no data, add a placeholder trace
+        if not occupied and not free:
+            fig.add_trace(go.Scatter3d(
+                x=[0], y=[0], z=[0],
+                mode='markers',
+                marker=dict(size=1, color='gray', opacity=0.1),
+                name='Empty'
+            ))
 
         # Set layout
         stats = data['stats']
@@ -249,7 +277,7 @@ class VoxelMapVisualizer:
 
         data = self.voxel_map.get_voxel_data()
         occupied = data['occupied']
-        free = data['free'][:len(occupied) // 5]  # Subsample free points
+        free = data['free'][:len(occupied) // 5] if occupied else []
 
         # Create point clouds
         points = []
@@ -264,6 +292,12 @@ class VoxelMapVisualizer:
         for x, y, z, conf in free:
             points.append([x, y, z])
             colors.append([0.68, 0.85, 0.9])  # Light blue
+        
+        if not points:
+            # No data - create a single point at origin
+            points.append([0.0, 0.0, 0.0])
+            colors.append([0.5, 0.5, 0.5])
+            logger.warning("No voxel data to visualize - showing empty point cloud")
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(np.array(points))

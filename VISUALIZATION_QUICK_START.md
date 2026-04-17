@@ -44,8 +44,8 @@ python3 test_voxel_map.py --plot 3d_mpl --positions 20 --save /tmp/3d.png
 #### 3. Interactive 3D Plotly (Recommended)
 ```bash
 pip install plotly
-python3 test_voxel_map.py --plot 3d_plotly --positions 20 --save /tmp/map.html
-# Open /tmp/map.html in browser
+python3 test_voxel_map.py --plot 3d_plotly --positions 20
+# Open index.html in the project root in browser
 ```
 **Features:** Full 3D control, color-coded occupancy, standalone HTML
 

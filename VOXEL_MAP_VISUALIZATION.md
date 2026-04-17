@@ -34,10 +34,10 @@ Output:
 pip install plotly
 
 # Generate visualization
-python3 test_voxel_map.py --plot 3d_plotly --positions 15 --save /tmp/voxel_map.html
+python3 test_voxel_map.py --plot 3d_plotly --positions 15
 
 # Open in browser
-open /tmp/voxel_map.html
+open index.html
 ```
 
 Features:
@@ -120,10 +120,10 @@ visualizer.plot_3d_matplotlib(save_path="/tmp/3d.png")
 
 **Example:**
 ```python
-visualizer.plot_3d_plotly(save_path="/tmp/map.html", max_voxels=10000)
+visualizer.plot_3d_plotly(save_path="index.html", max_voxels=10000)
 ```
 
-Then open `/tmp/map.html` in any web browser.
+Then open `index.html` in the project root in any web browser.
 
 ### 4. Point Cloud (Open3D)
 
@@ -219,10 +219,10 @@ python3 test_voxel_map.py --plot 2d --positions 15
 python3 test_voxel_map.py --plot 3d_mpl --positions 20
 
 # Interactive Plotly (requires plotly)
-python3 test_voxel_map.py --plot 3d_plotly --positions 30 --save /tmp/map.html
+python3 test_voxel_map.py --plot 3d_plotly --positions 30
 
 # Generate all visualizations
-python3 test_voxel_map.py --plot all --positions 25 --save /tmp/map.html
+python3 test_voxel_map.py --plot all --positions 25
 
 # Export data
 python3 test_voxel_map.py --export-csv /tmp/map.csv --export-json /tmp/map.json
@@ -388,7 +388,7 @@ pip install open3d
 | Task | Command |
 |------|---------|
 | Quick 2D test | `python3 test_voxel_map.py --plot 2d` |
-| Interactive 3D | `python3 test_voxel_map.py --plot 3d_plotly --save /tmp/map.html` |
+| Interactive 3D | `python3 test_voxel_map.py --plot 3d_plotly` |
 | Point cloud viewer | `python3 test_voxel_map.py --plot open3d` |
 | Export data | `python3 test_voxel_map.py --export-csv map.csv` |
 | Record live | `python3 record_voxel_map.py --agent drone_1` |
