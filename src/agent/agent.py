@@ -4,6 +4,7 @@ import time
 import threading
 import numpy as np
 import logging
+from voxel_map import VoxelMap
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
@@ -23,9 +24,11 @@ class DenddronAgent:
         
         # --- Internal State ---
         self.running = True
-        self.voxel_map = np.zeros((100, 100, 100)) # Placeholder for 3D environment
+        self.voxel_map = VoxelMap()  # Probabilistic occupancy grid
+        self.current_pose = None  # Current agent position and orientation
         self.current_goal = None
         self.current_job = None
+        self.step_count = 0  # For periodic exports
         
         # --- PILLAR 2: Reflexes (Publishers) ---
         self.pub_cmd_vel = self.session.declare_publisher(f"drone/{self.agent_id}/cmd_vel")
@@ -71,14 +74,93 @@ class DenddronAgent:
     # ==========================================
     def _on_sensor_data(self, sample):
         """
-        Receives point cloud / bounding box data from Gazebo.
-        Updates the internal voxel map for collision avoidance.
+        Receives sensor data (pose + LiDAR) from Gazebo.
+        Processes LiDAR rays and updates the voxel map for collision avoidance.
         """
-        bytes(sample.payload).decode('utf-8')
-        # logger.debug(f"[{self.agent_id}] Sensor data received: {payload}")
-        
-        # TODO: Update self.voxel_map with incoming data
-        pass
+        try:
+            payload = json.loads(bytes(sample.payload).decode('utf-8'))
+
+            # Extract pose and LiDAR data
+            pose = payload.get("pose", {})
+            lidar_data = payload.get("lidar", [])
+
+            # Store current pose for transformation
+            self.current_pose = {
+                "x": pose.get("x", 0.0),
+                "y": pose.get("y", 0.0),
+                "z": pose.get("z", 0.0),
+                "yaw": pose.get("yaw", 0.0)
+            }
+
+            # Process LiDAR rays
+            self._process_lidar(lidar_data, self.current_pose)
+
+        except Exception as e:
+            logger.debug(f"[{self.agent_id}] Error processing sensor data: {e}")
+
+    def _process_lidar(self, lidar_rays: list, pose: dict):
+        """
+        Process LiDAR rays: transform to world frame and update voxel map.
+
+        Args:
+            lidar_rays: List of ray measurements with (angle, distance, intensity, ray_id)
+            pose: Agent pose (x, y, z, yaw)
+        """
+        if not lidar_rays:
+            return
+
+        agent_x = pose.get("x", 0.0)
+        agent_y = pose.get("y", 0.0)
+        agent_z = pose.get("z", 0.0)
+        yaw = pose.get("yaw", 0.0)
+
+        for ray in lidar_rays:
+            try:
+                angle = ray.get("angle", 0.0)
+                distance = ray.get("distance", 0.0)
+
+                # Ignore invalid distances
+                if distance <= 0 or distance > 100:
+                    continue
+
+                # Transform ray from drone frame to world frame
+                # Ray in drone frame: horizontal angle = angle, vertical angle = 0 (horizontal plane)
+                # This simulates a horizontal 2D LiDAR
+
+                # World coordinates of ray endpoint
+                world_angle = yaw + angle  # Robot yaw + ray angle
+                ray_x = agent_x + distance * np.cos(world_angle)
+                ray_y = agent_y + distance * np.sin(world_angle)
+                ray_z = agent_z  # Assume horizontal LiDAR at drone center height
+
+                # Raytrace: mark free space along ray, occupied at endpoint
+                self.voxel_map.raytrace(agent_x, agent_y, agent_z,
+                                       ray_x, ray_y, ray_z)
+
+            except Exception as e:
+                logger.debug(f"[{self.agent_id}] Error processing ray: {e}")
+
+        # Log voxel map stats periodically (light logging)
+        logger.debug(f"[{self.agent_id}] Voxel map: {self.voxel_map.get_stats()}")
+
+    def _export_voxel_map(self):
+        """Export voxel map to JSON file for visualization."""
+        try:
+            import os
+            snapshot = {
+                "timestamp": time.time(),
+                "agent_id": self.agent_id,
+                "voxel_map": self.voxel_map.export_to_dict(),
+                "stats": self.voxel_map.get_stats()
+            }
+
+            output_path = f"/tmp/voxel_agent_{self.agent_id}.json"
+            with open(output_path, 'w') as f:
+                json.dump(snapshot, f)
+
+            logger.debug(f"[{self.agent_id}] Exported voxel map to {output_path}")
+        except Exception as e:
+            logger.debug(f"[{self.agent_id}] Failed to export voxel map: {e}")
 
     # ==========================================
     # PILLAR 2: REFLEXES (APF & Navigation)
@@ -86,26 +168,31 @@ class DenddronAgent:
     def _reflex_control_loop(self):
         """
         Runs at a constant frequency (e.g., 50Hz).
-        Calculates Artificial Potential Fields (APF) based on `self.voxel_map` 
+        Calculates Artificial Potential Fields (APF) based on `self.voxel_map`
         and `self.current_goal`, then outputs to cmd_vel.
         """
         rate_hz = 50.0
         sleep_time = 1.0 / rate_hz
-        
+
         while self.running:
             if self.current_goal is not None:
                 # 1. Calculate attractive force towards goal
                 # 2. Calculate repulsive force from self.voxel_map (Eyes)
                 # 3. Sum forces to get velocity vector
-                
+
                 # Placeholder logic:
                 cmd = {
                     "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
                     "angular": {"x": 0.0, "y": 0.0, "z": 0.0}
                 }
-                
+
                 self.pub_cmd_vel.put(json.dumps(cmd))
-                
+
+            # Export voxel map every 5 seconds (250 steps at 50Hz)
+            self.step_count += 1
+            if self.step_count % 250 == 0:
+                self._export_voxel_map()
+
             time.sleep(sleep_time)
 
     # ==========================================

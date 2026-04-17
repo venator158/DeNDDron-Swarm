@@ -1,34 +1,7 @@
 {
   "assigned": {
-    "6b84ab851c12": "drone_1",
-    "68e06c3f68bb": "drone_2",
-    "8eea9e959a07": "drone_3",
-    "a6de9078c9e9": "drone_4",
-    "82104f124fc4": "drone_5",
-    "424d76466574": "drone_6",
-    "20cb50fc2502": "drone_7",
-    "51855b4abf02": "drone_8",
-    "21152186dd0f": "drone_9",
-    "c65a439c3f9c": "drone_10",
-    "7a1406f59d12": "drone_11",
-    "efab01b99e37": "drone_12",
-    "acba3743705a": "drone_13",
-    "7242cf146974": "drone_14",
-    "f71755faeded": "drone_15",
-    "1eb88c7d6200": "drone_16",
-    "ee44ed07b8d1": "drone_17",
-    "b2d037db108c": "drone_18",
-    "1d354d309236": "drone_19",
-    "a7caf58e37f5": "drone_20",
-    "a75745592612": "drone_21",
-    "0d14b5f6e342": "drone_22",
-    "24e350b7e4e3": "drone_23",
-    "5ff7c2449100": "drone_24",
-    "8d67dbac9c21": "drone_25",
-    "ce48fb4cb585": "drone_26",
-    "3ee7869d480a": "drone_27",
-    "bb2a4ee02be3": "drone_28",
-    "dd05efb8e281": "drone_29",
-    "087c391eb2e9": "drone_30"
+    "65a352a6176d": "drone_1",
+    "fc4252796035": "drone_2",
+    "7daeb5230b6f": "drone_3"
   }
 }
