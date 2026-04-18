@@ -32,15 +32,41 @@ class APFStrategy(PathPlanningStrategy):
         self.influence_radius = 2.0 # Distance (m) to start feeling repulsion
         self.a_decay = 1.5          # Exponential decay rate
         self.b_scale = 1.0          # Inverse square mapping
+        
+        # Stuck condition (Local Minima) escape mechanisms from pp_test
+        self.alpha_stuck = 0.2      # Stuck growth rate for k_attractive
+        self.min_movement = 0.02    # Threshold to detect stuck condition (m/s)
+        self.stuck_threshold = 10   # Frames before considering stuck
+        
+        # State tracking
+        self.last_pos = None
+        self.stuck_count = 0
+        self.current_k_att = self.k_attractive
 
     def configure(self, config: Dict[str, Any]):
         self.k_attractive = config.get("attractive_gain", self.k_attractive)
         self.k_repulsive = config.get("repulsive_gain", self.k_repulsive)
         self.influence_radius = config.get("influence_radius", self.influence_radius)
+        self.alpha_stuck = config.get("stuck_growth_rate", self.alpha_stuck)
+        self.current_k_att = self.k_attractive
 
     def compute_velocity(self, current_pose: dict, goal_pose: dict, voxel_map) -> dict:
         curr_pos = np.array([current_pose['x'], current_pose['y'], current_pose['z']])
         goal_pos = np.array([goal_pose['x'], goal_pose['y'], goal_pose['z']])
+
+        # --- Check point: Local Minima Escape (Stuck Detection) ---
+        if self.last_pos is not None:
+            movement = np.linalg.norm(curr_pos - self.last_pos)
+            if movement < self.min_movement:
+                self.stuck_count += 1
+                if self.stuck_count >= self.stuck_threshold:
+                    # Exponentially increase attractive force to escape local minima
+                    self.current_k_att = np.exp(self.alpha_stuck * self.stuck_count)
+            else:
+                self.stuck_count = 0
+                self.current_k_att = self.k_attractive  # Reset to default
+        
+        self.last_pos = curr_pos
 
         # 1. Attractive Force
         to_goal = goal_pos - curr_pos
@@ -48,11 +74,10 @@ class APFStrategy(PathPlanningStrategy):
         f_att = np.zeros(3)
 
         if dist_to_goal > 0.1:
-            f_att = self.k_attractive * (to_goal / dist_to_goal)  # Normalized vector
+            f_att = self.current_k_att * (to_goal / dist_to_goal)  # Normalized vector
 
-        # 2. Repulsive Force (Iterate over local occupied voxels instead of global boxes)
+        # 2. Repulsive Force (Iterate over local occupied voxels)
         f_rep = np.zeros(3)
-        # TODO: Fast local neighborhood voxel discovery
         nearby_obstacles = voxel_map.get_nearby_obstacles(curr_pos[0], curr_pos[1], curr_pos[2], self.influence_radius)
 
         for obs in nearby_obstacles:
