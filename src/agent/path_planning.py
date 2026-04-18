@@ -1,0 +1,78 @@
+import numpy as np
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
+
+class PathPlanningStrategy(ABC):
+    """
+    Base Strategy Interface for Path Planning Algorithms.
+    Allows hot-swapping algorithms (e.g., APF, A*, ORCA).
+    """
+
+    @abstractmethod
+    def configure(self, config: Dict[str, Any]):
+        """Algorithm-specific configuration and hyperparameter tuning."""
+        pass
+
+    @abstractmethod
+    def compute_velocity(self, current_pose: dict, goal_pose: dict, voxel_map) -> dict:
+        """
+        Compute the next immediate velocity vector (Reflexes).
+        Returns a dictionary for cmd_vel: {'linear': {'x': 0.0, ...}, 'angular': {...}}
+        """
+        pass
+
+class APFStrategy(PathPlanningStrategy):
+    """
+    Artificial Potential Field (APF) implementation using local VoxelMap data.
+    """
+    def __init__(self):
+        # Default config mimicking pp_test C++ values
+        self.k_attractive = 1.0     # Attractive gain
+        self.k_repulsive = 0.5      # Repulsive gain
+        self.influence_radius = 2.0 # Distance (m) to start feeling repulsion
+        self.a_decay = 1.5          # Exponential decay rate
+        self.b_scale = 1.0          # Inverse square mapping
+
+    def configure(self, config: Dict[str, Any]):
+        self.k_attractive = config.get("attractive_gain", self.k_attractive)
+        self.k_repulsive = config.get("repulsive_gain", self.k_repulsive)
+        self.influence_radius = config.get("influence_radius", self.influence_radius)
+
+    def compute_velocity(self, current_pose: dict, goal_pose: dict, voxel_map) -> dict:
+        curr_pos = np.array([current_pose['x'], current_pose['y'], current_pose['z']])
+        goal_pos = np.array([goal_pose['x'], goal_pose['y'], goal_pose['z']])
+
+        # 1. Attractive Force
+        to_goal = goal_pos - curr_pos
+        dist_to_goal = np.linalg.norm(to_goal)
+        f_att = np.zeros(3)
+
+        if dist_to_goal > 0.1:
+            f_att = self.k_attractive * (to_goal / dist_to_goal)  # Normalized vector
+
+        # 2. Repulsive Force (Iterate over local occupied voxels instead of global boxes)
+        f_rep = np.zeros(3)
+        # TODO: Fast local neighborhood voxel discovery
+        nearby_obstacles = voxel_map.get_nearby_obstacles(curr_pos[0], curr_pos[1], curr_pos[2], self.influence_radius)
+
+        for obs in nearby_obstacles:
+            obs_pos = np.array([obs['x'], obs['y'], obs['z']])
+            to_obs = obs_pos - curr_pos
+            dist = np.linalg.norm(to_obs)
+
+            if 0 < dist < self.influence_radius:
+                # Force magnitude formula from pp_test: (1/(b*d²)) * e^(-a*d)
+                magnitude = (1.0 / (self.b_scale * (dist ** 2))) * np.exp(-self.a_decay * dist)
+                f_rep -= self.k_repulsive * magnitude * (to_obs / dist) # Push away
+
+        f_total = f_att + f_rep
+
+        # Limit max velocity
+        max_vel = 1.5
+        if np.linalg.norm(f_total) > max_vel:
+            f_total = (f_total / np.linalg.norm(f_total)) * max_vel
+
+        return {
+            "linear": {"x": float(f_total[0]), "y": float(f_total[1]), "z": float(f_total[2])},
+            "angular": {"x": 0.0, "y": 0.0, "z": 0.0}
+        }

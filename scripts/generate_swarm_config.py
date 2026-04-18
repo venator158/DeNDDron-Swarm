@@ -55,6 +55,21 @@ def build_agent_positions(
                 "x": x,
                 "y": y,
                 "z": z,
+            },
+            "goal": {
+                "x": -x,  # Give a simple diametrically opposite goal for testing
+                "y": -y,
+                "z": z,
+            },
+            "path_planning": {
+                "algorithm": "apf"
+            },
+            "kinematics": {
+                "max_velocity": 2.0,       # m/s
+                "max_acceleration": 1.5,   # m/s^2
+                "max_z": 50.0,             # Service ceiling
+                "min_z": 1.0,              # Floor / Ground safety
+                "max_service_radius": 100.0 # Maximum operational range from spawn point
             }
         }
     return agents

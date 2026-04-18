@@ -1,10 +1,13 @@
 import zenoh
 import json
+import yaml
 import time
 import threading
 import numpy as np
 import logging
+import os
 from voxel_map import VoxelMap
+from path_planning import APFStrategy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
@@ -29,6 +32,43 @@ class DenddronAgent:
         self.current_goal = None
         self.current_job = None
         self.step_count = 0  # For periodic exports
+
+        # --- Dynamic Drone Kinematics ---
+        self.last_velocity = np.zeros(3)
+        self.spawn_pose = {"x": 0.0, "y": 0.0, "z": 0.0}
+        self.kinematics = {
+            "max_velocity": 2.0,
+            "max_acceleration": 1.5,
+            "max_z": 50.0,
+            "min_z": 1.0,
+            "max_service_radius": 100.0
+        }
+
+        # --- Job Simulation / Config Loading ---
+        config_path = os.path.join(os.path.dirname(__file__), "..", "..", "config", "swarm_runtime.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                try:
+                    cfg = json.load(f)
+                    agents_cfg = cfg.get("agents", {})
+                    my_cfg = agents_cfg.get(self.agent_id, {})
+                    
+                    if "spawn" in my_cfg:
+                        self.spawn_pose = my_cfg["spawn"]
+
+                    if "goal" in my_cfg:
+                        self.current_goal = my_cfg["goal"]
+                        logger.info(f"[{self.agent_id}] Assigned static goal from runtime config: {self.current_goal}")
+                        
+                    if "kinematics" in my_cfg:
+                        self.kinematics.update(my_cfg["kinematics"])
+                        logger.info(f"[{self.agent_id}] Loaded kinematic limits: {self.kinematics}")
+                        
+                except Exception as e:
+                    logger.error(f"[{self.agent_id}] Failed to load static goal from config: {e}")
+
+        # Initialize Reflex Strategy (using APF)
+        self.path_planner = APFStrategy()
         
         # --- PILLAR 2: Reflexes (Publishers) ---
         self.pub_cmd_vel = self.session.declare_publisher(f"drone/{self.agent_id}/cmd_vel")
@@ -91,6 +131,10 @@ class DenddronAgent:
                 "z": pose.get("z", 0.0),
                 "yaw": pose.get("yaw", 0.0)
             }
+
+            # First, clean up stale voxels to ensure the APF computes against fresh data.
+            # Using 1.0s or 0.5s TTL is usually fine, but since we update at 50Hz, 0.1s ensures only very recent sweeps 
+            self.voxel_map.cleanup_stale_data(max_age=0.5)
 
             # Process LiDAR rays
             self._process_lidar(lidar_data, self.current_pose)
@@ -175,18 +219,70 @@ class DenddronAgent:
         sleep_time = 1.0 / rate_hz
 
         while self.running:
-            if self.current_goal is not None:
-                # 1. Calculate attractive force towards goal
-                # 2. Calculate repulsive force from self.voxel_map (Eyes)
-                # 3. Sum forces to get velocity vector
+            if self.current_goal is not None and self.current_pose is not None:
+                # 1. Use the injected Strategy Pattern implementation to calculate RAW CMD_VEL
+                # 2. Replaces global bounding boxes with local spatial voxel scans
+                cmd = self.path_planner.compute_velocity(
+                    current_pose=self.current_pose, 
+                    goal_pose=self.current_goal, 
+                    voxel_map=self.voxel_map
+                )
 
-                # Placeholder logic:
-                cmd = {
-                    "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
+                raw_v = np.array([
+                    cmd["linear"].get("x", 0.0),
+                    cmd["linear"].get("y", 0.0),
+                    cmd["linear"].get("z", 0.0)
+                ])
+
+                # --- UNIVERSAL KINEMATIC SAFETY LAYER ---
+                
+                # A. Altitude safety (Service Ceiling and Floor limits)
+                curr_z = self.current_pose["z"]
+                if curr_z >= self.kinematics["max_z"] and raw_v[2] > 0:
+                    raw_v[2] = 0.0  # Stop ascending immediately
+                elif curr_z <= self.kinematics["min_z"] and raw_v[2] < 0:
+                    raw_v[2] = 0.5  # Emergency bounce up to avoid crashing into floor
+
+                # B. Service Radius (Containment Cylinder from Spawn)
+                spawn_xy = np.array([self.spawn_pose["x"], self.spawn_pose["y"]])
+                curr_xy = np.array([self.current_pose["x"], self.current_pose["y"]])
+                dist_2d = np.linalg.norm(curr_xy - spawn_xy)
+                
+                if dist_2d >= self.kinematics["max_service_radius"]:
+                    out_vec = (curr_xy - spawn_xy) / max(dist_2d, 0.001)  # Radial vector
+                    v_xy = np.array([raw_v[0], raw_v[1]])
+                    v_outward = np.dot(v_xy, out_vec)
+                    
+                    if v_outward > 0:
+                        # Vector rejection: Remove outward speed, but allow moving sideways or back inward
+                        v_xy -= (v_outward * out_vec)
+                        raw_v[0], raw_v[1] = v_xy[0], v_xy[1]
+
+                # C. Acceleration Clamping (EWMA Smoothing via Physics)
+                # Ensure the delta velocity (dv) doesn't exceed the drone's max accel capacity over dt.
+                dv = raw_v - self.last_velocity
+                dv_mag = np.linalg.norm(dv)
+                max_dv = self.kinematics["max_acceleration"] * sleep_time  # a * dt = dv
+
+                if dv_mag > max_dv:
+                    dv = (dv / dv_mag) * max_dv  # Normalize and clamp delta
+                
+                new_v = self.last_velocity + dv
+
+                # D. Absolute Velocity Clamping
+                speed = np.linalg.norm(new_v)
+                if speed > self.kinematics["max_velocity"]:
+                    new_v = (new_v / speed) * self.kinematics["max_velocity"]
+
+                # E. Update Internal Momentum State
+                self.last_velocity = new_v
+
+                safe_cmd = {
+                    "linear": {"x": float(new_v[0]), "y": float(new_v[1]), "z": float(new_v[2])},
                     "angular": {"x": 0.0, "y": 0.0, "z": 0.0}
                 }
 
-                self.pub_cmd_vel.put(json.dumps(cmd))
+                self.pub_cmd_vel.put(json.dumps(safe_cmd))
 
             # Export voxel map every 5 seconds (250 steps at 50Hz)
             self.step_count += 1

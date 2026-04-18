@@ -7,6 +7,7 @@ VoxelMap: 3D probabilistic occupancy grid for obstacle perception.
 
 import numpy as np
 import logging
+import time
 
 logger = logging.getLogger("VoxelMap")
 
@@ -80,7 +81,7 @@ class VoxelMap:
         # Update with new confidence (taking max to accumulate evidence)
         current = self.voxels.get(key, 0.0)
         self.voxels[key] = max(current, confidence)
-        self.voxel_timestamps[key] = None  # Will be set with actual timestamp if needed
+        self.voxel_timestamps[key] = time.time()  # Store actual timestamp
 
     def mark_free(self, x: float, y: float, z: float):
         """
@@ -97,6 +98,7 @@ class VoxelMap:
         # Only mark as free if not already occupied
         if key not in self.voxels or self.voxels[key] < 0.5:
             self.voxels[key] = 0.0
+            self.voxel_timestamps[key] = time.time()
 
     def is_free(self, x: float, y: float, z: float, threshold: float = 0.5) -> bool:
         """
@@ -174,6 +176,49 @@ class VoxelMap:
                 # Mark intermediate voxels as free
                 x, y, z = self._voxel_to_world(vx, vy, vz)
                 self.mark_free(x, y, z)
+
+    def cleanup_stale_data(self, max_age: float = 0.5):
+        """
+        Removes or decays voxels that have not been updated recently.
+        This prevents moving obstacles from leaving trails and ensures APF uses fresh data.
+        
+        Args:
+            max_age: Maximum age in seconds before a voxel is cleared.
+        """
+        current_time = time.time()
+        stale_keys = []
+        
+        for key, ts in self.voxel_timestamps.items():
+            if current_time - ts > max_age:
+                stale_keys.append(key)
+                
+        for key in stale_keys:
+            del self.voxels[key]
+            del self.voxel_timestamps[key]
+
+    def get_nearby_obstacles(self, x: float, y: float, z: float, radius: float) -> list:
+        """
+        Finds all occupied voxels within a spherical radius of the given coordinate.
+        Returns a list of their central world coordinates.
+        """
+        obstacles = []
+        cx, cy, cz = self._world_to_voxel(x, y, z)
+        v_radius = int(np.ceil(radius / self.RESOLUTION))
+        
+        # Fast local bounding box check over the voxel sparse grid
+        for vx in range(cx - v_radius, cx + v_radius + 1):
+            for vy in range(cy - v_radius, cy + v_radius + 1):
+                for vz in range(cz - v_radius, cz + v_radius + 1):
+                    key = (vx, vy, vz)
+                    occupancy = self.voxels.get(key, 0.0)
+                    if occupancy >= 0.5:
+                        wx, wy, wz = self._voxel_to_world(vx, vy, vz)
+                        # Confirm spherical bounds (Euclidean distance)
+                        dist = np.sqrt((wx - x)**2 + (wy - y)**2 + (wz - z)**2)
+                        if dist <= radius:
+                            obstacles.append({"x": wx, "y": wy, "z": wz, "occupancy": occupancy})
+                            
+        return obstacles
 
     def clear(self):
         """Clear all voxels."""
