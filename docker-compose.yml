@@ -6,11 +6,11 @@ services:
   # ===========================================================================
   # DeNDDron Base (Shared Dependency)
   # ===========================================================================
-  denddron-base:
+  denddron_base:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
-    image: denddron-base:latest
+    image: denddron_base:latest
 
   # ===========================================================================
   # Zenoh Router
@@ -53,7 +53,7 @@ services:
       - swarm_network
     depends_on:
       - zenoh_router
-      - denddron-base
+      - denddron_base
     healthcheck:
       test: ["CMD-SHELL", "grep -a gazebo_simulator /proc/[0-9]*/cmdline >/dev/null 2>&1 || exit 1"]
       interval: 5s

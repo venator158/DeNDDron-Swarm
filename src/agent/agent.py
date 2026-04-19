@@ -45,7 +45,10 @@ class DenddronAgent:
         }
 
         # --- Job Simulation / Config Loading ---
-        config_path = os.path.join(os.path.dirname(__file__), "..", "..", "config", "swarm_runtime.json")
+        config_path = os.environ.get(
+            "SWARM_RUNTIME_CONFIG",
+            os.path.join(os.path.dirname(__file__), "..", "..", "config", "swarm_runtime.json")
+        )
         if os.path.exists(config_path):
             with open(config_path, "r") as f:
                 try:
@@ -71,7 +74,7 @@ class DenddronAgent:
         self.path_planner = APFStrategy()
         
         # --- PILLAR 2: Reflexes (Publishers) ---
-        self.pub_cmd_vel = self.session.declare_publisher(f"drone/{self.agent_id}/cmd_vel")
+        self.pub_cmd_vel = self.session.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
         
         # --- PILLAR 4: Consensus (Publishers) ---
         self.pub_bids = self.session.declare_publisher("swarm/bids")

@@ -32,7 +32,7 @@ void GazeboSimulator::init() {
     _factory_pub = _gznode->Advertise<gazebo::msgs::Factory>("~/factory");
     _factory_pub->WaitForConnection();
 
-    _physics_pub = _gznode->Advertise<gazebo::msgs::LinkData>("~/link/modify");
+    _physics_pub = _gznode->Advertise<gazebo::msgs::Model>("~/model/modify");
     
     std::cout << "[GazeboSimulator] Connected to Gazebo transport" << std::endl;
 
@@ -309,6 +309,30 @@ void GazeboSimulator::step() {
                 {"lidar", simulate_lidar(agent_id)}
             };
             publish_sensor_data(agent_id, sensor_data);
+
+            // Publish LinkData to force Gazebo to move the visual model
+            if (_physics_pub) {
+                std::lock_guard<std::mutex> lock(_state_mtx);
+                if (_drone_states.find(agent_id) != _drone_states.end()) {
+                    auto& state = _drone_states[agent_id];
+                    gazebo::msgs::Model msg;
+                    msg.set_name(agent_id);
+                    
+                    gazebo::msgs::Pose* pose_ptr = msg.mutable_pose();
+                    gazebo::msgs::Vector3d* pos = pose_ptr->mutable_position();
+                    pos->set_x(state.position.X());
+                    pos->set_y(state.position.Y());
+                    pos->set_z(state.position.Z());
+
+                    gazebo::msgs::Quaternion* rot = pose_ptr->mutable_orientation();
+                    rot->set_x(state.orientation.X());
+                    rot->set_y(state.orientation.Y());
+                    rot->set_z(state.orientation.Z());
+                    rot->set_w(state.orientation.W());
+
+                    _physics_pub->Publish(msg);
+                }
+            }
         }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(20)); // 50 Hz

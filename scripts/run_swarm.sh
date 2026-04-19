@@ -36,6 +36,8 @@ done
 
 compose_cmd=(docker compose --env-file .swarm.env up --scale agent="${AGENT_COUNT}")
 if [[ -n "$BUILD_FLAG" ]]; then
+  echo "Building base image first to satisfy Docker build dependencies..."
+  docker compose build denddron_base
   compose_cmd+=("$BUILD_FLAG")
 fi
 compose_cmd+=("$@")
