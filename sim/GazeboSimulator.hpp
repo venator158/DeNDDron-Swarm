@@ -51,6 +51,7 @@ private:
     std::optional<zenoh::Publisher> _pub_metrics;
 
     std::map<std::string, bool> _spawned_agents;
+    std::map<std::string, bool> _seen_cmd_vel;
 
     struct SpawnPoint {
         double x;

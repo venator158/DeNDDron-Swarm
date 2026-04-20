@@ -31,7 +31,7 @@ class DenddronAgent:
         self.current_pose = None  # Current agent position and orientation
         self.current_goal = None
         self.current_job = None
-        self.step_count = 0  # For periodic exports
+        self.step_count = 0  # For periodic status logging
         self.current_time = time.time()  # Latest timestamp (simulation or real)
 
         # --- Dynamic Drone Kinematics ---
@@ -191,25 +191,6 @@ class DenddronAgent:
         # Log voxel map stats periodically (light logging)
         logger.debug(f"[{self.agent_id}] Voxel map: {self.voxel_map.get_stats()}")
 
-    def _export_voxel_map(self):
-        """Export voxel map to JSON file for visualization."""
-        try:
-            import os
-            snapshot = {
-                "timestamp": self.current_time,
-                "agent_id": self.agent_id,
-                "voxel_map": self.voxel_map.export_to_dict(),
-                "stats": self.voxel_map.get_stats()
-            }
-
-            output_path = f"/tmp/voxel_agent_{self.agent_id}.json"
-            with open(output_path, 'w') as f:
-                json.dump(snapshot, f)
-
-            logger.debug(f"[{self.agent_id}] Exported voxel map to {output_path}")
-        except Exception as e:
-            logger.debug(f"[{self.agent_id}] Failed to export voxel map: {e}")
-
     # ==========================================
     # PILLAR 2: REFLEXES (APF & Navigation)
     # ==========================================
@@ -302,13 +283,10 @@ class DenddronAgent:
 
                 self.pub_cmd_vel.put(json.dumps(safe_cmd))
 
-            # Export voxel map every 5 seconds (250 steps at 50Hz)
+            # Log control output every 2 seconds (100 steps at 50Hz)
             self.step_count += 1
             if self.step_count % 100 == 0 and self.current_goal is not None:
                  logger.info(f"[{self.agent_id}] Publishing CMD_VEL: {safe_cmd['linear']}")
-
-            if self.step_count % 250 == 0:
-                self._export_voxel_map()
 
             time.sleep(sleep_time)
 

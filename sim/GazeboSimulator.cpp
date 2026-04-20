@@ -54,7 +54,7 @@ void GazeboSimulator::init() {
 
     auto sub_opt_cmd = zenoh::Session::SubscriberOptions::create_default();
     _sub_cmd_vel.emplace(_session->declare_subscriber(
-        zenoh::KeyExpr("swarm/+/cmd_vel"),
+        zenoh::KeyExpr("swarm/*/cmd_vel"),
         std::bind(&GazeboSimulator::on_cmd_vel, this, std::placeholders::_1),
         [](){},
         std::move(sub_opt_cmd)
@@ -148,8 +148,13 @@ void GazeboSimulator::on_cmd_vel(const zenoh::Sample& sample) {
         std::string agent_id = key.substr(first_slash + 1, second_slash - first_slash - 1);
         try {
             auto cmd_msg = json::parse(payload);
-            // std::cout << "[GazeboSimulator] Got cmd_vel for " << agent_id << std::endl;
             update_drone_velocity(agent_id, cmd_msg);
+
+            std::lock_guard<std::mutex> lock(_state_mtx);
+            if (!_seen_cmd_vel[agent_id]) {
+                _seen_cmd_vel[agent_id] = true;
+                std::cout << "[GazeboSimulator] Receiving cmd_vel for " << agent_id << std::endl;
+            }
         } catch(...) {}
     }
 }
