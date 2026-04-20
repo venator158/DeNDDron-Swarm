@@ -146,6 +146,7 @@ void GazeboSimulator::on_cmd_vel(const zenoh::Sample& sample) {
         std::string agent_id = key.substr(first_slash + 1, second_slash - first_slash - 1);
         try {
             auto cmd_msg = json::parse(payload);
+            // std::cout << "[GazeboSimulator] Got cmd_vel for " << agent_id << std::endl;
             update_drone_velocity(agent_id, cmd_msg);
         } catch(...) {}
     }
@@ -158,6 +159,7 @@ std::string GazeboSimulator::generate_drone_sdf(const std::string& agent_id, dou
         << "  <model name='" << agent_id << "'>"
         << "    <pose>" << x << " " << y << " " << z << " 0 0 0</pose>"
         << "    <link name='base'>"
+        << "      <kinematic>1</kinematic>"
         << "      <inertial>"
         << "        <mass>1.0</mass>"
         << "        <inertia>"
@@ -252,9 +254,6 @@ void GazeboSimulator::update_drone_velocity(const std::string& agent_id, const j
         if (_drone_states.find(agent_id) != _drone_states.end()) {
             _drone_states[agent_id].linear_velocity = ignition::math::Vector3d(vx, vy, vz);
             _drone_states[agent_id].angular_velocity = ignition::math::Vector3d(0, 0, yaw_rate);
-            
-            // Simple physics integration for visual feedback (since we aren't subscribing to gazebo poses yet)
-            _drone_states[agent_id].position += ignition::math::Vector3d(vx*0.1, vy*0.1, vz*0.1);
         }
     } catch (...) {}
 }
@@ -315,6 +314,11 @@ void GazeboSimulator::step() {
                 std::lock_guard<std::mutex> lock(_state_mtx);
                 if (_drone_states.find(agent_id) != _drone_states.end()) {
                     auto& state = _drone_states[agent_id];
+                    
+                    // Integrate position
+                    double dt = 0.02; // 50 Hz
+                    state.position += state.linear_velocity * dt;
+
                     gazebo::msgs::Model msg;
                     msg.set_name(agent_id);
                     

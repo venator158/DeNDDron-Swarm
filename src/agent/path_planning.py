@@ -35,7 +35,7 @@ class APFStrategy(PathPlanningStrategy):
         
         # Stuck condition (Local Minima) escape mechanisms from pp_test
         self.alpha_stuck = 0.2      # Stuck growth rate for k_attractive
-        self.min_movement = 0.02    # Threshold to detect stuck condition (m/s)
+        self.min_movement = 0.001   # Threshold to detect stuck condition (m/frame)
         self.stuck_threshold = 10   # Frames before considering stuck
         
         # State tracking
@@ -61,7 +61,8 @@ class APFStrategy(PathPlanningStrategy):
                 self.stuck_count += 1
                 if self.stuck_count >= self.stuck_threshold:
                     # Exponentially increase attractive force to escape local minima
-                    self.current_k_att = np.exp(self.alpha_stuck * self.stuck_count)
+                    capped_stuck_count = min(self.stuck_count, 50)  # Prevent np.exp overflow
+                    self.current_k_att = np.exp(self.alpha_stuck * capped_stuck_count)
             else:
                 self.stuck_count = 0
                 self.current_k_att = self.k_attractive  # Reset to default

@@ -45,8 +45,27 @@ def build_agent_positions(
                 center_x + radius * math.cos(theta),
                 center_y + radius * math.sin(theta),
             )
+            
+            # Goal needs same constraints (not inside the ship, within max/min radius).
+            # If we enforce candidate is good, let's just make the goal a valid reflection.
+            # However, simple -x, -y could technically be too close to another drone's goal
+            # or inside the ship (but if radius is 30-45, distance to origin is 30-45, so it won't be inside the ship).
+            # The ship is presumed at origin (0,0). So reflection through origin preserves distance to ship.
+            
             if all(_distance(candidate, prev) >= min_separation for prev in points):
                 x, y = candidate
+                break
+
+        # Generation uses same constraints, generate completely new valid (x,y)
+        goal_x, goal_y = center_x, center_y
+        for _ in range(500):
+            r2 = random.uniform(min_radius, max_radius)
+            t2 = random.uniform(0, 2.0 * math.pi)
+            candidate = (center_x + r2 * math.cos(t2), center_y + r2 * math.sin(t2))
+            
+            # To ensure it isn't too close to its own spawn point (so it actually flies)
+            if _distance(candidate, (x, y)) > min_radius:
+                goal_x, goal_y = candidate
                 break
 
         points.append((x, y))
@@ -57,16 +76,16 @@ def build_agent_positions(
                 "z": z,
             },
             "goal": {
-                "x": -x,  # Give a simple diametrically opposite goal for testing
-                "y": -y,
-                "z": z,
+                "x": goal_x,
+                "y": goal_y,
+                "z": abs(z),  # Ensure it's purely positive
             },
             "path_planning": {
                 "algorithm": "apf"
             },
             "kinematics": {
-                "max_velocity": 2.0,       # m/s
-                "max_acceleration": 1.5,   # m/s^2
+                "max_velocity": 5.0,       # m/s
+                "max_acceleration": 0.5,   # m/s^2
                 "max_z": 50.0,             # Service ceiling
                 "min_z": 1.0,              # Floor / Ground safety
                 "max_service_radius": 100.0 # Maximum operational range from spawn point

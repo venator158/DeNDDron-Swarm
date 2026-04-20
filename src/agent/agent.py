@@ -223,19 +223,26 @@ class DenddronAgent:
 
         while self.running:
             if self.current_goal is not None and self.current_pose is not None:
-                # 1. Use the injected Strategy Pattern implementation to calculate RAW CMD_VEL
-                # 2. Replaces global bounding boxes with local spatial voxel scans
-                cmd = self.path_planner.compute_velocity(
-                    current_pose=self.current_pose, 
-                    goal_pose=self.current_goal, 
-                    voxel_map=self.voxel_map
-                )
+                curr_pos = np.array([self.current_pose["x"], self.current_pose["y"], self.current_pose["z"]])
+                goal_pos = np.array([self.current_goal["x"], self.current_goal["y"], self.current_goal["z"]])
+                dist_to_goal = np.linalg.norm(goal_pos - curr_pos)
 
-                raw_v = np.array([
-                    cmd["linear"].get("x", 0.0),
-                    cmd["linear"].get("y", 0.0),
-                    cmd["linear"].get("z", 0.0)
-                ])
+                if dist_to_goal < 1.0:  # Termination radius
+                    raw_v = np.zeros(3)
+                else:
+                    # 1. Use the injected Strategy Pattern implementation to calculate RAW CMD_VEL
+                    # 2. Replaces global bounding boxes with local spatial voxel scans
+                    cmd = self.path_planner.compute_velocity(
+                        current_pose=self.current_pose, 
+                        goal_pose=self.current_goal, 
+                        voxel_map=self.voxel_map
+                    )
+
+                    raw_v = np.array([
+                        cmd["linear"].get("x", 0.0),
+                        cmd["linear"].get("y", 0.0),
+                        cmd["linear"].get("z", 0.0)
+                    ])
 
                 # --- UNIVERSAL KINEMATIC SAFETY LAYER ---
                 
@@ -289,6 +296,9 @@ class DenddronAgent:
 
             # Export voxel map every 5 seconds (250 steps at 50Hz)
             self.step_count += 1
+            if self.step_count % 100 == 0 and self.current_goal is not None:
+                 logger.info(f"[{self.agent_id}] Publishing CMD_VEL: {safe_cmd['linear']}")
+
             if self.step_count % 250 == 0:
                 self._export_voxel_map()
 
