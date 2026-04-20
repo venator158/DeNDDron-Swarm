@@ -17,6 +17,7 @@ def build_agent_positions(
     center_x: float,
     center_y: float,
     z: float,
+    z_step: float,
     min_radius: float,
     max_radius: float,
     min_separation: float,
@@ -29,6 +30,12 @@ def build_agent_positions(
         (math.pi, 1.5 * math.pi),
         (1.5 * math.pi, 2.0 * math.pi),
     ]
+    altitude_layers = max(2, min(6, int(math.ceil(math.sqrt(agent_count)))))
+
+    def _layered_z(index: int, phase_shift: int = 0) -> float:
+        centered = ((index + phase_shift) % altitude_layers) - (altitude_layers - 1) / 2.0
+        value = z + centered * z_step
+        return max(2.0, min(45.0, value))
 
     for i in range(1, agent_count + 1):
         agent_id = f"drone_{i}"
@@ -68,24 +75,28 @@ def build_agent_positions(
                 goal_x, goal_y = candidate
                 break
 
+        spawn_z = _layered_z(i - 1, phase_shift=0)
+        # Offset goal layer from spawn layer to encourage 3D trajectories.
+        goal_z = _layered_z(i - 1, phase_shift=max(1, altitude_layers // 2))
+
         points.append((x, y))
         agents[agent_id] = {
             "spawn": {
                 "x": x,
                 "y": y,
-                "z": z,
+                "z": spawn_z,
             },
             "goal": {
                 "x": goal_x,
                 "y": goal_y,
-                "z": abs(z),  # Ensure it's purely positive
+                "z": goal_z,
             },
             "path_planning": {
                 "algorithm": "apf"
             },
             "kinematics": {
-                "max_velocity": 5.0,       # m/s
-                "max_acceleration": 0.5,   # m/s^2
+                "max_velocity": 4.0,       # m/s
+                "max_acceleration": 1.0,   # m/s^2
                 "max_z": 50.0,             # Service ceiling
                 "min_z": 1.0,              # Floor / Ground safety
                 "max_service_radius": 100.0 # Maximum operational range from spawn point
@@ -100,6 +111,7 @@ def main():
     parser.add_argument("--x", type=float, default=0.0, help="Spawn area center X")
     parser.add_argument("--y", type=float, default=0.0, help="Spawn area center Y")
     parser.add_argument("--z", type=float, default=20.0, help="Common spawn Z coordinate")
+    parser.add_argument("--z-step", type=float, default=3.0, help="Vertical spacing between altitude layers")
     parser.add_argument("--min-radius", type=float, default=30.0, help="Minimum distance from center")
     parser.add_argument("--max-radius", type=float, default=45.0, help="Maximum distance from center")
     parser.add_argument("--min-separation", type=float, default=8.0, help="Minimum spacing between agents")
@@ -126,6 +138,8 @@ def main():
         raise ValueError("--max-radius must be > --min-radius")
     if args.min_separation < 0:
         raise ValueError("--min-separation must be >= 0")
+    if args.z_step <= 0:
+        raise ValueError("--z-step must be > 0")
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -137,6 +151,7 @@ def main():
             args.x,
             args.y,
             args.z,
+            args.z_step,
             args.min_radius,
             args.max_radius,
             args.min_separation,

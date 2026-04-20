@@ -143,7 +143,9 @@ class VoxelMap:
         return self.voxels.get(key, 0.0)
 
     def raytrace(self, x_start: float, y_start: float, z_start: float,
-                 x_end: float, y_end: float, z_end: float, current_time: float = None):
+                 x_end: float, y_end: float, z_end: float,
+                 current_time: float = None,
+                 mark_endpoint_occupied: bool = True):
         """
         Simple raytrace: mark voxels along ray as free, endpoint as occupied.
         Uses Bresenham-like 3D line algorithm.
@@ -161,8 +163,9 @@ class VoxelMap:
         steps = int(np.max(np.abs(diff))) + 1
 
         if steps <= 1:
-            # Ray too short, just mark endpoint
-            self.mark_occupied(x_end, y_end, z_end, confidence=1.0, current_time=current_time)
+            # Ray too short, optionally mark endpoint as occupied.
+            if mark_endpoint_occupied:
+                self.mark_occupied(x_end, y_end, z_end, confidence=1.0, current_time=current_time)
             return
 
         # Interpolate along ray
@@ -176,14 +179,15 @@ class VoxelMap:
 
             # Mark intermediate voxels as free, endpoint as occupied
             if i == steps - 1:
-                # Mark actual endpoint coordinates (not voxel center)
-                self.mark_occupied(x_end, y_end, z_end, confidence=1.0, current_time=current_time)
+                # Mark actual endpoint coordinates (not voxel center) only for true obstacle hits.
+                if mark_endpoint_occupied:
+                    self.mark_occupied(x_end, y_end, z_end, confidence=1.0, current_time=current_time)
             else:
                 # Mark intermediate voxels as free
                 x, y, z = self._voxel_to_world(vx, vy, vz)
                 self.mark_free(x, y, z, current_time=current_time)
 
-    def cleanup_stale_data(self, max_age: float = 0.5):
+    def cleanup_stale_data(self, max_age: float = 0.5, current_time: float = None):
         """
         Removes or decays voxels that have not been updated recently.
         This prevents moving obstacles from leaving trails and ensures APF uses fresh data.
@@ -197,6 +201,8 @@ class VoxelMap:
         
         with self.lock:
             for key, ts in list(self.voxel_timestamps.items()):
+                if ts is None:
+                    continue
                 if current_time - ts > max_age:
                     stale_keys.append(key)
                     

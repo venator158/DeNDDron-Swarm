@@ -27,9 +27,9 @@ class APFStrategy(PathPlanningStrategy):
     """
     def __init__(self):
         # Default config mimicking pp_test C++ values
-        self.k_attractive = 1.0     # Attractive gain
-        self.k_repulsive = 0.5      # Repulsive gain
-        self.influence_radius = 2.0 # Distance (m) to start feeling repulsion
+        self.k_attractive = 2.0     # Attractive gain
+        self.k_repulsive = 2.0      # Repulsive gain
+        self.influence_radius = 8.0 # Distance (m) to start feeling repulsion
         self.a_decay = 1.5          # Exponential decay rate
         self.b_scale = 1.0          # Inverse square mapping
         

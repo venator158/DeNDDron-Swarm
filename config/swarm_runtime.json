@@ -1,23 +1,23 @@
 {
-  "agent_count": 3,
+  "agent_count": 10,
   "agents": {
     "drone_1": {
       "spawn": {
-        "x": 28.638706753797898,
-        "y": 25.385333578784767,
-        "z": 20.0
+        "x": 3.3466771695053015,
+        "y": 31.53239967122117,
+        "z": 15.5
       },
       "goal": {
-        "x": 38.94515492387458,
-        "y": -11.53288730468959,
-        "z": 20.0
+        "x": -27.232466038452063,
+        "y": -30.333325001909856,
+        "z": 21.5
       },
       "path_planning": {
         "algorithm": "apf"
       },
       "kinematics": {
-        "max_velocity": 5.0,
-        "max_acceleration": 0.5,
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
         "max_z": 50.0,
         "min_z": 1.0,
         "max_service_radius": 100.0
@@ -25,21 +25,21 @@
     },
     "drone_2": {
       "spawn": {
-        "x": -31.03717645632964,
-        "y": 18.92492573936864,
-        "z": 20.0
+        "x": -1.7892740784010452,
+        "y": 44.03583335648808,
+        "z": 18.5
       },
       "goal": {
-        "x": -37.0972697566252,
-        "y": -15.772947306394473,
-        "z": 20.0
+        "x": -34.97070920422562,
+        "y": -16.090881288497837,
+        "z": 24.5
       },
       "path_planning": {
         "algorithm": "apf"
       },
       "kinematics": {
-        "max_velocity": 5.0,
-        "max_acceleration": 0.5,
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
         "max_z": 50.0,
         "min_z": 1.0,
         "max_service_radius": 100.0
@@ -47,21 +47,175 @@
     },
     "drone_3": {
       "spawn": {
-        "x": -14.13973173550353,
-        "y": -41.242042755793236,
-        "z": 20.0
+        "x": -21.585108337623215,
+        "y": -37.90001764394764,
+        "z": 21.5
       },
       "goal": {
-        "x": 17.95693044477547,
-        "y": 31.456322004922956,
-        "z": 20.0
+        "x": 28.24074736113324,
+        "y": 12.476905546674903,
+        "z": 15.5
       },
       "path_planning": {
         "algorithm": "apf"
       },
       "kinematics": {
-        "max_velocity": 5.0,
-        "max_acceleration": 0.5,
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
+        "max_z": 50.0,
+        "min_z": 1.0,
+        "max_service_radius": 100.0
+      }
+    },
+    "drone_4": {
+      "spawn": {
+        "x": 21.2258615229135,
+        "y": -21.306567658751412,
+        "z": 24.5
+      },
+      "goal": {
+        "x": -32.92658369925545,
+        "y": 24.944083482251088,
+        "z": 18.5
+      },
+      "path_planning": {
+        "algorithm": "apf"
+      },
+      "kinematics": {
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
+        "max_z": 50.0,
+        "min_z": 1.0,
+        "max_service_radius": 100.0
+      }
+    },
+    "drone_5": {
+      "spawn": {
+        "x": 37.7448178630198,
+        "y": 12.921926272794268,
+        "z": 15.5
+      },
+      "goal": {
+        "x": -28.47632443677247,
+        "y": 22.663270560686428,
+        "z": 21.5
+      },
+      "path_planning": {
+        "algorithm": "apf"
+      },
+      "kinematics": {
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
+        "max_z": 50.0,
+        "min_z": 1.0,
+        "max_service_radius": 100.0
+      }
+    },
+    "drone_6": {
+      "spawn": {
+        "x": -29.797050056921112,
+        "y": 7.143001159704202,
+        "z": 18.5
+      },
+      "goal": {
+        "x": 5.810639156547296,
+        "y": 32.882097521656846,
+        "z": 24.5
+      },
+      "path_planning": {
+        "algorithm": "apf"
+      },
+      "kinematics": {
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
+        "max_z": 50.0,
+        "min_z": 1.0,
+        "max_service_radius": 100.0
+      }
+    },
+    "drone_7": {
+      "spawn": {
+        "x": -41.545153902162426,
+        "y": -12.250469440905775,
+        "z": 21.5
+      },
+      "goal": {
+        "x": -17.070310748049067,
+        "y": 37.529035634281506,
+        "z": 15.5
+      },
+      "path_planning": {
+        "algorithm": "apf"
+      },
+      "kinematics": {
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
+        "max_z": 50.0,
+        "min_z": 1.0,
+        "max_service_radius": 100.0
+      }
+    },
+    "drone_8": {
+      "spawn": {
+        "x": 14.438731511550834,
+        "y": -27.552429211051603,
+        "z": 24.5
+      },
+      "goal": {
+        "x": -31.08030801928016,
+        "y": -28.62363302737322,
+        "z": 18.5
+      },
+      "path_planning": {
+        "algorithm": "apf"
+      },
+      "kinematics": {
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
+        "max_z": 50.0,
+        "min_z": 1.0,
+        "max_service_radius": 100.0
+      }
+    },
+    "drone_9": {
+      "spawn": {
+        "x": 22.292281187840636,
+        "y": 24.410930939717744,
+        "z": 15.5
+      },
+      "goal": {
+        "x": -32.46157444804787,
+        "y": 22.536347861401982,
+        "z": 21.5
+      },
+      "path_planning": {
+        "algorithm": "apf"
+      },
+      "kinematics": {
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
+        "max_z": 50.0,
+        "min_z": 1.0,
+        "max_service_radius": 100.0
+      }
+    },
+    "drone_10": {
+      "spawn": {
+        "x": -37.070064817541464,
+        "y": 0.7121814481908317,
+        "z": 18.5
+      },
+      "goal": {
+        "x": -15.551943692657993,
+        "y": -33.253201859707325,
+        "z": 24.5
+      },
+      "path_planning": {
+        "algorithm": "apf"
+      },
+      "kinematics": {
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
         "max_z": 50.0,
         "min_z": 1.0,
         "max_service_radius": 100.0

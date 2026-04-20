@@ -32,7 +32,15 @@ class DenddronAgent:
         self.current_goal = None
         self.current_job = None
         self.step_count = 0  # For periodic status logging
+        self.sensor_frame_count = 0
         self.current_time = time.time()  # Latest timestamp (simulation or real)
+        self.latest_visible_obstacles = []
+        self.latest_voxel_summary = {
+            "hits": 0,
+            "placed": 0,
+            "visible": 0,
+            "nearest": []
+        }
 
         # --- Dynamic Drone Kinematics ---
         self.last_velocity = np.zeros(3)
@@ -161,11 +169,14 @@ class DenddronAgent:
         agent_y = pose.get("y", 0.0)
         agent_z = pose.get("z", 0.0)
         yaw = pose.get("yaw", 0.0)
+        lidar_hits = 0
+        placed_occupied = 0
 
         for ray in lidar_rays:
             try:
                 angle = ray.get("angle", 0.0)
                 distance = ray.get("distance", 0.0)
+                intensity = ray.get("intensity", 0.0)
 
                 # Ignore invalid distances
                 if distance <= 0 or distance > 100:
@@ -181,12 +192,56 @@ class DenddronAgent:
                 ray_y = agent_y + distance * np.sin(world_angle)
                 ray_z = agent_z  # Assume horizontal LiDAR at drone center height
 
+                # Treat sub-max-range/high-intensity returns as obstacle detections.
+                is_hit = (distance < 49.5) or (intensity >= 0.8)
+                if is_hit:
+                    lidar_hits += 1
+                    placed_occupied += 1
+
                 # Raytrace: mark free space along ray, occupied at endpoint
                 self.voxel_map.raytrace(agent_x, agent_y, agent_z,
-                                       ray_x, ray_y, ray_z, current_time=self.current_time)
+                                       ray_x, ray_y, ray_z,
+                                       current_time=self.current_time,
+                                       mark_endpoint_occupied=is_hit)
 
             except Exception as e:
                 logger.debug(f"[{self.agent_id}] Error processing ray: {e}")
+
+        visible_obstacles = self.voxel_map.get_nearby_obstacles(agent_x, agent_y, agent_z, radius=12.0)
+        nearest = []
+        if visible_obstacles:
+            with_dist = []
+            curr = np.array([agent_x, agent_y, agent_z])
+            for obs in visible_obstacles:
+                d = float(np.linalg.norm(curr - np.array([obs["x"], obs["y"], obs["z"]])))
+                with_dist.append((d, obs))
+            with_dist.sort(key=lambda t: t[0])
+            nearest = [
+                {
+                    "d": round(item[0], 2),
+                    "x": round(item[1]["x"], 2),
+                    "y": round(item[1]["y"], 2),
+                    "z": round(item[1]["z"], 2),
+                }
+                for item in with_dist[:3]
+            ]
+
+        self.latest_visible_obstacles = visible_obstacles
+        self.latest_voxel_summary = {
+            "hits": lidar_hits,
+            "placed": placed_occupied,
+            "visible": len(visible_obstacles),
+            "nearest": nearest,
+        }
+
+        self.sensor_frame_count += 1
+        if self.sensor_frame_count % 50 == 0:
+            stats = self.voxel_map.get_stats()
+            logger.info(
+                f"[{self.agent_id}] Voxel detection: hits={lidar_hits}, "
+                f"placed_occupied={placed_occupied}, visible={len(visible_obstacles)}, "
+                f"nearest={nearest}, map_stats={stats}"
+            )
 
         # Log voxel map stats periodically (light logging)
         logger.debug(f"[{self.agent_id}] Voxel map: {self.voxel_map.get_stats()}")
@@ -232,6 +287,30 @@ class DenddronAgent:
                         cmd["linear"].get("y", 0.0),
                         cmd["linear"].get("z", 0.0)
                     ])
+
+                # F. Emergency damping near dynamic/static obstacles detected by voxel map.
+                # This acts as a final safety net in dense crossing trajectories.
+                nearby = self.voxel_map.get_nearby_obstacles(
+                    curr_pos[0], curr_pos[1], curr_pos[2], radius=6.0
+                )
+                min_obs_dist = None
+                if nearby:
+                    dists = [
+                        np.linalg.norm(curr_pos - np.array([o["x"], o["y"], o["z"]]))
+                        for o in nearby
+                    ]
+                    min_obs_dist = min(dists) if dists else None
+
+                if min_obs_dist is not None:
+                    if min_obs_dist < 1.5:
+                        raw_v[:2] *= 0.05
+                        # Brief vertical escape if room exists.
+                        if self.current_pose["z"] < self.kinematics["max_z"] - 1.0:
+                            raw_v[2] = max(raw_v[2], 0.8)
+                    elif min_obs_dist < 2.5:
+                        raw_v[:2] *= 0.25
+                    elif min_obs_dist < 4.0:
+                        raw_v[:2] *= 0.5
 
                 # --- UNIVERSAL KINEMATIC SAFETY LAYER ---
                 
@@ -286,7 +365,12 @@ class DenddronAgent:
             # Log control output every 2 seconds (100 steps at 50Hz)
             self.step_count += 1
             if self.step_count % 100 == 0 and self.current_goal is not None:
-                 logger.info(f"[{self.agent_id}] Publishing CMD_VEL: {safe_cmd['linear']}")
+                 logger.info(
+                     f"[{self.agent_id}] Publishing CMD_VEL: {safe_cmd['linear']} | "
+                     f"visible_voxels={self.latest_voxel_summary['visible']} "
+                     f"hits={self.latest_voxel_summary['hits']} "
+                     f"nearest={self.latest_voxel_summary['nearest']}"
+                 )
 
             time.sleep(sleep_time)
 

@@ -266,12 +266,84 @@ void GazeboSimulator::update_drone_velocity(const std::string& agent_id, const j
 }
 
 json GazeboSimulator::simulate_lidar(const std::string& agent_id) {
+    const int num_rays = 32;
+    const double max_range = 50.0;
+    const double drone_radius = 3.0;  // Inflated for safer inter-drone separation
+    const double ship_radius = 16.0;
+
+    ignition::math::Vector3d agent_pos(0, 0, 0);
+    std::vector<ignition::math::Vector3d> dynamic_obstacles;
+
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        auto self_it = _drone_states.find(agent_id);
+        if (self_it != _drone_states.end()) {
+            agent_pos = self_it->second.position;
+        }
+
+        for (const auto& [other_id, state] : _drone_states) {
+            if (other_id != agent_id) {
+                dynamic_obstacles.push_back(state.position);
+            }
+        }
+    }
+
+    auto ray_circle_intersection = [](double ox, double oy, double dx, double dy,
+                                      double cx, double cy, double radius) -> double {
+        // Solve ||(o + t*d) - c||^2 = r^2 in 2D. Return nearest positive t.
+        const double rx = ox - cx;
+        const double ry = oy - cy;
+
+        const double b = 2.0 * (dx * rx + dy * ry);
+        const double c = rx * rx + ry * ry - radius * radius;
+        const double disc = b * b - 4.0 * c;
+        if (disc < 0.0) {
+            return -1.0;
+        }
+
+        const double sqrt_disc = std::sqrt(disc);
+        const double t1 = (-b - sqrt_disc) / 2.0;
+        const double t2 = (-b + sqrt_disc) / 2.0;
+
+        if (t1 > 0.0) return t1;
+        if (t2 > 0.0) return t2;
+        return -1.0;
+    };
+
     json lidar_data = json::array();
-    for (int i = 0; i < 16; ++i) {
+    for (int i = 0; i < num_rays; ++i) {
+        const double angle = (2.0 * M_PI * i) / static_cast<double>(num_rays);
+        const double dx = std::cos(angle);
+        const double dy = std::sin(angle);
+
+        double closest = max_range;
+        bool hit = false;
+
+        // Static ship obstacle at origin
+        {
+            const double t_ship = ray_circle_intersection(
+                agent_pos.X(), agent_pos.Y(), dx, dy, 0.0, 0.0, ship_radius);
+            if (t_ship > 0.0 && t_ship < closest) {
+                closest = t_ship;
+                hit = true;
+            }
+        }
+
+        // Dynamic obstacles (other drones)
+        for (const auto& p : dynamic_obstacles) {
+            const double t = ray_circle_intersection(
+                agent_pos.X(), agent_pos.Y(), dx, dy, p.X(), p.Y(), drone_radius);
+            if (t > 0.0 && t < closest) {
+                closest = t;
+                hit = true;
+            }
+        }
+
+        const double measured = std::max(0.0, std::min(closest, max_range));
         lidar_data.push_back({
-            {"angle", (2.0 * M_PI * i) / 16.0},
-            {"distance", 50.0},
-            {"intensity", 0.5},
+            {"angle", angle},
+            {"distance", measured},
+            {"intensity", hit ? 0.9 : 0.2},
             {"ray_id", i}
         });
     }
