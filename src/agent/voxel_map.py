@@ -69,7 +69,7 @@ class VoxelMap:
         max_vz = int((self.MAX_Z - self.MIN_Z) / self.RESOLUTION) + 1
         return 0 <= vx < max_vx and 0 <= vy < max_vy and 0 <= vz < max_vz
 
-    def mark_occupied(self, x: float, y: float, z: float, confidence: float = 1.0):
+    def mark_occupied(self, x: float, y: float, z: float, confidence: float = 1.0, current_time: float = None):
         """
         Mark a world coordinate as occupied with given confidence.
 
@@ -86,9 +86,9 @@ class VoxelMap:
             # Update with new confidence (taking max to accumulate evidence)
             current = self.voxels.get(key, 0.0)
             self.voxels[key] = max(current, confidence)
-            self.voxel_timestamps[key] = time.time()  # Store actual timestamp
+            self.voxel_timestamps[key] = current_time if current_time else time.time()  # Store actual timestamp
 
-    def mark_free(self, x: float, y: float, z: float):
+    def mark_free(self, x: float, y: float, z: float, current_time: float = None):
         """
         Mark a world coordinate as free space.
 
@@ -104,7 +104,7 @@ class VoxelMap:
             # Only mark as free if not already occupied
             if key not in self.voxels or self.voxels[key] < 0.5:
                 self.voxels[key] = 0.0
-                self.voxel_timestamps[key] = time.time()
+                self.voxel_timestamps[key] = current_time if current_time else time.time()
 
     def is_free(self, x: float, y: float, z: float, threshold: float = 0.5) -> bool:
         """
@@ -143,7 +143,7 @@ class VoxelMap:
         return self.voxels.get(key, 0.0)
 
     def raytrace(self, x_start: float, y_start: float, z_start: float,
-                 x_end: float, y_end: float, z_end: float):
+                 x_end: float, y_end: float, z_end: float, current_time: float = None):
         """
         Simple raytrace: mark voxels along ray as free, endpoint as occupied.
         Uses Bresenham-like 3D line algorithm.
@@ -162,7 +162,7 @@ class VoxelMap:
 
         if steps <= 1:
             # Ray too short, just mark endpoint
-            self.mark_occupied(x_end, y_end, z_end, confidence=1.0)
+            self.mark_occupied(x_end, y_end, z_end, confidence=1.0, current_time=current_time)
             return
 
         # Interpolate along ray
@@ -177,11 +177,11 @@ class VoxelMap:
             # Mark intermediate voxels as free, endpoint as occupied
             if i == steps - 1:
                 # Mark actual endpoint coordinates (not voxel center)
-                self.mark_occupied(x_end, y_end, z_end, confidence=1.0)
+                self.mark_occupied(x_end, y_end, z_end, confidence=1.0, current_time=current_time)
             else:
                 # Mark intermediate voxels as free
                 x, y, z = self._voxel_to_world(vx, vy, vz)
-                self.mark_free(x, y, z)
+                self.mark_free(x, y, z, current_time=current_time)
 
     def cleanup_stale_data(self, max_age: float = 0.5):
         """
@@ -191,7 +191,8 @@ class VoxelMap:
         Args:
             max_age: Maximum age in seconds before a voxel is cleared.
         """
-        current_time = time.time()
+        if current_time is None:
+            current_time = time.time()
         stale_keys = []
         
         with self.lock:

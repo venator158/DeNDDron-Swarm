@@ -29,6 +29,11 @@ private:
     gazebo::transport::NodePtr _gznode;
     gazebo::transport::PublisherPtr _factory_pub;  // For spawning models
     gazebo::transport::PublisherPtr _physics_pub;  // For applying forces to models
+    gazebo::transport::SubscriberPtr _stats_sub;   // For receiving simulation time
+    double _sim_time = 0.0;
+    double _last_sim_time = 0.0;
+
+    void on_world_stats(ConstWorldStatisticsPtr &_msg);
     
     // Cache drone state (position, velocity, orientation)
     struct DroneState {

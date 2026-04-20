@@ -34,6 +34,8 @@ void GazeboSimulator::init() {
 
     _physics_pub = _gznode->Advertise<gazebo::msgs::Model>("~/model/modify");
     
+    _stats_sub = _gznode->Subscribe("~/world_stats", &GazeboSimulator::on_world_stats, this);
+
     std::cout << "[GazeboSimulator] Connected to Gazebo transport" << std::endl;
 
     // Zenoh Init
@@ -299,24 +301,47 @@ void GazeboSimulator::publish_sensor_data(const std::string& agent_id, const jso
     }
 }
 
+void GazeboSimulator::on_world_stats(ConstWorldStatisticsPtr &_msg) {
+    if (_msg->has_sim_time()) {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        _sim_time = _msg->sim_time().sec() + _msg->sim_time().nsec() * 1e-9;
+    }
+}
+
 void GazeboSimulator::step() {
-    auto now = std::chrono::steady_clock::now();
+    double current_sim_time = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        current_sim_time = _sim_time;
+    }
+
+    double dt = 0.0;
+    if (_last_sim_time > 0.0 && current_sim_time > _last_sim_time) {
+        dt = current_sim_time - _last_sim_time;
+    } 
+    
+    if (_last_sim_time == 0.0 && current_sim_time > 0.0) {
+        _last_sim_time = current_sim_time;
+    }
+
+    // Even if dt == 0 (simulator paused or no time elapsed), we can still publish sensors.
+
     for (const auto& [agent_id, spawned] : _spawned_agents) {
         if (spawned) {
             json sensor_data = {
+                {"sim_time", current_sim_time},
                 {"pose", get_drone_pose(agent_id)},
                 {"lidar", simulate_lidar(agent_id)}
             };
             publish_sensor_data(agent_id, sensor_data);
 
             // Publish LinkData to force Gazebo to move the visual model
-            if (_physics_pub) {
+            if (_physics_pub && dt > 0.0) {
                 std::lock_guard<std::mutex> lock(_state_mtx);
                 if (_drone_states.find(agent_id) != _drone_states.end()) {
                     auto& state = _drone_states[agent_id];
                     
-                    // Integrate position
-                    double dt = 0.02; // 50 Hz
+                    // Integrate position using gazebo simulation time
                     state.position += state.linear_velocity * dt;
 
                     gazebo::msgs::Model msg;
@@ -339,5 +364,10 @@ void GazeboSimulator::step() {
             }
         }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // 50 Hz
+    
+    if (dt > 0.0) {
+        _last_sim_time = current_sim_time;
+    }
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // 50 Hz real-time tick rate
 }

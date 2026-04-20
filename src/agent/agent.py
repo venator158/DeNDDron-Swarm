@@ -32,6 +32,7 @@ class DenddronAgent:
         self.current_goal = None
         self.current_job = None
         self.step_count = 0  # For periodic exports
+        self.current_time = time.time()  # Latest timestamp (simulation or real)
 
         # --- Dynamic Drone Kinematics ---
         self.last_velocity = np.zeros(3)
@@ -124,6 +125,7 @@ class DenddronAgent:
             payload = json.loads(bytes(sample.payload).decode('utf-8'))
 
             # Extract pose and LiDAR data
+            self.current_time = payload.get("sim_time", time.time())
             pose = payload.get("pose", {})
             lidar_data = payload.get("lidar", [])
 
@@ -136,9 +138,8 @@ class DenddronAgent:
             }
 
             # First, clean up stale voxels to ensure the APF computes against fresh data.
-            # Using 1.0s or 0.5s TTL is usually fine, but since we update at 50Hz, 0.1s ensures only very recent sweeps 
-            self.voxel_map.cleanup_stale_data(max_age=0.5)
-
+            # Using 1.0s or 0.5s TTL is usually fine, but since we update at 50Hz, 0.1s ensures only very recent sweeps
+            self.voxel_map.cleanup_stale_data(max_age=0.5, current_time=self.current_time)
             # Process LiDAR rays
             self._process_lidar(lidar_data, self.current_pose)
 
@@ -182,7 +183,7 @@ class DenddronAgent:
 
                 # Raytrace: mark free space along ray, occupied at endpoint
                 self.voxel_map.raytrace(agent_x, agent_y, agent_z,
-                                       ray_x, ray_y, ray_z)
+                                       ray_x, ray_y, ray_z, current_time=self.current_time)
 
             except Exception as e:
                 logger.debug(f"[{self.agent_id}] Error processing ray: {e}")
@@ -195,7 +196,7 @@ class DenddronAgent:
         try:
             import os
             snapshot = {
-                "timestamp": time.time(),
+                "timestamp": self.current_time,
                 "agent_id": self.agent_id,
                 "voxel_map": self.voxel_map.export_to_dict(),
                 "stats": self.voxel_map.get_stats()
@@ -220,8 +221,15 @@ class DenddronAgent:
         """
         rate_hz = 50.0
         sleep_time = 1.0 / rate_hz
+        last_sim_time = self.current_time
 
         while self.running:
+            # Measure actual simulation delta-time
+            dt = self.current_time - last_sim_time
+            if dt <= 0:
+                dt = sleep_time
+            last_sim_time = self.current_time
+
             if self.current_goal is not None and self.current_pose is not None:
                 curr_pos = np.array([self.current_pose["x"], self.current_pose["y"], self.current_pose["z"]])
                 goal_pos = np.array([self.current_goal["x"], self.current_goal["y"], self.current_goal["z"]])
@@ -272,7 +280,7 @@ class DenddronAgent:
                 # Ensure the delta velocity (dv) doesn't exceed the drone's max accel capacity over dt.
                 dv = raw_v - self.last_velocity
                 dv_mag = np.linalg.norm(dv)
-                max_dv = self.kinematics["max_acceleration"] * sleep_time  # a * dt = dv
+                max_dv = self.kinematics["max_acceleration"] * dt  # a * dt = dv
 
                 if dv_mag > max_dv:
                     dv = (dv / dv_mag) * max_dv  # Normalize and clamp delta
