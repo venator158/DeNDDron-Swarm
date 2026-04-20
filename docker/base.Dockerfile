@@ -28,7 +28,9 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Minimal runtime libs
+# Suppress apt timestamp checks (fixes Docker clock-skew build failures)
+RUN echo 'Acquire::Check-Valid-Until "false"; Acquire::Check-Date "false";' \
+    > /etc/apt/apt.conf.d/99clock-skew
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     libstdc++6 \

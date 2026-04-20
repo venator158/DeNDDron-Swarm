@@ -28,10 +28,10 @@ class APFStrategy(PathPlanningStrategy):
     def __init__(self):
         # Default config mimicking pp_test C++ values
         self.k_attractive = 2.0     # Attractive gain
-        self.k_repulsive = 2.0      # Repulsive gain
+        self.k_repulsive = 15.0     # Repulsive gain (tuned for 50m ship, 3m drones)
         self.influence_radius = 8.0 # Distance (m) to start feeling repulsion
-        self.a_decay = 1.5          # Exponential decay rate
-        self.b_scale = 1.0          # Inverse square mapping
+        self.a_decay = 0.5          # Exponential decay rate (slower = force persists further)
+        self.b_scale = 0.3          # Inverse square mapping (softened)
         
         # Stuck condition (Local Minima) escape mechanisms from pp_test
         self.alpha_stuck = 0.2      # Stuck growth rate for k_attractive
@@ -94,7 +94,7 @@ class APFStrategy(PathPlanningStrategy):
         f_total = f_att + f_rep
 
         # Limit max velocity
-        max_vel = 1.5
+        max_vel = 2.0  # m/s — matches kinematic limit
         if np.linalg.norm(f_total) > max_vel:
             f_total = (f_total / np.linalg.norm(f_total)) * max_vel
 

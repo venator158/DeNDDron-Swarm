@@ -24,6 +24,9 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Suppress apt timestamp checks (Docker clock-skew fix)
+RUN echo 'Acquire::Check-Valid-Until "false"; Acquire::Check-Date "false";' \
+    > /etc/apt/apt.conf.d/99clock-skew
 RUN apt-get update && apt-get install -y \
     gazebo \
     libgazebo-dev \

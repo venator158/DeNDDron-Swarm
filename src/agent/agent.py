@@ -178,8 +178,8 @@ class DenddronAgent:
                 distance = ray.get("distance", 0.0)
                 intensity = ray.get("intensity", 0.0)
 
-                # Ignore invalid distances
-                if distance <= 0 or distance > 100:
+                # Ignore invalid or max-range (clear) returns (max_range=50m in simulator)
+                if distance <= 0 or distance > 50:
                     continue
 
                 # Transform ray from drone frame to world frame
@@ -192,8 +192,8 @@ class DenddronAgent:
                 ray_y = agent_y + distance * np.sin(world_angle)
                 ray_z = agent_z  # Assume horizontal LiDAR at drone center height
 
-                # Treat sub-max-range/high-intensity returns as obstacle detections.
-                is_hit = (distance < 49.5) or (intensity >= 0.8)
+                # High intensity = real hit (ship=0.9, drone=0.9, clear=0.2)
+                is_hit = intensity > 0.5
                 if is_hit:
                     lidar_hits += 1
                     placed_occupied += 1

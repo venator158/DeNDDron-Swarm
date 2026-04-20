@@ -58,6 +58,13 @@ python3 scripts/generate_swarm_config.py --agents 6 --x 0 --y 0 --z 20 --min-rad
 docker compose --env-file .swarm.env up --scale agent=6
 ```
 
+For Metrics, Open another terminal and run the following command
+```bash
+docker compose logs -f metrics_node
+```
+
+
+
 ### Recent Updates
 - **Agent Initialization**: Python agents now correctly spawn in the Gazebo 3D environment upon joining the Zenoh network.
 - **Spawn Coordinates**: Agents are dynamically configured with a larger visual radius and explicitly spawn at clear locations outside the main ship obstacle to ensure high visibility.
