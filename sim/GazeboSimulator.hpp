@@ -59,6 +59,7 @@ private:
         double z;
     };
     std::map<std::string, SpawnPoint> _spawn_config;
+    std::map<std::string, SpawnPoint> _goal_config;
     std::string _spawn_config_path;
 
     void on_agent_join(const zenoh::Sample& sample);
@@ -66,6 +67,7 @@ private:
     void load_spawn_config();
 
     std::string generate_drone_sdf(const std::string& agent_id, double x, double y, double z);
+    std::string generate_goal_sdf(const std::string& agent_id, double x, double y, double z);
     void spawn_drone(const std::string& agent_id, const json& initial_pos);
     void update_drone_velocity(const std::string& agent_id, const json& cmd_msg);
     

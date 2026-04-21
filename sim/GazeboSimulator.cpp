@@ -91,19 +91,26 @@ void GazeboSimulator::load_spawn_config() {
         }
 
         _spawn_config.clear();
+        _goal_config.clear();
         for (auto it = cfg["agents"].begin(); it != cfg["agents"].end(); ++it) {
             const std::string agent_id = it.key();
             const json& agent_cfg = it.value();
-            if (!agent_cfg.contains("spawn") || !agent_cfg["spawn"].is_object()) {
-                continue;
+            if (agent_cfg.contains("spawn") && agent_cfg["spawn"].is_object()) {
+                const json& spawn = agent_cfg["spawn"];
+                _spawn_config[agent_id] = SpawnPoint{
+                    spawn.value("x", 0.0),
+                    spawn.value("y", 0.0),
+                    spawn.value("z", 1.0)
+                };
             }
-
-            const json& spawn = agent_cfg["spawn"];
-            _spawn_config[agent_id] = SpawnPoint{
-                spawn.value("x", 0.0),
-                spawn.value("y", 0.0),
-                spawn.value("z", 1.0)
-            };
+            if (agent_cfg.contains("goal") && agent_cfg["goal"].is_object()) {
+                const json& goal = agent_cfg["goal"];
+                _goal_config[agent_id] = SpawnPoint{
+                    goal.value("x", 0.0),
+                    goal.value("y", 0.0),
+                    goal.value("z", 1.0)
+                };
+            }
         }
 
         std::cout << "[GazeboSimulator] Loaded spawn config for "
@@ -161,6 +168,43 @@ void GazeboSimulator::on_cmd_vel(const zenoh::Sample& sample) {
 
 std::string GazeboSimulator::generate_drone_sdf(const std::string& agent_id, double x, double y, double z) {
     std::stringstream sdf;
+    
+    struct Color { double r, g, b; };
+    std::vector<Color> palette = {
+        {1.0, 0.2, 0.2}, // Vivid Red
+        {0.2, 1.0, 0.2}, // Vivid Green
+        {0.2, 0.5, 1.0}, // Vivid Blue
+        {1.0, 1.0, 0.2}, // Yellow
+        {0.2, 1.0, 1.0}, // Cyan
+        {1.0, 0.2, 1.0}, // Magenta
+        {1.0, 0.6, 0.1}, // Orange
+        {0.6, 0.2, 1.0}, // Purple
+        {0.0, 1.0, 0.6}  // Spring Green
+    };
+    
+    int color_idx = 0;
+    int trailing_num = -1;
+    int power = 1;
+    for (int i = static_cast<int>(agent_id.size()) - 1; i >= 0; --i) {
+        if (std::isdigit(agent_id[i])) {
+            if (trailing_num == -1) trailing_num = 0;
+            trailing_num += (agent_id[i] - '0') * power;
+            power *= 10;
+        } else if (trailing_num != -1) {
+            break;
+        }
+    }
+    
+    if (trailing_num > 0) {
+        color_idx = (trailing_num - 1) % palette.size();
+    } else {
+        color_idx = std::hash<std::string>{}(agent_id) % palette.size();
+    }
+    
+    double r = palette[color_idx].r;
+    double g = palette[color_idx].g;
+    double b = palette[color_idx].b;
+
     sdf << "<?xml version='1.0'?>"
         << "<sdf version='1.6'>"
         << "  <model name='" << agent_id << "'>"
@@ -180,9 +224,68 @@ std::string GazeboSimulator::generate_drone_sdf(const std::string& agent_id, dou
         << "      <visual name='visual'>"
         << "        <geometry><sphere><radius>1.25</radius></sphere></geometry>"
         << "        <material>"
-        << "          <ambient>1.0 0.1 0.1 1.0</ambient>"
-        << "          <diffuse>1.0 0.2 0.2 1.0</diffuse>"
+        << "          <ambient>" << r << " " << g << " " << b << " 1.0</ambient>"
+        << "          <diffuse>" << r << " " << g << " " << b << " 1.0</diffuse>"
         << "        </material>"
+        << "      </visual>"
+        << "    </link>"
+        << "  </model>"
+        << "</sdf>";
+    return sdf.str();
+}
+
+std::string GazeboSimulator::generate_goal_sdf(const std::string& agent_id, double x, double y, double z) {
+    std::stringstream sdf;
+    
+    struct Color { double r, g, b; };
+    std::vector<Color> palette = {
+        {1.0, 0.2, 0.2}, // Vivid Red
+        {0.2, 1.0, 0.2}, // Vivid Green
+        {0.2, 0.5, 1.0}, // Vivid Blue
+        {1.0, 1.0, 0.2}, // Yellow
+        {0.2, 1.0, 1.0}, // Cyan
+        {1.0, 0.2, 1.0}, // Magenta
+        {1.0, 0.6, 0.1}, // Orange
+        {0.6, 0.2, 1.0}, // Purple
+        {0.0, 1.0, 0.6}  // Spring Green
+    };
+    
+    int color_idx = 0;
+    int trailing_num = -1;
+    int power = 1;
+    for (int i = static_cast<int>(agent_id.size()) - 1; i >= 0; --i) {
+        if (std::isdigit(agent_id[i])) {
+            if (trailing_num == -1) trailing_num = 0;
+            trailing_num += (agent_id[i] - '0') * power;
+            power *= 10;
+        } else if (trailing_num != -1) {
+            break;
+        }
+    }
+    
+    if (trailing_num > 0) {
+        color_idx = (trailing_num - 1) % palette.size();
+    } else {
+        color_idx = std::hash<std::string>{}(agent_id) % palette.size();
+    }
+    
+    double r = palette[color_idx].r;
+    double g = palette[color_idx].g;
+    double b = palette[color_idx].b;
+
+    sdf << "<?xml version='1.0'?>"
+        << "<sdf version='1.6'>"
+        << "  <model name='" << agent_id << "_goal'>"
+        << "    <static>true</static>"
+        << "    <pose>" << x << " " << y << " " << z << " 0 0 0</pose>"
+        << "    <link name='link'>"
+        << "      <visual name='visual'>"
+        << "        <geometry><sphere><radius>0.8</radius></sphere></geometry>"
+        << "        <material>"
+        << "          <ambient>" << r << " " << g << " " << b << " 1.0</ambient>"
+        << "          <diffuse>" << r << " " << g << " " << b << " 1.0</diffuse>"
+        << "        </material>"
+        << "        <transparency>0.3</transparency>"
         << "      </visual>"
         << "    </link>"
         << "  </model>"
@@ -238,6 +341,14 @@ void GazeboSimulator::spawn_drone(const std::string& agent_id, const json& initi
     gazebo::msgs::Factory factory_msg;
     factory_msg.set_sdf(sdf_str);
     _factory_pub->Publish(factory_msg);
+
+    auto goal_it = _goal_config.find(agent_id);
+    if (goal_it != _goal_config.end()) {
+        std::string goal_sdf_str = generate_goal_sdf(agent_id, goal_it->second.x, goal_it->second.y, goal_it->second.z);
+        gazebo::msgs::Factory goal_factory_msg;
+        goal_factory_msg.set_sdf(goal_sdf_str);
+        _factory_pub->Publish(goal_factory_msg);
+    }
 
     _spawned_agents[agent_id] = true;
     _drone_states[agent_id] = DroneState{
@@ -420,6 +531,40 @@ void GazeboSimulator::step() {
                     
                     // Integrate position using gazebo simulation time
                     state.position += state.linear_velocity * dt;
+
+                    // Hard world safety constraints.
+                    const double min_z = 1.0;
+                    const double max_z = 60.0;
+                    if (state.position.Z() < min_z) {
+                        state.position.Z(min_z);
+                        if (state.linear_velocity.Z() < 0.0) {
+                            state.linear_velocity.Z(0.0);
+                        }
+                    } else if (state.position.Z() > max_z) {
+                        state.position.Z(max_z);
+                        if (state.linear_velocity.Z() > 0.0) {
+                            state.linear_velocity.Z(0.0);
+                        }
+                    }
+
+                    // Keep drones outside the ship collider at origin.
+                    const double ship_keepout = 17.5;  // ship radius + drone radius buffer
+                    const double px = state.position.X();
+                    const double py = state.position.Y();
+                    const double r_xy = std::hypot(px, py);
+                    if (r_xy < ship_keepout) {
+                        const double nx = (r_xy > 1e-6) ? (px / r_xy) : 1.0;
+                        const double ny = (r_xy > 1e-6) ? (py / r_xy) : 0.0;
+                        state.position.X(nx * ship_keepout);
+                        state.position.Y(ny * ship_keepout);
+
+                        // Remove inward radial velocity so the agent cannot tunnel through.
+                        const double inward = state.linear_velocity.X() * (-nx) + state.linear_velocity.Y() * (-ny);
+                        if (inward > 0.0) {
+                            state.linear_velocity.X(state.linear_velocity.X() + nx * inward);
+                            state.linear_velocity.Y(state.linear_velocity.Y() + ny * inward);
+                        }
+                    }
 
                     gazebo::msgs::Model msg;
                     msg.set_name(agent_id);

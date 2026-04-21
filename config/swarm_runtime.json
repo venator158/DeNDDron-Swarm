@@ -1,19 +1,27 @@
 {
-  "agent_count": 9,
+  "agent_count": 3,
   "agents": {
     "drone_1": {
       "spawn": {
-        "x": 34.437175540294895,
-        "y": 28.08006126956515,
-        "z": 17.0
+        "x": 20.086051712730107,
+        "y": 33.75741092910483,
+        "z": 18.5
       },
       "goal": {
-        "x": 17.699097585750046,
-        "y": -32.90019318862081,
-        "z": 20.0
+        "x": 37.71051069553786,
+        "y": -14.244885154286901,
+        "z": 21.5
       },
       "path_planning": {
-        "algorithm": "apf"
+        "algorithm": "apf",
+        "attractive_gain": 1.8,
+        "repulsive_gain": 8.5,
+        "influence_radius": 7.0,
+        "goal_tolerance": 1.5,
+        "braking_radius": 7.5,
+        "ship_keepout_radius": 18.0,
+        "ship_influence_radius": 30.0,
+        "velocity_smoothing": 0.42
       },
       "kinematics": {
         "max_velocity": 4.0,
@@ -25,17 +33,25 @@
     },
     "drone_2": {
       "spawn": {
-        "x": -36.98118455979949,
-        "y": 16.40451792781813,
-        "z": 20.0
+        "x": -28.714929879295667,
+        "y": 21.067358692238855,
+        "z": 21.5
       },
       "goal": {
-        "x": -9.77910316468197,
-        "y": 36.651483194515244,
-        "z": 23.0
+        "x": 37.13814332264877,
+        "y": -6.071171201272022,
+        "z": 18.5
       },
       "path_planning": {
-        "algorithm": "apf"
+        "algorithm": "apf",
+        "attractive_gain": 1.8,
+        "repulsive_gain": 8.5,
+        "influence_radius": 7.0,
+        "goal_tolerance": 1.5,
+        "braking_radius": 7.5,
+        "ship_keepout_radius": 18.0,
+        "ship_influence_radius": 30.0,
+        "velocity_smoothing": 0.42
       },
       "kinematics": {
         "max_velocity": 4.0,
@@ -47,149 +63,25 @@
     },
     "drone_3": {
       "spawn": {
-        "x": -7.692314788607611,
-        "y": -32.39799895685178,
-        "z": 23.0
+        "x": -23.54187572269456,
+        "y": -34.06783798696118,
+        "z": 18.5
       },
       "goal": {
-        "x": -35.96056595684754,
-        "y": -11.889893313599359,
-        "z": 17.0
+        "x": -36.464784557499264,
+        "y": 11.670157377749677,
+        "z": 21.5
       },
       "path_planning": {
-        "algorithm": "apf"
-      },
-      "kinematics": {
-        "max_velocity": 4.0,
-        "max_acceleration": 1.0,
-        "max_z": 50.0,
-        "min_z": 1.0,
-        "max_service_radius": 100.0
-      }
-    },
-    "drone_4": {
-      "spawn": {
-        "x": 16.52512757988411,
-        "y": -40.42484970616403,
-        "z": 17.0
-      },
-      "goal": {
-        "x": 35.036431371282546,
-        "y": 6.010813731736764,
-        "z": 20.0
-      },
-      "path_planning": {
-        "algorithm": "apf"
-      },
-      "kinematics": {
-        "max_velocity": 4.0,
-        "max_acceleration": 1.0,
-        "max_z": 50.0,
-        "min_z": 1.0,
-        "max_service_radius": 100.0
-      }
-    },
-    "drone_5": {
-      "spawn": {
-        "x": 17.519674667663814,
-        "y": 37.23600204537687,
-        "z": 20.0
-      },
-      "goal": {
-        "x": -29.364779290082634,
-        "y": -20.26661830669964,
-        "z": 23.0
-      },
-      "path_planning": {
-        "algorithm": "apf"
-      },
-      "kinematics": {
-        "max_velocity": 4.0,
-        "max_acceleration": 1.0,
-        "max_z": 50.0,
-        "min_z": 1.0,
-        "max_service_radius": 100.0
-      }
-    },
-    "drone_6": {
-      "spawn": {
-        "x": -8.240163478026725,
-        "y": 34.28015651318449,
-        "z": 23.0
-      },
-      "goal": {
-        "x": 17.686170573509635,
-        "y": -28.13593903682665,
-        "z": 17.0
-      },
-      "path_planning": {
-        "algorithm": "apf"
-      },
-      "kinematics": {
-        "max_velocity": 4.0,
-        "max_acceleration": 1.0,
-        "max_z": 50.0,
-        "min_z": 1.0,
-        "max_service_radius": 100.0
-      }
-    },
-    "drone_7": {
-      "spawn": {
-        "x": -35.35930867193953,
-        "y": -13.93663221285731,
-        "z": 17.0
-      },
-      "goal": {
-        "x": 32.785942606897564,
-        "y": 12.580198321748018,
-        "z": 20.0
-      },
-      "path_planning": {
-        "algorithm": "apf"
-      },
-      "kinematics": {
-        "max_velocity": 4.0,
-        "max_acceleration": 1.0,
-        "max_z": 50.0,
-        "min_z": 1.0,
-        "max_service_radius": 100.0
-      }
-    },
-    "drone_8": {
-      "spawn": {
-        "x": 21.720251360453048,
-        "y": -30.288691039148684,
-        "z": 20.0
-      },
-      "goal": {
-        "x": 6.360649598813134,
-        "y": 40.47593776490263,
-        "z": 23.0
-      },
-      "path_planning": {
-        "algorithm": "apf"
-      },
-      "kinematics": {
-        "max_velocity": 4.0,
-        "max_acceleration": 1.0,
-        "max_z": 50.0,
-        "min_z": 1.0,
-        "max_service_radius": 100.0
-      }
-    },
-    "drone_9": {
-      "spawn": {
-        "x": 25.553233918655373,
-        "y": 24.452264536408173,
-        "z": 23.0
-      },
-      "goal": {
-        "x": 28.06365383263539,
-        "y": -28.9252353127859,
-        "z": 17.0
-      },
-      "path_planning": {
-        "algorithm": "apf"
+        "algorithm": "apf",
+        "attractive_gain": 1.8,
+        "repulsive_gain": 8.5,
+        "influence_radius": 7.0,
+        "goal_tolerance": 1.5,
+        "braking_radius": 7.5,
+        "ship_keepout_radius": 18.0,
+        "ship_influence_radius": 30.0,
+        "velocity_smoothing": 0.42
       },
       "kinematics": {
         "max_velocity": 4.0,

@@ -92,7 +92,15 @@ def build_agent_positions(
                 "z": goal_z,
             },
             "path_planning": {
-                "algorithm": "apf"
+                "algorithm": "apf",
+                "attractive_gain": 1.8,
+                "repulsive_gain": 8.5,
+                "influence_radius": 7.0,
+                "goal_tolerance": 1.5,
+                "braking_radius": 7.5,
+                "ship_keepout_radius": 18.0,
+                "ship_influence_radius": 30.0,
+                "velocity_smoothing": 0.42
             },
             "kinematics": {
                 "max_velocity": 4.0,       # m/s
