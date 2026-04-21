@@ -370,8 +370,19 @@ void GazeboSimulator::update_drone_velocity(const std::string& agent_id, const j
 
         std::lock_guard<std::mutex> lock(_state_mtx);
         if (_drone_states.find(agent_id) != _drone_states.end()) {
-            _drone_states[agent_id].linear_velocity = ignition::math::Vector3d(vx, vy, vz);
-            _drone_states[agent_id].angular_velocity = ignition::math::Vector3d(0, 0, yaw_rate);
+            auto& state = _drone_states[agent_id];
+
+            // Deadband + low-pass filter to reduce cmd jitter from asynchronous updates.
+            const double deadband = 0.02;
+            if (std::abs(vx) < deadband) vx = 0.0;
+            if (std::abs(vy) < deadband) vy = 0.0;
+            if (std::abs(vz) < deadband) vz = 0.0;
+            if (std::abs(yaw_rate) < deadband) yaw_rate = 0.0;
+
+            const double alpha = 0.35;
+            ignition::math::Vector3d cmd_linear(vx, vy, vz);
+            state.linear_velocity = state.linear_velocity * (1.0 - alpha) + cmd_linear * alpha;
+            state.angular_velocity = ignition::math::Vector3d(0, 0, yaw_rate * alpha + state.angular_velocity.Z() * (1.0 - alpha));
         }
     } catch (...) {}
 }
@@ -525,61 +536,87 @@ void GazeboSimulator::step() {
 
             // Publish LinkData to force Gazebo to move the visual model
             if (_physics_pub && dt > 0.0) {
-                std::lock_guard<std::mutex> lock(_state_mtx);
-                if (_drone_states.find(agent_id) != _drone_states.end()) {
-                    auto& state = _drone_states[agent_id];
-                    
-                    // Integrate position using gazebo simulation time
-                    state.position += state.linear_velocity * dt;
+                ignition::math::Vector3d publish_pos;
+                ignition::math::Quaterniond publish_ori;
+                bool has_state = false;
 
-                    // Hard world safety constraints.
-                    const double min_z = 1.0;
-                    const double max_z = 60.0;
-                    if (state.position.Z() < min_z) {
-                        state.position.Z(min_z);
-                        if (state.linear_velocity.Z() < 0.0) {
-                            state.linear_velocity.Z(0.0);
+                {
+                    std::lock_guard<std::mutex> lock(_state_mtx);
+                    auto it = _drone_states.find(agent_id);
+                    if (it != _drone_states.end()) {
+                        auto& state = it->second;
+
+                        // Integrate position using gazebo simulation time
+                        state.position += state.linear_velocity * dt;
+
+                        // Hard world safety constraints.
+                        const double min_z = 1.0;
+                        const double max_z = 60.0;
+                        if (state.position.Z() < min_z) {
+                            state.position.Z(min_z);
+                            if (state.linear_velocity.Z() < 0.0) {
+                                state.linear_velocity.Z(0.0);
+                            }
+                        } else if (state.position.Z() > max_z) {
+                            state.position.Z(max_z);
+                            if (state.linear_velocity.Z() > 0.0) {
+                                state.linear_velocity.Z(0.0);
+                            }
                         }
-                    } else if (state.position.Z() > max_z) {
-                        state.position.Z(max_z);
-                        if (state.linear_velocity.Z() > 0.0) {
-                            state.linear_velocity.Z(0.0);
+
+                        // Keep drones outside the ship collider at origin.
+                        const double ship_keepout = 17.5;  // ship radius + drone radius buffer
+                        const double px = state.position.X();
+                        const double py = state.position.Y();
+                        const double r_xy = std::hypot(px, py);
+                        if (r_xy < ship_keepout) {
+                            const double nx = (r_xy > 1e-6) ? (px / r_xy) : 1.0;
+                            const double ny = (r_xy > 1e-6) ? (py / r_xy) : 0.0;
+                            state.position.X(nx * ship_keepout);
+                            state.position.Y(ny * ship_keepout);
+
+                            // Remove inward radial velocity so the agent cannot tunnel through.
+                            const double inward = state.linear_velocity.X() * (-nx) + state.linear_velocity.Y() * (-ny);
+                            if (inward > 0.0) {
+                                state.linear_velocity.X(state.linear_velocity.X() + nx * inward);
+                                state.linear_velocity.Y(state.linear_velocity.Y() + ny * inward);
+                            }
                         }
+
+                        // Hard halt at configured goal to guarantee terminal stop.
+                        auto goal_it = _goal_config.find(agent_id);
+                        if (goal_it != _goal_config.end()) {
+                            const ignition::math::Vector3d goal_pos(goal_it->second.x, goal_it->second.y, goal_it->second.z);
+                            const double goal_dist = state.position.Distance(goal_pos);
+                            const double goal_halt_radius = 3.0;
+                            if (goal_dist <= goal_halt_radius) {
+                                state.position = goal_pos;
+                                state.linear_velocity = ignition::math::Vector3d(0.0, 0.0, 0.0);
+                                state.angular_velocity = ignition::math::Vector3d(0.0, 0.0, 0.0);
+                            }
+                        }
+
+                        publish_pos = state.position;
+                        publish_ori = state.orientation;
+                        has_state = true;
                     }
+                }
 
-                    // Keep drones outside the ship collider at origin.
-                    const double ship_keepout = 17.5;  // ship radius + drone radius buffer
-                    const double px = state.position.X();
-                    const double py = state.position.Y();
-                    const double r_xy = std::hypot(px, py);
-                    if (r_xy < ship_keepout) {
-                        const double nx = (r_xy > 1e-6) ? (px / r_xy) : 1.0;
-                        const double ny = (r_xy > 1e-6) ? (py / r_xy) : 0.0;
-                        state.position.X(nx * ship_keepout);
-                        state.position.Y(ny * ship_keepout);
-
-                        // Remove inward radial velocity so the agent cannot tunnel through.
-                        const double inward = state.linear_velocity.X() * (-nx) + state.linear_velocity.Y() * (-ny);
-                        if (inward > 0.0) {
-                            state.linear_velocity.X(state.linear_velocity.X() + nx * inward);
-                            state.linear_velocity.Y(state.linear_velocity.Y() + ny * inward);
-                        }
-                    }
-
+                if (has_state) {
                     gazebo::msgs::Model msg;
                     msg.set_name(agent_id);
-                    
+
                     gazebo::msgs::Pose* pose_ptr = msg.mutable_pose();
                     gazebo::msgs::Vector3d* pos = pose_ptr->mutable_position();
-                    pos->set_x(state.position.X());
-                    pos->set_y(state.position.Y());
-                    pos->set_z(state.position.Z());
+                    pos->set_x(publish_pos.X());
+                    pos->set_y(publish_pos.Y());
+                    pos->set_z(publish_pos.Z());
 
                     gazebo::msgs::Quaternion* rot = pose_ptr->mutable_orientation();
-                    rot->set_x(state.orientation.X());
-                    rot->set_y(state.orientation.Y());
-                    rot->set_z(state.orientation.Z());
-                    rot->set_w(state.orientation.W());
+                    rot->set_x(publish_ori.X());
+                    rot->set_y(publish_ori.Y());
+                    rot->set_z(publish_ori.Z());
+                    rot->set_w(publish_ori.W());
 
                     _physics_pub->Publish(msg);
                 }

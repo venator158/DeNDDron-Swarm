@@ -1,6 +1,5 @@
 import zenoh
 import json
-import yaml
 import time
 import threading
 import numpy as np
@@ -26,6 +25,7 @@ class DenddronAgent:
         
         # --- Internal State ---
         self.running = True
+        self.state_lock = threading.RLock()
         self.voxel_map = VoxelMap()
         self.current_pose = None
         self.current_goal = None
@@ -33,6 +33,7 @@ class DenddronAgent:
         self.step_count = 0
         self.sensor_frame_count = 0
         self.current_time = time.time()
+        self.sensor_wall_time = time.monotonic()
         self.latest_visible_obstacles = []
         self.latest_voxel_summary = {
             "hits": 0,
@@ -41,70 +42,100 @@ class DenddronAgent:
             "nearest": []
         }
 
+        # --- Runtime config loading ---
+        config_path = os.environ.get(
+            "SWARM_RUNTIME_CONFIG",
+            os.path.join(os.path.dirname(__file__), "..", "..", "config", "swarm_runtime.json")
+        )
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"[{self.agent_id}] Runtime config not found: {config_path}")
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                runtime_cfg = json.load(f)
+        except Exception as e:
+            raise RuntimeError(f"[{self.agent_id}] Failed to load runtime config: {e}") from e
+
+        def _require_keys(section_name: str, values: dict, required_keys: list):
+            missing = [k for k in required_keys if k not in values]
+            if missing:
+                raise ValueError(
+                    f"[{self.agent_id}] Missing required config keys in {section_name}: {missing}"
+                )
+
+        global_cfg = runtime_cfg.get("defaults", {})
+        my_cfg = runtime_cfg.get("agents", {}).get(self.agent_id, {})
+
+        if not global_cfg:
+            raise ValueError(f"[{self.agent_id}] Missing required config section: defaults")
+
         # --- Goal State ---
         # Latched flag: once True, the drone stops forever until goal changes.
         # This prevents jitter from re-triggering APF after arrival.
         self._goal_reached = False
-        self.GOAL_TOLERANCE = 1.5      # metres — declare arrived within this radius
-        self.GOAL_STOP_RADIUS = 3.0    # metres — begin hard braking inside this radius
-        self.GOAL_TOLERANCE_XY = 2.0
-        self.GOAL_TOLERANCE_Z = 1.5
-        self.GOAL_SETTLE_TICKS = 8
+        self._prev_to_goal_vec = None
+        goal_cfg = dict(global_cfg.get("goal_control", {}))
+        goal_cfg.update(my_cfg.get("goal_control", {}))
+        _require_keys(
+            "defaults.goal_control",
+            goal_cfg,
+            ["tolerance", "stop_radius", "tolerance_xy", "tolerance_z", "settle_ticks"],
+        )
+        self.GOAL_TOLERANCE = float(goal_cfg["tolerance"])
+        self.GOAL_STOP_RADIUS = float(goal_cfg["stop_radius"])
+        self.GOAL_TOLERANCE_XY = float(goal_cfg["tolerance_xy"])
+        self.GOAL_TOLERANCE_Z = float(goal_cfg["tolerance_z"])
+        self.GOAL_SETTLE_TICKS = int(goal_cfg["settle_ticks"])
         self._goal_hold_ticks = 0
 
         # --- Dynamic Drone Kinematics ---
         self.last_velocity = np.zeros(3)
         self.spawn_pose = {"x": 0.0, "y": 0.0, "z": 0.0}
-        self.kinematics = {
-            "max_velocity": 2.0,
-            "max_acceleration": 1.5,
-            "max_z": 50.0,
-            "min_z": 1.0,
-            "max_service_radius": 100.0
-        }
-
-        # --- Job Simulation / Config Loading ---
-        config_path = os.environ.get(
-            "SWARM_RUNTIME_CONFIG",
-            os.path.join(os.path.dirname(__file__), "..", "..", "config", "swarm_runtime.json")
+        self.kinematics = dict(global_cfg.get("kinematics", {}))
+        self.kinematics.update(my_cfg.get("kinematics", {}))
+        _require_keys(
+            "defaults.kinematics",
+            self.kinematics,
+            ["max_velocity", "max_acceleration", "max_z", "min_z", "max_service_radius"],
         )
-        if os.path.exists(config_path):
-            with open(config_path, "r") as f:
-                try:
-                    cfg = json.load(f)
-                    agents_cfg = cfg.get("agents", {})
-                    my_cfg = agents_cfg.get(self.agent_id, {})
-                    
-                    if "spawn" in my_cfg:
-                        self.spawn_pose = my_cfg["spawn"]
+        logger.info(f"[{self.agent_id}] Loaded kinematic limits: {self.kinematics}")
 
-                    if "goal" in my_cfg:
-                        self.current_goal = my_cfg["goal"]
-                        logger.info(f"[{self.agent_id}] Assigned static goal from runtime config: {self.current_goal}")
-                        
-                    if "kinematics" in my_cfg:
-                        self.kinematics.update(my_cfg["kinematics"])
-                        logger.info(f"[{self.agent_id}] Loaded kinematic limits: {self.kinematics}")
-                        
-                except Exception as e:
-                    logger.error(f"[{self.agent_id}] Failed to load static goal from config: {e}")
+        # --- Agent-specific spawn/goal ---
+        if "spawn" in my_cfg:
+            self.spawn_pose = my_cfg["spawn"]
+
+        if "goal" in my_cfg:
+            self.current_goal = my_cfg["goal"]
+            logger.info(f"[{self.agent_id}] Assigned static goal from runtime config: {self.current_goal}")
 
         # Initialize Reflex Strategy (using APF)
         self.path_planner = APFStrategy()
-        planner_cfg = {
-            "goal_tolerance": self.GOAL_TOLERANCE,
-            "braking_radius": self.GOAL_STOP_RADIUS * 2.0,
-            "min_z": self.kinematics["min_z"],
-            "max_z": self.kinematics["max_z"],
-        }
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r") as f:
-                    cfg = json.load(f)
-                    my_cfg = cfg.get("agents", {}).get(self.agent_id, {})
-                    planner_cfg.update(my_cfg.get("path_planning", {}))
-            except Exception:
-                pass
+        planner_cfg = dict(global_cfg.get("path_planning", {}))
+        planner_cfg.update(my_cfg.get("path_planning", {}))
+        _require_keys(
+            "defaults.path_planning",
+            planner_cfg,
+            [
+                "algorithm",
+                "attractive_gain",
+                "repulsive_gain",
+                "influence_radius",
+                "step_size",
+                "goal_tolerance",
+                "braking_radius",
+                "ship_keepout_radius",
+                "ship_influence_radius",
+                "apf_exponential_decay",
+                "apf_inverse_square_scale",
+                "apf_stuck_growth_rate",
+                "min_movement",
+                "stuck_threshold",
+                "velocity_smoothing",
+            ],
+        )
+        planner_cfg["min_z"] = self.kinematics["min_z"]
+        planner_cfg["max_z"] = self.kinematics["max_z"]
+        planner_cfg["max_velocity"] = self.kinematics["max_velocity"]
         self.path_planner.configure(planner_cfg)
         
         # --- Publishers ---
@@ -144,10 +175,12 @@ class DenddronAgent:
         Assign a new goal. Always resets the goal-reached latch so the drone
         will start moving again. Call this instead of writing current_goal directly.
         """
-        self.current_goal = goal
-        self._goal_reached = False
-        self._goal_hold_ticks = 0
-        self.last_velocity = np.zeros(3)   # reset momentum so it doesn't coast
+        with self.state_lock:
+            self.current_goal = goal
+            self._goal_reached = False
+            self._goal_hold_ticks = 0
+            self._prev_to_goal_vec = None
+            self.last_velocity = np.zeros(3)   # reset momentum so it doesn't coast
         logger.info(f"[{self.agent_id}] New goal set: {goal}")
 
     # ==========================================
@@ -157,19 +190,27 @@ class DenddronAgent:
         try:
             payload = json.loads(bytes(sample.payload).decode('utf-8'))
 
-            self.current_time = payload.get("sim_time", time.time())
+            sim_time = payload.get("sim_time", time.time())
             pose = payload.get("pose", {})
             lidar_data = payload.get("lidar", [])
 
-            self.current_pose = {
+            current_pose = {
                 "x": pose.get("x", 0.0),
                 "y": pose.get("y", 0.0),
                 "z": pose.get("z", 0.0),
                 "yaw": pose.get("yaw", 0.0)
             }
 
+            with self.state_lock:
+                # Drop out-of-order frames so stale callbacks cannot rewind pose/time.
+                if sim_time + 1e-6 < self.current_time:
+                    return
+                self.current_time = sim_time
+                self.current_pose = current_pose
+                self.sensor_wall_time = time.monotonic()
+
             self.voxel_map.cleanup_stale_data(max_age=0.5, current_time=self.current_time)
-            self._process_lidar(lidar_data, self.current_pose)
+            self._process_lidar(lidar_data, current_pose)
 
         except Exception as e:
             logger.debug(f"[{self.agent_id}] Error processing sensor data: {e}")
@@ -263,6 +304,17 @@ class DenddronAgent:
         rate_hz   = 50.0
         sleep_time = 1.0 / rate_hz
         last_sim_time = self.current_time
+        next_tick = time.monotonic()
+
+        def _sleep_to_next_tick():
+            nonlocal next_tick
+            next_tick += sleep_time
+            remaining = next_tick - time.monotonic()
+            if remaining > 0.0:
+                time.sleep(remaining)
+            else:
+                # If we overran, reset cadence anchor to avoid accumulating lag.
+                next_tick = time.monotonic()
 
         _zero_cmd = {
             "linear":  {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -270,24 +322,46 @@ class DenddronAgent:
         }
 
         while self.running:
-            dt = self.current_time - last_sim_time
+            with self.state_lock:
+                current_time = self.current_time
+                current_goal = dict(self.current_goal) if self.current_goal is not None else None
+                current_pose = dict(self.current_pose) if self.current_pose is not None else None
+                goal_latched = self._goal_reached
+                sensor_wall_time = self.sensor_wall_time
+
+            sensor_age = time.monotonic() - sensor_wall_time
+            if sensor_age > 0.25:
+                safe_cmd = _zero_cmd
+                self.pub_cmd_vel.put(json.dumps(safe_cmd))
+                with self.state_lock:
+                    self.last_velocity = np.zeros(3)
+
+                self.step_count += 1
+                if self.step_count % 100 == 0:
+                    logger.warning(
+                        f"[{self.agent_id}] Sensor stream stale ({sensor_age*1000.0:.0f} ms); holding zero cmd"
+                    )
+                _sleep_to_next_tick()
+                continue
+
+            dt = current_time - last_sim_time
             if dt <= 0:
                 dt = sleep_time
-            last_sim_time = self.current_time
+            last_sim_time = current_time
 
             safe_cmd = None   # will be set below before every publish
 
-            if self.current_goal is not None and self.current_pose is not None:
+            if current_goal is not None and current_pose is not None:
 
                 curr_pos = np.array([
-                    self.current_pose["x"],
-                    self.current_pose["y"],
-                    self.current_pose["z"]
+                    current_pose["x"],
+                    current_pose["y"],
+                    current_pose["z"]
                 ])
                 goal_pos = np.array([
-                    self.current_goal["x"],
-                    self.current_goal["y"],
-                    self.current_goal["z"]
+                    current_goal["x"],
+                    current_goal["y"],
+                    current_goal["z"]
                 ])
                 dist_to_goal = np.linalg.norm(goal_pos - curr_pos)
                 dist_xy = np.linalg.norm(goal_pos[:2] - curr_pos[:2])
@@ -296,24 +370,47 @@ class DenddronAgent:
                 max_decel = max(0.1, self.kinematics["max_acceleration"])
                 stopping_distance = (current_speed * current_speed) / (2.0 * max_decel)
 
+                # Detect crossing through the goal sphere between control ticks.
+                to_goal_vec = goal_pos - curr_pos
+                crossed_goal = False
+                if self._prev_to_goal_vec is not None:
+                    crossed_goal = (
+                        np.dot(self._prev_to_goal_vec, to_goal_vec) < 0.0
+                        and dist_to_goal <= max(self.GOAL_STOP_RADIUS * 2.0, self.GOAL_TOLERANCE * 2.0)
+                    )
+                self._prev_to_goal_vec = to_goal_vec.copy()
+
                 # ── ARRIVAL LATCH ────────────────────────────────────────────
                 # Latch on first arrival; stay latched until set_goal() is called.
                 in_goal_region = (
+                    (dist_to_goal <= self.GOAL_STOP_RADIUS) or
                     (dist_xy <= self.GOAL_TOLERANCE_XY and dist_z <= self.GOAL_TOLERANCE_Z) or
-                    (dist_to_goal <= max(self.GOAL_TOLERANCE, stopping_distance + 0.2) and current_speed <= 0.8)
+                    (dist_to_goal <= max(self.GOAL_TOLERANCE, stopping_distance + 0.2) and current_speed <= 0.8) or
+                    crossed_goal
                 )
                 if in_goal_region:
                     self._goal_hold_ticks += 1
                 else:
                     self._goal_hold_ticks = 0
 
+                # Immediate hard latch once stop radius or crossing condition is met.
+                if dist_to_goal <= self.GOAL_STOP_RADIUS or crossed_goal:
+                    with self.state_lock:
+                        self._goal_reached = True
+                    self._goal_hold_ticks = self.GOAL_SETTLE_TICKS
+
                 if self._goal_hold_ticks >= self.GOAL_SETTLE_TICKS:
+                    with self.state_lock:
+                        self._goal_reached = True
+
+                if goal_latched:
                     self._goal_reached = True
 
                 if self._goal_reached:
                     safe_cmd = _zero_cmd
                     self.pub_cmd_vel.put(json.dumps(safe_cmd))
-                    self.last_velocity = np.zeros(3)
+                    with self.state_lock:
+                        self.last_velocity = np.zeros(3)
 
                     self.step_count += 1
                     if self.step_count % 100 == 0:
@@ -321,16 +418,28 @@ class DenddronAgent:
                             f"[{self.agent_id}] Goal reached — holding position. "
                             f"dist={dist_to_goal:.2f}m"
                         )
-                    time.sleep(sleep_time)
+                    _sleep_to_next_tick()
                     continue   # skip all APF work below
 
                 # ── ACTIVE NAVIGATION ────────────────────────────────────────
 
                 cmd = self.path_planner.compute_velocity(
-                    current_pose=self.current_pose,
-                    goal_pose=self.current_goal,
+                    current_pose=current_pose,
+                    goal_pose=current_goal,
                     voxel_map=self.voxel_map
                 )
+
+                # Hard halt on planner-level arrival detection.
+                if self.path_planner.is_goal_reached():
+                    with self.state_lock:
+                        self._goal_reached = True
+                        self._goal_hold_ticks = self.GOAL_SETTLE_TICKS
+                    safe_cmd = _zero_cmd
+                    self.pub_cmd_vel.put(json.dumps(safe_cmd))
+                    with self.state_lock:
+                        self.last_velocity = np.zeros(3)
+                    _sleep_to_next_tick()
+                    continue
 
                 raw_v = np.array([
                     cmd["linear"].get("x", 0.0),
@@ -339,7 +448,7 @@ class DenddronAgent:
                 ])
 
                 # ── A. FLOOR SAFETY FIRST ────────────────────────────────────
-                curr_z = self.current_pose["z"]
+                curr_z = current_pose["z"]
                 min_z = self.kinematics["min_z"]
                 max_z = self.kinematics["max_z"]
 
@@ -358,11 +467,11 @@ class DenddronAgent:
                     curr_pos[0], curr_pos[1], curr_pos[2], radius=6.0
                 )
                 if nearby:
-                    dists = [
-                        np.linalg.norm(curr_pos - np.array([o["x"], o["y"], o["z"]]))
-                        for o in nearby
-                        if np.linalg.norm(curr_pos - np.array([o["x"], o["y"], o["z"]])) > 1.2
-                    ]
+                    dists = []
+                    for obs in nearby:
+                        dist = np.linalg.norm(curr_pos - np.array([obs["x"], obs["y"], obs["z"]]))
+                        if dist > 0.0:
+                            dists.append(dist)
                     if dists:
                         min_obs_dist = min(dists)
                         if min_obs_dist < 1.2:
@@ -374,7 +483,7 @@ class DenddronAgent:
 
                 # ── C. Service radius containment ────────────────────────────
                 spawn_xy = np.array([self.spawn_pose["x"], self.spawn_pose["y"]])
-                curr_xy  = np.array([self.current_pose["x"], self.current_pose["y"]])
+                curr_xy  = np.array([current_pose["x"], current_pose["y"]])
                 dist_2d  = np.linalg.norm(curr_xy - spawn_xy)
                 if dist_2d >= self.kinematics["max_service_radius"]:
                     out_vec    = (curr_xy - spawn_xy) / max(dist_2d, 0.001)
@@ -384,7 +493,18 @@ class DenddronAgent:
                         v_xy  -= v_outward * out_vec
                         raw_v[0], raw_v[1] = v_xy[0], v_xy[1]
 
-                # ── D. Acceleration clamping ─────────────────────────────────
+                # ── D. Goal-approach braking envelope ───────────────────────
+                # Bound commanded speed so the drone can still stop inside the tolerance.
+                brake_margin = max(0.0, dist_to_goal - self.GOAL_TOLERANCE)
+                allowed_speed = np.sqrt(max(0.0, 2.0 * max_decel * brake_margin))
+                raw_speed = np.linalg.norm(raw_v)
+                if raw_speed > allowed_speed:
+                    if allowed_speed <= 1e-6:
+                        raw_v = np.zeros(3)
+                    else:
+                        raw_v = (raw_v / raw_speed) * allowed_speed
+
+                # ── E. Acceleration clamping ─────────────────────────────────
                 dv     = raw_v - self.last_velocity
                 dv_mag = np.linalg.norm(dv)
                 max_dv = self.kinematics["max_acceleration"] * dt
@@ -392,7 +512,7 @@ class DenddronAgent:
                     dv = (dv / dv_mag) * max_dv
                 new_v = self.last_velocity + dv
 
-                # ── E. Absolute velocity cap ─────────────────────────────────
+                # ── F. Absolute velocity cap ─────────────────────────────────
                 speed = np.linalg.norm(new_v)
                 if speed > self.kinematics["max_velocity"]:
                     new_v = (new_v / speed) * self.kinematics["max_velocity"]
@@ -401,8 +521,9 @@ class DenddronAgent:
                 if curr_z < min_z:
                     new_v[2] = max(new_v[2], 0.5)
 
-                # ── F. Update momentum ───────────────────────────────────────
-                self.last_velocity = new_v
+                # ── G. Update momentum ───────────────────────────────────────
+                with self.state_lock:
+                    self.last_velocity = new_v
 
                 safe_cmd = {
                     "linear":  {"x": float(new_v[0]), "y": float(new_v[1]), "z": float(new_v[2])},
@@ -411,16 +532,17 @@ class DenddronAgent:
                 self.pub_cmd_vel.put(json.dumps(safe_cmd))
 
             self.step_count += 1
-            if self.step_count % 100 == 0 and self.current_goal is not None and safe_cmd is not None:
+            if self.step_count % 100 == 0 and current_goal is not None and safe_cmd is not None:
                 logger.info(
                     f"[{self.agent_id}] CMD_VEL: {safe_cmd['linear']} | "
                     f"goal_reached={self._goal_reached} | "
+                    f"sensor_age_ms={(sensor_age*1000.0):.0f} | "
                     f"visible_voxels={self.latest_voxel_summary['visible']} "
                     f"hits={self.latest_voxel_summary['hits']} "
                     f"nearest={self.latest_voxel_summary['nearest']}"
                 )
 
-            time.sleep(sleep_time)
+            _sleep_to_next_tick()
 
     # ==========================================
     # PILLAR 3: JOB HANDLER

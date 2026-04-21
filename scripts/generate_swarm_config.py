@@ -8,6 +8,41 @@ import random
 from pathlib import Path
 
 
+GLOBAL_DEFAULTS = {
+    "path_planning": {
+        "algorithm": "apf",
+        "attractive_gain": 1.8,
+        "repulsive_gain": 8.5,
+        "influence_radius": 7.0,
+        "step_size": 0.2,
+        "goal_tolerance": 1.5,
+        "braking_radius": 7.5,
+        "ship_keepout_radius": 18.0,
+        "ship_influence_radius": 30.0,
+        "apf_exponential_decay": 0.5,
+        "apf_inverse_square_scale": 0.3,
+        "apf_stuck_growth_rate": 0.2,
+        "min_movement": 0.01,
+        "stuck_threshold": 5,
+        "velocity_smoothing": 0.42,
+    },
+    "kinematics": {
+        "max_velocity": 4.0,
+        "max_acceleration": 1.0,
+        "max_z": 50.0,
+        "min_z": 1.0,
+        "max_service_radius": 100.0,
+    },
+    "goal_control": {
+        "tolerance": 1.5,
+        "stop_radius": 3.0,
+        "tolerance_xy": 2.0,
+        "tolerance_z": 1.5,
+        "settle_ticks": 8,
+    },
+}
+
+
 def _distance(a: tuple, b: tuple) -> float:
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
 
@@ -91,24 +126,8 @@ def build_agent_positions(
                 "y": goal_y,
                 "z": goal_z,
             },
-            "path_planning": {
-                "algorithm": "apf",
-                "attractive_gain": 1.8,
-                "repulsive_gain": 8.5,
-                "influence_radius": 7.0,
-                "goal_tolerance": 1.5,
-                "braking_radius": 7.5,
-                "ship_keepout_radius": 18.0,
-                "ship_influence_radius": 30.0,
-                "velocity_smoothing": 0.42
-            },
-            "kinematics": {
-                "max_velocity": 4.0,       # m/s
-                "max_acceleration": 1.0,   # m/s^2
-                "max_z": 50.0,             # Service ceiling
-                "min_z": 1.0,              # Floor / Ground safety
-                "max_service_radius": 100.0 # Maximum operational range from spawn point
-            }
+            # Per-agent path_planning/kinematics/goal_control can still be added
+            # as overrides, but defaults now live at runtime["defaults"].
         }
     return agents
 
@@ -154,6 +173,7 @@ def main():
 
     runtime = {
         "agent_count": args.agents,
+        "defaults": GLOBAL_DEFAULTS,
         "agents": build_agent_positions(
             args.agents,
             args.x,

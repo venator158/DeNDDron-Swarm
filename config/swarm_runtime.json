@@ -1,94 +1,73 @@
 {
   "agent_count": 3,
+  "defaults": {
+    "path_planning": {
+      "algorithm": "apf",
+      "attractive_gain": 1.8,
+      "repulsive_gain": 8.5,
+      "influence_radius": 7.0,
+      "step_size": 0.2,
+      "goal_tolerance": 1.5,
+      "braking_radius": 7.5,
+      "ship_keepout_radius": 18.0,
+      "ship_influence_radius": 30.0,
+      "apf_exponential_decay": 0.5,
+      "apf_inverse_square_scale": 0.3,
+      "apf_stuck_growth_rate": 0.2,
+      "min_movement": 0.01,
+      "stuck_threshold": 5,
+      "velocity_smoothing": 0.42
+    },
+    "kinematics": {
+      "max_velocity": 4.0,
+      "max_acceleration": 1.0,
+      "max_z": 50.0,
+      "min_z": 1.0,
+      "max_service_radius": 100.0
+    },
+    "goal_control": {
+      "tolerance": 1.5,
+      "stop_radius": 3.0,
+      "tolerance_xy": 2.0,
+      "tolerance_z": 1.5,
+      "settle_ticks": 8
+    }
+  },
   "agents": {
     "drone_1": {
       "spawn": {
-        "x": 20.086051712730107,
-        "y": 33.75741092910483,
+        "x": 27.113982677218715,
+        "y": 35.64190560767509,
         "z": 18.5
       },
       "goal": {
-        "x": 37.71051069553786,
-        "y": -14.244885154286901,
+        "x": -19.558138554540786,
+        "y": -24.071418794533102,
         "z": 21.5
-      },
-      "path_planning": {
-        "algorithm": "apf",
-        "attractive_gain": 1.8,
-        "repulsive_gain": 8.5,
-        "influence_radius": 7.0,
-        "goal_tolerance": 1.5,
-        "braking_radius": 7.5,
-        "ship_keepout_radius": 18.0,
-        "ship_influence_radius": 30.0,
-        "velocity_smoothing": 0.42
-      },
-      "kinematics": {
-        "max_velocity": 4.0,
-        "max_acceleration": 1.0,
-        "max_z": 50.0,
-        "min_z": 1.0,
-        "max_service_radius": 100.0
       }
     },
     "drone_2": {
       "spawn": {
-        "x": -28.714929879295667,
-        "y": 21.067358692238855,
+        "x": -28.854245287178905,
+        "y": 24.33839280156575,
         "z": 21.5
       },
       "goal": {
-        "x": 37.13814332264877,
-        "y": -6.071171201272022,
+        "x": 10.760536268266419,
+        "y": 32.20654819337269,
         "z": 18.5
-      },
-      "path_planning": {
-        "algorithm": "apf",
-        "attractive_gain": 1.8,
-        "repulsive_gain": 8.5,
-        "influence_radius": 7.0,
-        "goal_tolerance": 1.5,
-        "braking_radius": 7.5,
-        "ship_keepout_radius": 18.0,
-        "ship_influence_radius": 30.0,
-        "velocity_smoothing": 0.42
-      },
-      "kinematics": {
-        "max_velocity": 4.0,
-        "max_acceleration": 1.0,
-        "max_z": 50.0,
-        "min_z": 1.0,
-        "max_service_radius": 100.0
       }
     },
     "drone_3": {
       "spawn": {
-        "x": -23.54187572269456,
-        "y": -34.06783798696118,
+        "x": -39.54998251573584,
+        "y": -10.73652131299988,
         "z": 18.5
       },
       "goal": {
-        "x": -36.464784557499264,
-        "y": 11.670157377749677,
+        "x": 37.62908628640287,
+        "y": 21.820499234179902,
         "z": 21.5
-      },
-      "path_planning": {
-        "algorithm": "apf",
-        "attractive_gain": 1.8,
-        "repulsive_gain": 8.5,
-        "influence_radius": 7.0,
-        "goal_tolerance": 1.5,
-        "braking_radius": 7.5,
-        "ship_keepout_radius": 18.0,
-        "ship_influence_radius": 30.0,
-        "velocity_smoothing": 0.42
-      },
-      "kinematics": {
-        "max_velocity": 4.0,
-        "max_acceleration": 1.0,
-        "max_z": 50.0,
-        "min_z": 1.0,
-        "max_service_radius": 100.0
       }
     }
   }
