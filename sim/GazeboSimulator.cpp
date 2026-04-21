@@ -7,6 +7,7 @@
 #include <cctype>
 #include <fstream>
 #include <cstdlib>
+#include <cstring>
 
 GazeboSimulator::GazeboSimulator() {
     std::cout << "[GazeboSimulator] Initializing..." << std::endl;
@@ -38,9 +39,22 @@ void GazeboSimulator::init() {
 
     std::cout << "[GazeboSimulator] Connected to Gazebo transport" << std::endl;
 
-    // Zenoh Init
+    // Zenoh Init — connect as a client to the router (same fabric as Python agents).
+    // Without this the bridge opens a peer/multicast session that is isolated from
+    // the client sessions the Python agents use, so sensor publishes never reach them.
     auto config = zenoh::Config::create_default();
+    const char* router_env = std::getenv("ZENOH_ROUTER_IP");
+    if (router_env != nullptr && std::strlen(router_env) > 0) {
+        std::string router_str(router_env);
+        std::string endpoints = "[\"" + router_str + "\"]";
+        config.insert_json5("mode", "\"client\"");
+        config.insert_json5("connect/endpoints", endpoints);
+        std::cout << "[GazeboSimulator] Zenoh: connecting to router at " << router_str << std::endl;
+    } else {
+        std::cout << "[GazeboSimulator] WARNING: ZENOH_ROUTER_IP not set — using peer/multicast scouting" << std::endl;
+    }
     _session.emplace(zenoh::Session::open(std::move(config)));
+    std::cout << "[GazeboSimulator] Zenoh session opened." << std::endl;
 
     std::cout << "[Gazebo] Registering subscribers..." << std::endl;
     auto sub_opt = zenoh::Session::SubscriberOptions::create_default();

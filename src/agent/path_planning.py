@@ -111,6 +111,9 @@ class APFStrategy(PathPlanningStrategy):
         a = max(0.0, self.apf_exponential_decay)
         b = max(1e-3, self.apf_inverse_square_scale)
 
+        nearest_dist = float('inf')
+        nearest_away_vec = None
+
         for obs in nearby_obstacles:
             obs_pos = np.array([obs["x"], obs["y"], obs["z"]], dtype=float)
             away_vec = curr_pos - obs_pos
@@ -119,9 +122,13 @@ class APFStrategy(PathPlanningStrategy):
             if dist <= 1e-3 or dist > self.influence_radius:
                 continue
 
-            # z = (1 / (b * d^2)) * exp(-a * d), away from obstacle.
-            force_mag = (1.0 / (b * dist * dist)) * np.exp(-a * dist)
-            v_rep += (away_vec / dist) * (self.k_repulsive * force_mag)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_away_vec = away_vec
+
+        if nearest_away_vec is not None:
+            force_mag = (1.0 / (b * nearest_dist * nearest_dist)) * np.exp(-a * nearest_dist)
+            v_rep += (nearest_away_vec / nearest_dist) * (self.k_repulsive * force_mag)
 
         # Add central ship repulsion with same APF formula.
         ship_vec_2d = curr_pos[:2] - self.ship_center
@@ -165,6 +172,11 @@ class APFStrategy(PathPlanningStrategy):
         # 3) Combine force vectors
         total_force = attractive + repulsive
         force_norm = float(np.linalg.norm(total_force))
+
+        import sys
+        if np.random.rand() < 0.05:  # Print 5% of the time to avoid log spam
+            print(f"APF Debug: curr={curr_pos}, goal={goal_pos}, to_goal={to_goal}, dist={dist_to_goal:.2f}", file=sys.stderr)
+            print(f"APF Debug: attractive={attractive}, repulsive={repulsive}, total={total_force}", file=sys.stderr)
 
         desired_v = np.zeros(3, dtype=float)
         if force_norm > 1e-9:

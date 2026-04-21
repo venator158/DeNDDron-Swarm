@@ -32,7 +32,7 @@ class DenddronAgent:
         self.current_job = None
         self.step_count = 0
         self.sensor_frame_count = 0
-        self.current_time = time.time()
+        self.current_time = 0.0  # Gazebo sim-time (seconds), NOT Unix wall-clock
         self.sensor_wall_time = time.monotonic()
         self.latest_visible_obstacles = []
         self.latest_voxel_summary = {
