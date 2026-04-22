@@ -277,6 +277,30 @@ class MetricsNode:
                                           key=lambda a: a.agent_id)],
                 "recent_events":     list(self._events[-20:]),
             }
+    def _get_agent_color(self, agent_id: str) -> str:
+        # Match colors from GazeboSimulator.cpp
+        colors = [
+            "\033[91m",         # 0: Vivid Red
+            "\033[92m",         # 1: Vivid Green
+            "\033[94m",         # 2: Vivid Blue
+            "\033[93m",         # 3: Yellow
+            "\033[96m",         # 4: Cyan
+            "\033[95m",         # 5: Magenta
+            "\033[38;5;214m",   # 6: Orange
+            "\033[38;5;129m",   # 7: Purple
+            "\033[38;5;48m",    # 8: Spring Green
+        ]
+        color_idx = 0
+        try:
+            # Parse trailing number (e.g. 'drone_3' -> 3)
+            num_str = "".join(filter(str.isdigit, agent_id))
+            if num_str:
+                color_idx = (int(num_str) - 1) % len(colors)
+            else:
+                color_idx = hash(agent_id) % len(colors)
+        except Exception:
+            color_idx = hash(agent_id) % len(colors)
+        return colors[color_idx]
 
     def print_dashboard(self):
         s = self._build_summary()
@@ -295,8 +319,10 @@ class MetricsNode:
         )
         for a in s["agents"]:
             status = "ALIVE" if a["alive"] else "DEAD "
+            color = self._get_agent_color(a['agent_id'])
+            reset = "\033[0m"
             print(
-                f"  [{status}] {a['agent_id']:12s}  "
+                f"  [{status}] {color}{a['agent_id']:12s}{reset}  "
                 f"pos=({a['position']['x']:6.1f},{a['position']['y']:6.1f},{a['position']['z']:5.1f})  "
                 f"spd={a['speed_mps']:.2f}m/s  "
                 f"dist={a['distance_m']:.1f}m  "
