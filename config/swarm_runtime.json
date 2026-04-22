@@ -2,7 +2,7 @@
   "agent_count": 9,
   "defaults": {
     "path_planning": {
-      "algorithm": "orca",
+      "algorithm": "apf",
       "attractive_gain": 1.8,
       "repulsive_gain": 8.5,
       "influence_radius": 7.0,
