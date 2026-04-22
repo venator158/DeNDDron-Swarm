@@ -2,6 +2,8 @@
 #include <iostream>
 #include <csignal>
 #include <atomic>
+#include <thread>
+#include <chrono>
 
 // Global flag for graceful shutdown
 std::atomic<bool> g_running(true);
@@ -40,6 +42,7 @@ int main(int argc, char* argv[]) {
     // The simulator publishes sensor data and metrics at fixed intervals.
     while (g_running) {
         simulator.step();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     // ========================================================================

@@ -218,3 +218,318 @@ class APFStrategy(PathPlanningStrategy):
             "linear": {"x": float(v_total[0]), "y": float(v_total[1]), "z": float(v_total[2])},
             "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ORCA Strategy — Optimal Reciprocal Collision Avoidance
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Translated from the C++ ORCAMAPFStrategy reference implementation.
+# Key adaptation: C++ uses XZ-plane (Y=up); Gazebo uses XY-plane (Z=up).
+# All 2D math (determinants, perpendiculars) operates on (x, y) components.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import logging
+import sys
+
+_orca_logger = logging.getLogger("ORCAStrategy")
+
+
+class _ORCALine:
+    """A half-plane constraint.  Velocities on the positive side of the
+    directed line (point, direction) are permitted."""
+    __slots__ = ("point", "direction")
+
+    def __init__(self, point: np.ndarray, direction: np.ndarray):
+        self.point = point          # 2-vector
+        self.direction = direction  # 2-vector (unit)
+
+
+class ORCAStrategy(PathPlanningStrategy):
+    """
+    Velocity-obstacle path planner using ORCA half-planes resolved via
+    iterative linear programming.
+
+    Each nearby obstacle voxel and the central ship produce one half-plane
+    constraint.  The LP finds the velocity closest to the preferred
+    (goal-seeking) velocity that satisfies every constraint simultaneously.
+
+    Unlike APF, forces are never *summed* across voxels, so even a dense
+    wall of detections cannot produce an unbounded repulsive blow-up.
+    """
+
+    def __init__(self):
+        # ── Shared parameters (same semantics as APFStrategy) ─────────
+        self.step_size = 0.2
+        self.max_velocity = 4.0
+        self.velocity_smoothing = 0.42
+        self.goal_tolerance = 1.5
+        self.braking_radius = 7.5
+        self.min_z = 1.0
+        self.max_z = 50.0
+
+        # ── ORCA-specific parameters ──────────────────────────────────
+        self.time_horizon_obst = 1.5      # seconds — how far ahead to avoid obstacles
+        self.agent_radius = 2.0           # conservative bounding sphere (meters)
+        self.influence_radius = 8.0       # only consider voxels within this range
+        self.neighbor_dist = 5.0          # max distance for inter-agent ORCA (future)
+
+        # ── Environment constraints ───────────────────────────────────
+        self.ship_center = np.array([0.0, 0.0], dtype=float)
+        self.ship_keepout_radius = 18.0
+
+        # ── Internal state ────────────────────────────────────────────
+        self._goal_reached = False
+        self.last_velocity = np.zeros(3, dtype=float)
+        self._step_count = 0
+
+    # ------------------------------------------------------------------
+    # configure()
+    # ------------------------------------------------------------------
+    def configure(self, config: Dict[str, Any]):
+        """Accept the same config dict the agent passes to APF.
+        Shared keys are consumed; APF-only keys are silently ignored."""
+        self.step_size          = float(config.get("step_size", self.step_size))
+        self.max_velocity       = float(config.get("max_velocity", self.max_velocity))
+        self.velocity_smoothing = float(config.get("velocity_smoothing", self.velocity_smoothing))
+        self.goal_tolerance     = float(config.get("goal_tolerance", self.goal_tolerance))
+        self.braking_radius     = float(config.get("braking_radius", self.braking_radius))
+        self.ship_keepout_radius = float(config.get("ship_keepout_radius", self.ship_keepout_radius))
+        self.min_z              = float(config.get("min_z", self.min_z))
+        self.max_z              = float(config.get("max_z", self.max_z))
+
+        # ORCA-specific (optional overrides)
+        self.time_horizon_obst = float(config.get("time_horizon_obst", self.time_horizon_obst))
+        self.agent_radius      = float(config.get("agent_radius", self.agent_radius))
+        self.influence_radius  = float(config.get("influence_radius", self.influence_radius))
+
+        self._goal_reached = False
+        self.last_velocity = np.zeros(3, dtype=float)
+        self._step_count = 0
+
+    def is_goal_reached(self) -> bool:
+        return self._goal_reached
+
+    # ==================================================================
+    # 2-D  MATH  HELPERS  (XY plane)
+    # ==================================================================
+
+    @staticmethod
+    def _det(v1: np.ndarray, v2: np.ndarray) -> float:
+        """2-D cross product (determinant) in the XY plane."""
+        return float(v1[0] * v2[1] - v1[1] * v2[0])
+
+    def _is_valid_velocity(self, velocity: np.ndarray, line: _ORCALine) -> bool:
+        """Is *velocity* on the permitted (left) side of the half-plane?"""
+        diff = velocity - line.point
+        return self._det(line.direction, diff) >= -1e-5
+
+    @staticmethod
+    def _project_on_line(velocity: np.ndarray, line: _ORCALine) -> np.ndarray:
+        """Closest point on *line* to *velocity*."""
+        diff = velocity - line.point
+        t = float(np.dot(diff, line.direction))
+        return line.point + line.direction * t
+
+    # ==================================================================
+    # ORCA  LINE  GENERATION
+    # ==================================================================
+
+    def _compute_obstacle_orca_lines(
+        self, agent_pos_2d: np.ndarray, agent_vel_2d: np.ndarray,
+        voxel_map, agent_z: float,
+    ) -> list:
+        """Convert each nearby voxel into one ORCA half-plane.
+
+        Mirrors C++ ``computeObstacleORCALines`` but in the XY plane and
+        using the voxel map's spatial query instead of bounding-box clamp.
+        """
+        lines: list[_ORCALine] = []
+        nearby = voxel_map.get_nearby_obstacles(
+            agent_pos_2d[0], agent_pos_2d[1], agent_z, self.influence_radius,
+        )
+
+        eff_radius = self.agent_radius + 0.5   # slight inflation for smoother sliding
+
+        for obs in nearby:
+            obs_2d = np.array([obs["x"], obs["y"]], dtype=float)
+            rel_pos = obs_2d - agent_pos_2d
+            dist_sq = float(np.dot(rel_pos, rel_pos))
+
+            if dist_sq >= self.influence_radius * self.influence_radius:
+                continue
+
+            dist = np.sqrt(dist_sq)
+            if dist < 1e-3:
+                continue  # degenerate — on top of voxel
+
+            direction = rel_pos / dist
+            # Perpendicular in XY:  (-dy, dx)
+            line_dir = np.array([-direction[1], direction[0]], dtype=float)
+            # How far the velocity must be pushed *away* from the obstacle
+            u = (eff_radius - dist) / max(self.time_horizon_obst, 1e-6)
+            line_point = agent_vel_2d - direction * u
+
+            lines.append(_ORCALine(point=line_point, direction=line_dir))
+
+        return lines
+
+    def _compute_ship_orca_line(
+        self, agent_pos_2d: np.ndarray, agent_vel_2d: np.ndarray,
+    ) -> _ORCALine | None:
+        """Explicit half-plane for the central ship (hard-coded at origin,
+        keepout radius from GazeboSimulator.cpp)."""
+        ship_vec = self.ship_center - agent_pos_2d
+        ship_dist = float(np.linalg.norm(ship_vec))
+
+        # Only generate a constraint when the agent is close enough to care.
+        if ship_dist < 1e-6 or ship_dist >= self.ship_keepout_radius + self.influence_radius:
+            return None
+
+        direction = ship_vec / ship_dist
+        line_dir = np.array([-direction[1], direction[0]], dtype=float)
+        u = (self.ship_keepout_radius + self.agent_radius - ship_dist) / max(self.time_horizon_obst, 1e-6)
+        line_point = agent_vel_2d - direction * u
+
+        return _ORCALine(point=line_point, direction=line_dir)
+
+    # ==================================================================
+    # LINEAR  PROGRAM  SOLVER
+    # ==================================================================
+
+    def _linear_program(
+        self, lines: list, pref_velocity: np.ndarray, max_speed: float,
+    ) -> np.ndarray:
+        """Iteratively project *pref_velocity* onto ORCA half-planes.
+
+        Mirrors the C++ ``linearProgram`` method.  If projection onto line *i*
+        violates an earlier line *j < i*, we fall back to zero velocity rather
+        than solving a full 2-D LP (matches the reference implementation's
+        fallback behaviour).
+        """
+        result = pref_velocity.copy()
+
+        # Clip to speed disc
+        speed_sq = float(np.dot(result, result))
+        if speed_sq > max_speed * max_speed:
+            result = (result / np.sqrt(speed_sq)) * max_speed
+
+        for i, line in enumerate(lines):
+            if self._is_valid_velocity(result, line):
+                continue  # already satisfies this half-plane
+
+            # Project onto the violated line
+            projected = self._project_on_line(result, line)
+
+            # Re-clip to speed disc
+            proj_speed_sq = float(np.dot(projected, projected))
+            if proj_speed_sq > max_speed * max_speed:
+                projected = (projected / np.sqrt(proj_speed_sq)) * max_speed
+
+            # Verify the projection still satisfies all earlier lines
+            satisfies_all = True
+            for j in range(i):
+                if not self._is_valid_velocity(projected, lines[j]):
+                    satisfies_all = False
+                    break
+
+            if satisfies_all:
+                result = projected
+            else:
+                # Infeasible — stop to be safe
+                result = np.zeros(2, dtype=float)
+                break
+
+        return result
+
+    # ==================================================================
+    # compute_velocity()  —  main entry point
+    # ==================================================================
+
+    def compute_velocity(self, current_pose: dict, goal_pose: dict, voxel_map) -> dict:
+        self._step_count += 1
+
+        curr_pos = np.array([current_pose["x"], current_pose["y"], current_pose["z"]], dtype=float)
+        goal_pos = np.array([goal_pose["x"], goal_pose["y"], goal_pose["z"]], dtype=float)
+
+        to_goal = goal_pos - curr_pos
+        dist_to_goal = float(np.linalg.norm(to_goal))
+
+        # ── Goal arrival check ────────────────────────────────────────
+        if dist_to_goal <= self.goal_tolerance:
+            self._goal_reached = True
+            self.last_velocity = np.zeros(3, dtype=float)
+            return {
+                "linear":  {"x": 0.0, "y": 0.0, "z": 0.0},
+                "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
+            }
+        self._goal_reached = False
+
+        # ── 1. Preferred velocity (XY) ────────────────────────────────
+        to_goal_2d = to_goal[:2]
+        dist_2d = float(np.linalg.norm(to_goal_2d))
+
+        pref_vel_2d = np.zeros(2, dtype=float)
+        if dist_2d > 1e-6:
+            base_speed = min(self.max_velocity, dist_2d / max(self.step_size, 1e-6))
+            brake_scale = np.clip(
+                (dist_2d - self.goal_tolerance) / max(self.braking_radius, 1e-3),
+                0.0, 1.0,
+            )
+            pref_vel_2d = (to_goal_2d / dist_2d) * (base_speed * brake_scale)
+
+        # ── 2. Build ORCA lines ───────────────────────────────────────
+        agent_vel_2d = self.last_velocity[:2].copy()
+        orca_lines = self._compute_obstacle_orca_lines(
+            curr_pos[:2], agent_vel_2d, voxel_map, curr_pos[2],
+        )
+        ship_line = self._compute_ship_orca_line(curr_pos[:2], agent_vel_2d)
+        if ship_line is not None:
+            orca_lines.append(ship_line)
+
+        # ── 3. Solve LP ───────────────────────────────────────────────
+        opt_vel_2d = self._linear_program(orca_lines, pref_vel_2d, self.max_velocity)
+
+        # ── Debug logging (every 100 ticks) ───────────────────────────
+        if self._step_count % 100 == 0:
+            ship_dist = float(np.linalg.norm(self.ship_center - curr_pos[:2]))
+            print(
+                f"ORCA Debug: pos=[{curr_pos[0]:.1f},{curr_pos[1]:.1f},{curr_pos[2]:.1f}] "
+                f"pref={pref_vel_2d} opt={opt_vel_2d} "
+                f"lines={len(orca_lines)} ship_d={ship_dist:.1f}",
+                file=sys.stderr,
+            )
+
+        # ── 4. Z-axis altitude control ────────────────────────────────
+        z_vel = 0.0
+        if dist_to_goal > 1e-3:
+            z_diff = to_goal[2]
+            z_vel = float(np.clip(z_diff * 0.5, -self.max_velocity * 0.5, self.max_velocity * 0.5))
+
+        # Hard altitude limits
+        next_z = curr_pos[2] + z_vel * self.step_size
+        if next_z < self.min_z and z_vel < 0:
+            z_vel = max(0.0, (self.min_z - curr_pos[2]) / max(self.step_size, 1e-6))
+        elif next_z > self.max_z and z_vel > 0:
+            z_vel = min(0.0, (self.max_z - curr_pos[2]) / max(self.step_size, 1e-6))
+
+        # ── 5. Compose 3-D velocity & smooth ──────────────────────────
+        v_raw = np.array([opt_vel_2d[0], opt_vel_2d[1], z_vel], dtype=float)
+
+        alpha = float(np.clip(self.velocity_smoothing, 0.0, 1.0))
+        v_smooth = (1.0 - alpha) * self.last_velocity + alpha * v_raw
+        self.last_velocity = v_smooth.copy()
+
+        # Final speed cap
+        speed = float(np.linalg.norm(self.last_velocity))
+        if speed > self.max_velocity:
+            self.last_velocity = (self.last_velocity / speed) * self.max_velocity
+
+        return {
+            "linear": {
+                "x": float(self.last_velocity[0]),
+                "y": float(self.last_velocity[1]),
+                "z": float(self.last_velocity[2]),
+            },
+            "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
+        }

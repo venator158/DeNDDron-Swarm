@@ -10,7 +10,7 @@ from pathlib import Path
 
 GLOBAL_DEFAULTS = {
     "path_planning": {
-        "algorithm": "apf",
+        "algorithm": "orca",
         "attractive_gain": 1.8,
         "repulsive_gain": 8.5,
         "influence_radius": 7.0,

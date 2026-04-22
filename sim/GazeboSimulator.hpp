@@ -32,6 +32,7 @@ private:
     gazebo::transport::SubscriberPtr _stats_sub;   // For receiving simulation time
     double _sim_time = 0.0;
     double _last_sim_time = 0.0;
+    double _last_sensor_pub_time = 0.0;
 
     void on_world_stats(ConstWorldStatisticsPtr &_msg);
     

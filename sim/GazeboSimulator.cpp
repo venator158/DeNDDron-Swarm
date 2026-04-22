@@ -537,16 +537,23 @@ void GazeboSimulator::step() {
         _last_sim_time = current_sim_time;
     }
 
-    // Even if dt == 0 (simulator paused or no time elapsed), we can still publish sensors.
-
+    // Only publish when simulation time has advanced by at least 0.02s (50Hz) to avoid DDoSing Zenoh
+    if (current_sim_time - _last_sensor_pub_time >= 0.02) {
+        _last_sensor_pub_time = current_sim_time;
+        for (const auto& [agent_id, spawned] : _spawned_agents) {
+            if (spawned) {
+                json sensor_data = {
+                    {"sim_time", current_sim_time},
+                    {"pose", get_drone_pose(agent_id)},
+                    {"lidar", simulate_lidar(agent_id)}
+                };
+                publish_sensor_data(agent_id, sensor_data);
+            }
+        }
+    }
+    
     for (const auto& [agent_id, spawned] : _spawned_agents) {
         if (spawned) {
-            json sensor_data = {
-                {"sim_time", current_sim_time},
-                {"pose", get_drone_pose(agent_id)},
-                {"lidar", simulate_lidar(agent_id)}
-            };
-            publish_sensor_data(agent_id, sensor_data);
 
             // Publish LinkData to force Gazebo to move the visual model
             if (_physics_pub && dt > 0.0) {

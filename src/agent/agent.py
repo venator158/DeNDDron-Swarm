@@ -6,7 +6,7 @@ import numpy as np
 import logging
 import os
 from voxel_map import VoxelMap
-from path_planning import APFStrategy
+from path_planning import APFStrategy, ORCAStrategy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
@@ -108,34 +108,53 @@ class DenddronAgent:
             self.current_goal = my_cfg["goal"]
             logger.info(f"[{self.agent_id}] Assigned static goal from runtime config: {self.current_goal}")
 
-        # Initialize Reflex Strategy (using APF)
-        self.path_planner = APFStrategy()
+        # --- Path Planner: strategy selection ---
         planner_cfg = dict(global_cfg.get("path_planning", {}))
         planner_cfg.update(my_cfg.get("path_planning", {}))
-        _require_keys(
-            "defaults.path_planning",
-            planner_cfg,
-            [
-                "algorithm",
-                "attractive_gain",
-                "repulsive_gain",
-                "influence_radius",
-                "step_size",
-                "goal_tolerance",
-                "braking_radius",
-                "ship_keepout_radius",
-                "ship_influence_radius",
-                "apf_exponential_decay",
-                "apf_inverse_square_scale",
-                "apf_stuck_growth_rate",
-                "min_movement",
-                "stuck_threshold",
-                "velocity_smoothing",
-            ],
-        )
         planner_cfg["min_z"] = self.kinematics["min_z"]
         planner_cfg["max_z"] = self.kinematics["max_z"]
         planner_cfg["max_velocity"] = self.kinematics["max_velocity"]
+
+        algorithm = planner_cfg.get("algorithm", "apf").lower()
+        if algorithm == "orca":
+            logger.info(f"[{self.agent_id}] Using ORCA path planning strategy")
+            self.path_planner = ORCAStrategy()
+            _require_keys(
+                "defaults.path_planning",
+                planner_cfg,
+                [
+                    "algorithm",
+                    "step_size",
+                    "goal_tolerance",
+                    "braking_radius",
+                    "ship_keepout_radius",
+                    "velocity_smoothing",
+                ],
+            )
+        else:
+            logger.info(f"[{self.agent_id}] Using APF path planning strategy")
+            self.path_planner = APFStrategy()
+            _require_keys(
+                "defaults.path_planning",
+                planner_cfg,
+                [
+                    "algorithm",
+                    "attractive_gain",
+                    "repulsive_gain",
+                    "influence_radius",
+                    "step_size",
+                    "goal_tolerance",
+                    "braking_radius",
+                    "ship_keepout_radius",
+                    "ship_influence_radius",
+                    "apf_exponential_decay",
+                    "apf_inverse_square_scale",
+                    "apf_stuck_growth_rate",
+                    "min_movement",
+                    "stuck_threshold",
+                    "velocity_smoothing",
+                ],
+            )
         self.path_planner.configure(planner_cfg)
         
         # --- Publishers ---
