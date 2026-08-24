@@ -16,7 +16,12 @@
       "apf_stuck_growth_rate": 0.2,
       "min_movement": 0.01,
       "stuck_threshold": 5,
-      "velocity_smoothing": 0.42
+      "velocity_smoothing": 0.42,
+      "max_repulsive_force": 10.0,
+      "orca_vertical_margin": 1.0,
+      "max_control_dt": 0.2,
+      "sensor_timeout_s": 0.5,
+      "collision_check_hz": 20.0
     },
     "kinematics": {
       "max_velocity": 4.0,

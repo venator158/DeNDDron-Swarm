@@ -43,6 +43,7 @@ COLLISION_RADIUS_M  = 2.5    # drones closer than this = proximity collision
 DEDUP_WINDOW_S      = 3.0    # min seconds between same-pair collision events (suppress sustained-contact spam)
 PUBLISH_INTERVAL_S  = 5.0    # how often to publish swarm/metrics/summary
 SAVE_INTERVAL_S     = 60.0   # how often to auto-save log to disk
+COLLISION_CHECK_HZ  = float(os.environ.get("COLLISION_CHECK_HZ", "20.0"))
 LOG_PATH            = Path(os.environ.get("METRICS_LOG_PATH", "/state/metrics_log.json"))
 
 
@@ -108,7 +109,7 @@ class MetricsNode:
         self.session = session
         self._lock   = threading.Lock()
 
-        # State
+        self.running = True
         self._agents: dict = {}
         self._total_spawned    = 0
         self._total_despawned  = 0
@@ -214,43 +215,90 @@ class MetricsNode:
             log.warning(f"Error in _on_despawn: {e}")
 
     # -----------------------------------------------------------------------
-    # Collision detection (called with self._lock held)
+    # Asynchronous Collision Detection (Spatial Hashing)
     # -----------------------------------------------------------------------
 
-    def _check_collisions_locked(self, agent_id: str):
-        agent = self._agents.get(agent_id)
-        if not agent or not agent.first_pose_received:
-            return
+    def check_collisions_spatial_hash(self):
+        """
+        Asynchronously builds a 3D spatial hash from a state snapshot and checks
+        candidate pairs for proximity collisions.
+        """
+        # Step 1: Copy state snapshot under lock
+        snapshots = {}
+        with self._lock:
+            for aid, agent in self._agents.items():
+                if agent.alive and agent.first_pose_received:
+                    snapshots[aid] = (agent.x, agent.y, agent.z)
 
+        if len(snapshots) < 2:
+            return 0, 0
+
+        # Step 2: Build spatial hash grid
+        cell_size = COLLISION_RADIUS_M
+        grid = {}
+        for aid, (x, y, z) in snapshots.items():
+            cell_key = (
+                math.floor(x / cell_size),
+                math.floor(y / cell_size),
+                math.floor(z / cell_size)
+            )
+            if cell_key not in grid:
+                grid[cell_key] = []
+            grid[cell_key].append(aid)
+
+        # Step 3: Gather unique candidate pairs from 3D neighbor cells (3x3x3 neighborhood)
+        candidate_pairs = set()
+        for cell_key, members in grid.items():
+            cx, cy, cz = cell_key
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        neighbor_key = (cx + dx, cy + dy, cz + dz)
+                        if neighbor_key in grid:
+                            for a1 in members:
+                                for a2 in grid[neighbor_key]:
+                                    if a1 < a2:
+                                        candidate_pairs.add((a1, a2))
+
+        # Step 4: Perform exact distance check on candidate pairs
         now = time.monotonic()
-        for other_id, other in self._agents.items():
-            if other_id == agent_id or not other.alive or not other.first_pose_received:
-                continue
-
-            dx   = agent.x - other.x
-            dy   = agent.y - other.y
-            dz   = agent.z - other.z
+        for a1_id, a2_id in candidate_pairs:
+            p1 = snapshots[a1_id]
+            p2 = snapshots[a2_id]
+            dx = p1[0] - p2[0]
+            dy = p1[1] - p2[1]
+            dz = p1[2] - p2[2]
             dist = math.sqrt(dx * dx + dy * dy + dz * dz)
 
             if dist < COLLISION_RADIUS_M:
-                # Deduplicate: only log once per pair per DEDUP_WINDOW_S
-                last = agent._last_col_time.get(other_id, 0.0)
-                if now - last >= DEDUP_WINDOW_S:
-                    agent._last_col_time[other_id]  = now
-                    other._last_col_time[agent_id]  = now
-                    agent.collision_count           += 1
-                    other.collision_count           += 1
-                    self._total_collisions          += 1
-                    self._events.append({
-                        "type":     "collision",
-                        "agents":   [agent_id, other_id],
-                        "dist_m":   round(dist, 3),
-                        "time":     time.time()
-                    })
-                    log.warning(
-                        f"PROXIMITY COLLISION: {agent_id} <-> {other_id}  "
-                        f"dist={dist:.2f}m  total={self._total_collisions}"
-                    )
+                with self._lock:
+                    agent1 = self._agents.get(a1_id)
+                    agent2 = self._agents.get(a2_id)
+                    if not agent1 or not agent2 or not agent1.alive or not agent2.alive:
+                        continue
+
+                    last1 = agent1._last_col_time.get(a2_id, 0.0)
+                    last2 = agent2._last_col_time.get(a1_id, 0.0)
+                    last = max(last1, last2)
+
+                    if now - last >= DEDUP_WINDOW_S:
+                        agent1._last_col_time[a2_id] = now
+                        agent2._last_col_time[a1_id] = now
+                        agent1.collision_count += 1
+                        agent2.collision_count += 1
+                        self._total_collisions += 1
+                        self._events.append({
+                            "type":     "collision",
+                            "agents":   [a1_id, a2_id],
+                            "dist_m":   round(dist, 3),
+                            "time":     time.time()
+                        })
+                        log.warning(
+                            f"PROXIMITY COLLISION: {a1_id} <-> {a2_id}  "
+                            f"dist={dist:.2f}m  total={self._total_collisions}"
+                        )
+
+        return len(candidate_pairs), len(candidate_pairs)
 
     # -----------------------------------------------------------------------
     # Reporting
@@ -346,16 +394,25 @@ class MetricsNode:
         except Exception as e:
             log.warning(f"Failed to save log: {e}")
 
-    # -----------------------------------------------------------------------
-    # Main loop
-    # -----------------------------------------------------------------------
+    def _collision_loop(self):
+        interval = 1.0 / max(0.1, COLLISION_CHECK_HZ)
+        while self.running:
+            try:
+                self.check_collisions_spatial_hash()
+            except Exception as e:
+                log.warning(f"Error in collision loop: {e}")
+            time.sleep(interval)
 
     def run(self):
         last_publish = 0.0
         last_save    = 0.0
         last_print   = 0.0
 
-        log.info("MetricsNode running. Collecting swarm telemetry...")
+        self.running = True
+        worker = threading.Thread(target=self._collision_loop, daemon=True)
+        worker.start()
+
+        log.info(f"MetricsNode running. Collecting swarm telemetry (spatial hash at {COLLISION_CHECK_HZ} Hz)...")
         try:
             while True:
                 now = time.monotonic()
@@ -377,6 +434,7 @@ class MetricsNode:
         except KeyboardInterrupt:
             pass
         finally:
+            self.running = False
             log.info("Shutting down — saving final metrics log...")
             self.save_log()
 

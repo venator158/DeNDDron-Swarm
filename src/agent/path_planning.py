@@ -48,6 +48,7 @@ class APFStrategy(PathPlanningStrategy):
         self.min_z = 1.0
         self.max_z = 50.0
 
+        self.max_repulsive_force = 10.0
         # Internal state.
         self.prev_v_total = np.zeros(3, dtype=float)
         self.last_pos = None
@@ -93,6 +94,7 @@ class APFStrategy(PathPlanningStrategy):
         self.min_z = float(config["min_z"])
         self.max_z = float(config["max_z"])
         self.velocity_smoothing = float(config["velocity_smoothing"])
+        self.max_repulsive_force = float(config.get("max_repulsive_force", 10.0))
         self.current_k_att  = self.k_attractive
         self._goal_reached  = False   # reset on reconfigure
         self.prev_v_total = np.zeros(3)
@@ -128,6 +130,15 @@ class APFStrategy(PathPlanningStrategy):
         if 1e-6 < ship_dist < self.ship_influence_radius:
             force_mag = (1.0 / (b * ship_dist * ship_dist)) * np.exp(-a * ship_dist)
             v_rep[:2] += (ship_vec_2d / ship_dist) * (self.k_repulsive * force_mag)
+
+        # Numerical guards against NaN / Inf
+        v_rep = np.nan_to_num(v_rep, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Soft saturation: limit max repulsive force magnitude smoothly
+        raw_mag = float(np.linalg.norm(v_rep))
+        if raw_mag > 1e-9 and self.max_repulsive_force > 0:
+            bounded_mag = self.max_repulsive_force * np.tanh(raw_mag / self.max_repulsive_force)
+            v_rep = (v_rep / raw_mag) * bounded_mag
 
         return v_rep
 
@@ -266,6 +277,10 @@ class ORCAStrategy(PathPlanningStrategy):
         self.influence_radius = 8.0       # only consider voxels within this range
         self.neighbor_dist = 5.0          # max distance for inter-agent ORCA (future)
 
+        self.agent_vertical_radius = 0.5
+        self.voxel_vertical_radius = 0.25
+        self.orca_vertical_margin  = 1.0
+
         # ── Environment constraints ───────────────────────────────────
         self.ship_center = np.array([0.0, 0.0], dtype=float)
         self.ship_keepout_radius = 18.0
@@ -294,6 +309,7 @@ class ORCAStrategy(PathPlanningStrategy):
         self.time_horizon_obst = float(config.get("time_horizon_obst", self.time_horizon_obst))
         self.agent_radius      = float(config.get("agent_radius", self.agent_radius))
         self.influence_radius  = float(config.get("influence_radius", self.influence_radius))
+        self.orca_vertical_margin = float(config.get("orca_vertical_margin", self.orca_vertical_margin))
 
         self._goal_reached = False
         self.last_velocity = np.zeros(3, dtype=float)
@@ -342,8 +358,14 @@ class ORCAStrategy(PathPlanningStrategy):
         )
 
         eff_radius = self.agent_radius + 0.5   # slight inflation for smoother sliding
+        max_v_dist = self.agent_vertical_radius + self.voxel_vertical_radius + self.orca_vertical_margin
 
         for obs in nearby:
+            obs_z = obs.get("z", None)
+            if obs_z is not None and not np.isnan(obs_z):
+                if abs(obs_z - agent_z) > max_v_dist:
+                    continue  # Skip obstacle outside vertical collision envelope
+
             obs_2d = np.array([obs["x"], obs["y"]], dtype=float)
             rel_pos = obs_2d - agent_pos_2d
             dist_sq = float(np.dot(rel_pos, rel_pos))

@@ -154,8 +154,13 @@ class DenddronAgent:
                     "stuck_threshold",
                     "velocity_smoothing",
                 ],
-            )
+        self.planner_cfg = planner_cfg
         self.path_planner.configure(planner_cfg)
+
+        self.sensor_wall_time = time.monotonic()
+        self.sensor_sim_time = None
+        self.max_control_dt = float(planner_cfg.get("max_control_dt", 0.2))
+        self.sensor_timeout_s = float(planner_cfg.get("sensor_timeout_s", 0.5))
         
         # --- Publishers ---
         self.pub_cmd_vel = self.session.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
@@ -209,7 +214,7 @@ class DenddronAgent:
         try:
             payload = json.loads(bytes(sample.payload).decode('utf-8'))
 
-            sim_time = payload.get("sim_time", time.time())
+            sim_time = payload.get("sim_time", None)
             pose = payload.get("pose", {})
             lidar_data = payload.get("lidar", [])
 
@@ -221,10 +226,13 @@ class DenddronAgent:
             }
 
             with self.state_lock:
-                # Drop out-of-order frames so stale callbacks cannot rewind pose/time.
-                if sim_time + 1e-6 < self.current_time:
-                    return
-                self.current_time = sim_time
+                # Drop out-of-order frames unless sim_time reset occurs
+                if sim_time is not None and self.current_time is not None:
+                    if sim_time + 1e-6 < self.current_time and sim_time >= 0.5:
+                        return
+                if sim_time is not None:
+                    self.current_time = sim_time
+                    self.sensor_sim_time = sim_time
                 self.current_pose = current_pose
                 self.sensor_wall_time = time.monotonic()
 
@@ -245,6 +253,7 @@ class DenddronAgent:
         lidar_hits     = 0
         placed_occupied = 0
 
+        rays_data = []
         for ray in lidar_rays:
             try:
                 angle    = ray.get("angle", 0.0)
@@ -264,15 +273,13 @@ class DenddronAgent:
                     lidar_hits += 1
                     placed_occupied += 1
 
-                self.voxel_map.raytrace(
-                    agent_x, agent_y, agent_z,
-                    ray_x, ray_y, ray_z,
-                    current_time=self.current_time,
-                    mark_endpoint_occupied=is_hit
-                )
+                rays_data.append((agent_x, agent_y, agent_z, ray_x, ray_y, ray_z, is_hit))
 
             except Exception as e:
                 logger.debug(f"[{self.agent_id}] Error processing ray: {e}")
+
+        if rays_data:
+            self.voxel_map.batch_raytrace(rays_data, current_time=self.current_time)
 
         visible_obstacles = self.voxel_map.get_nearby_obstacles(agent_x, agent_y, agent_z, radius=12.0)
         nearest = []
@@ -313,16 +320,12 @@ class DenddronAgent:
     def _reflex_control_loop(self):
         """
         Runs at 50 Hz. Computes APF velocity and publishes cmd_vel.
-
-        Goal-reached logic:
-          - Once the drone is within GOAL_TOLERANCE, _goal_reached is latched True.
-          - While latched, we publish zero velocity every tick (keeps Gazebo's
-            integrator from drifting) but skip all APF computation entirely.
-          - The latch is only cleared by set_goal(), so new jobs can restart motion.
+        Explicitly handles simulation time vs wall time across explicit timing states:
+        FIRST_FRAME, NORMAL, PAUSED_ZERO_DT, OUT_OF_ORDER, TIME_RESET, LARGE_DT, MISSING_TIME.
         """
         rate_hz   = 50.0
         sleep_time = 1.0 / rate_hz
-        last_sim_time = self.current_time
+        last_sim_time = None
         next_tick = time.monotonic()
 
         def _sleep_to_next_tick():
@@ -332,7 +335,6 @@ class DenddronAgent:
             if remaining > 0.0:
                 time.sleep(remaining)
             else:
-                # If we overran, reset cadence anchor to avoid accumulating lag.
                 next_tick = time.monotonic()
 
         _zero_cmd = {
@@ -348,8 +350,57 @@ class DenddronAgent:
                 goal_latched = self._goal_reached
                 sensor_wall_time = self.sensor_wall_time
 
+            # Determine timing state and integration dt
+            timing_state = "NORMAL"
+            dt = sleep_time
+
+            if current_time is None:
+                timing_state = "MISSING_TIME"
+                dt = sleep_time
+                logger.debug(f"[{self.agent_id}] Timing state: MISSING_TIME — falling back to wall time dt={dt:.3f}")
+            elif last_sim_time is None:
+                timing_state = "FIRST_FRAME"
+                dt = sleep_time
+                last_sim_time = current_time
+                logger.info(f"[{self.agent_id}] Timing state: FIRST_FRAME — initial sim_time={current_time:.3f}")
+            elif current_time == last_sim_time:
+                timing_state = "PAUSED_ZERO_DT"
+                dt = 0.0
+            elif current_time < last_sim_time:
+                if current_time < 0.5:
+                    timing_state = "TIME_RESET"
+                    dt = sleep_time
+                    last_sim_time = current_time
+                    with self.state_lock:
+                        self.last_velocity = np.zeros(3)
+                        if hasattr(self, "planner_cfg"):
+                            self.path_planner.configure(self.planner_cfg)
+                    logger.info(f"[{self.agent_id}] Timing state: TIME_RESET — simulator reset detected at t={current_time:.3f}")
+                else:
+                    timing_state = "OUT_OF_ORDER"
+                    dt = 0.0
+                    logger.warning(
+                        f"[{self.agent_id}] Timing state: OUT_OF_ORDER — "
+                        f"sim_time decreased ({current_time:.3f} < {last_sim_time:.3f}). Skipping step."
+                    )
+            else:
+                raw_dt = current_time - last_sim_time
+                if raw_dt > self.max_control_dt:
+                    timing_state = "LARGE_DT"
+                    dt = self.max_control_dt
+                    last_sim_time = current_time
+                    logger.warning(
+                        f"[{self.agent_id}] Timing state: LARGE_DT — "
+                        f"raw_dt={raw_dt:.3f}s exceeds max_control_dt={self.max_control_dt:.3f}s. Clamping dt."
+                    )
+                else:
+                    timing_state = "NORMAL"
+                    dt = raw_dt
+                    last_sim_time = current_time
+
+            # Check communication freshness unless paused
             sensor_age = time.monotonic() - sensor_wall_time
-            if sensor_age > 0.25:
+            if timing_state != "PAUSED_ZERO_DT" and sensor_age > self.sensor_timeout_s:
                 safe_cmd = _zero_cmd
                 self.pub_cmd_vel.put(json.dumps(safe_cmd))
                 with self.state_lock:
@@ -362,11 +413,6 @@ class DenddronAgent:
                     )
                 _sleep_to_next_tick()
                 continue
-
-            dt = current_time - last_sim_time
-            if dt <= 0:
-                dt = sleep_time
-            last_sim_time = current_time
 
             safe_cmd = None   # will be set below before every publish
 

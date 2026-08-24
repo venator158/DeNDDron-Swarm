@@ -142,33 +142,29 @@ class VoxelMap:
         key = (vx, vy, vz)
         return self.voxels.get(key, 0.0)
 
-    def raytrace(self, x_start: float, y_start: float, z_start: float,
-                 x_end: float, y_end: float, z_end: float,
-                 current_time: float = None,
-                 mark_endpoint_occupied: bool = True):
+    def compute_ray_voxels(self, x_start: float, y_start: float, z_start: float,
+                           x_end: float, y_end: float, z_end: float,
+                           mark_endpoint_occupied: bool = True) -> tuple:
         """
-        Simple raytrace: mark voxels along ray as free, endpoint as occupied.
-        Uses Bresenham-like 3D line algorithm.
-
-        Args:
-            x_start, y_start, z_start: Ray origin (world coords)
-            x_end, y_end, z_end: Ray endpoint/detected object (world coords)
+        Calculates voxel coordinates for a ray traversal without acquiring any lock.
+        Returns: (free_voxel_keys: list[tuple], occupied_voxel_keys: list[tuple])
         """
-        # Convert to voxel coordinates
         v_start = np.array(self._world_to_voxel(x_start, y_start, z_start))
         v_end = np.array(self._world_to_voxel(x_end, y_end, z_end))
 
-        # Simple 3D Bresenham raytrace
         diff = v_end - v_start
         steps = int(np.max(np.abs(diff))) + 1
 
-        if steps <= 1:
-            # Ray too short, optionally mark endpoint as occupied.
-            if mark_endpoint_occupied:
-                self.mark_occupied(x_end, y_end, z_end, confidence=1.0, current_time=current_time)
-            return
+        free_keys = []
+        occupied_keys = []
 
-        # Interpolate along ray
+        if steps <= 1:
+            if mark_endpoint_occupied:
+                vx, vy, vz = tuple(v_end)
+                if self._in_bounds(vx, vy, vz):
+                    occupied_keys.append((vx, vy, vz))
+            return free_keys, occupied_keys
+
         for i in range(steps):
             t = i / (steps - 1)
             v_curr = v_start + t * diff
@@ -177,15 +173,66 @@ class VoxelMap:
             if not self._in_bounds(vx, vy, vz):
                 continue
 
-            # Mark intermediate voxels as free, endpoint as occupied
             if i == steps - 1:
-                # Mark actual endpoint coordinates (not voxel center) only for true obstacle hits.
                 if mark_endpoint_occupied:
-                    self.mark_occupied(x_end, y_end, z_end, confidence=1.0, current_time=current_time)
+                    occupied_keys.append((vx, vy, vz))
             else:
-                # Mark intermediate voxels as free
-                x, y, z = self._voxel_to_world(vx, vy, vz)
-                self.mark_free(x, y, z, current_time=current_time)
+                free_keys.append((vx, vy, vz))
+
+        return free_keys, occupied_keys
+
+    def update_batch(self, free_voxel_keys: list, occupied_voxel_keys: list,
+                     confidence: float = 1.0, current_time: float = None):
+        """
+        Applies a batch of free and occupied voxel updates under a SINGLE lock acquisition.
+        Occupied endpoints take precedence over intermediate free space for the same voxel key.
+        """
+        ts = current_time if current_time is not None else time.time()
+
+        occ_set = set(occupied_voxel_keys)
+        free_set = set(free_voxel_keys) - occ_set
+
+        with self.lock:
+            for key in free_set:
+                if key not in self.voxels or self.voxels[key] < 0.5:
+                    self.voxels[key] = 0.0
+                    self.voxel_timestamps[key] = ts
+
+            for key in occ_set:
+                current = self.voxels.get(key, 0.0)
+                self.voxels[key] = max(current, confidence)
+                self.voxel_timestamps[key] = ts
+
+    def raytrace(self, x_start: float, y_start: float, z_start: float,
+                 x_end: float, y_end: float, z_end: float,
+                 current_time: float = None,
+                 mark_endpoint_occupied: bool = True):
+        """
+        Simple raytrace using single-acquisition update_batch.
+        """
+        free_keys, occupied_keys = self.compute_ray_voxels(
+            x_start, y_start, z_start, x_end, y_end, z_end, mark_endpoint_occupied
+        )
+        self.update_batch(free_keys, occupied_keys, confidence=1.0, current_time=current_time)
+
+    def batch_raytrace(self, rays_data: list, current_time: float = None):
+        """
+        Computes all ray traversals for a LiDAR sweep lock-free, then applies all voxel
+        updates under a SINGLE lock acquisition.
+        rays_data: list of tuples: (x_start, y_start, z_start, x_end, y_end, z_end, mark_endpoint_occupied)
+        """
+        all_free = []
+        all_occ = []
+
+        for ray in rays_data:
+            x_start, y_start, z_start, x_end, y_end, z_end, mark_occ = ray
+            f_keys, o_keys = self.compute_ray_voxels(
+                x_start, y_start, z_start, x_end, y_end, z_end, mark_endpoint_occupied=mark_occ
+            )
+            all_free.extend(f_keys)
+            all_occ.extend(o_keys)
+
+        self.update_batch(all_free, all_occ, confidence=1.0, current_time=current_time)
 
     def cleanup_stale_data(self, max_age: float = 0.5, current_time: float = None):
         """
