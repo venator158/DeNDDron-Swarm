@@ -7,6 +7,7 @@ import logging
 import os
 from voxel_map import VoxelMap
 from path_planning import APFStrategy, ORCAStrategy
+from timing import TimingManager, TimingState
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
@@ -32,7 +33,7 @@ class DenddronAgent:
         self.current_job = None
         self.step_count = 0
         self.sensor_frame_count = 0
-        self.current_time = 0.0  # Gazebo sim-time (seconds), NOT Unix wall-clock
+        self.current_time = None  # Gazebo sim-time (seconds), NOT Unix wall-clock
         self.sensor_wall_time = time.monotonic()
         self.latest_visible_obstacles = []
         self.latest_voxel_summary = {
@@ -154,6 +155,7 @@ class DenddronAgent:
                     "stuck_threshold",
                     "velocity_smoothing",
                 ],
+            )
         self.planner_cfg = planner_cfg
         self.path_planner.configure(planner_cfg)
 
@@ -161,6 +163,12 @@ class DenddronAgent:
         self.sensor_sim_time = None
         self.max_control_dt = float(planner_cfg.get("max_control_dt", 0.2))
         self.sensor_timeout_s = float(planner_cfg.get("sensor_timeout_s", 0.5))
+        self.control_rate_hz = 50.0
+        self.timing = TimingManager(
+            max_control_dt=self.max_control_dt,
+            sensor_timeout_s=self.sensor_timeout_s,
+            control_period_s=1.0 / self.control_rate_hz,
+        )
         
         # --- Publishers ---
         self.pub_cmd_vel = self.session.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
@@ -225,16 +233,28 @@ class DenddronAgent:
                 "yaw": pose.get("yaw", 0.0)
             }
 
+            accepted, timing_state = self.timing.record_sensor(sim_time)
+            if not accepted:
+                logger.warning(
+                    f"[{self.agent_id}] Dropping sensor frame: timing state={timing_state.value}, "
+                    f"sim_time={sim_time!r}"
+                )
+                return
+
             with self.state_lock:
-                # Drop out-of-order frames unless sim_time reset occurs
-                if sim_time is not None and self.current_time is not None:
-                    if sim_time + 1e-6 < self.current_time and sim_time >= 0.5:
-                        return
                 if sim_time is not None:
-                    self.current_time = sim_time
-                    self.sensor_sim_time = sim_time
+                    self.current_time = float(sim_time)
+                    self.sensor_sim_time = float(sim_time)
+                else:
+                    self.current_time = None
+                    self.sensor_sim_time = None
                 self.current_pose = current_pose
                 self.sensor_wall_time = time.monotonic()
+
+                if timing_state == TimingState.TIME_RESET:
+                    self.last_velocity = np.zeros(3)
+                    self._goal_hold_ticks = 0
+                    self._prev_to_goal_vec = None
 
             self.voxel_map.cleanup_stale_data(max_age=0.5, current_time=self.current_time)
             self._process_lidar(lidar_data, current_pose)
@@ -323,9 +343,8 @@ class DenddronAgent:
         Explicitly handles simulation time vs wall time across explicit timing states:
         FIRST_FRAME, NORMAL, PAUSED_ZERO_DT, OUT_OF_ORDER, TIME_RESET, LARGE_DT, MISSING_TIME.
         """
-        rate_hz   = 50.0
+        rate_hz   = self.control_rate_hz
         sleep_time = 1.0 / rate_hz
-        last_sim_time = None
         next_tick = time.monotonic()
 
         def _sleep_to_next_tick():
@@ -348,59 +367,36 @@ class DenddronAgent:
                 current_goal = dict(self.current_goal) if self.current_goal is not None else None
                 current_pose = dict(self.current_pose) if self.current_pose is not None else None
                 goal_latched = self._goal_reached
-                sensor_wall_time = self.sensor_wall_time
 
-            # Determine timing state and integration dt
-            timing_state = "NORMAL"
-            dt = sleep_time
+            timing = self.timing.step(current_time)
+            timing_state = timing.state
+            dt = timing.sim_dt
+            sensor_age = timing.sensor_wall_age()
 
-            if current_time is None:
-                timing_state = "MISSING_TIME"
-                dt = sleep_time
-                logger.debug(f"[{self.agent_id}] Timing state: MISSING_TIME — falling back to wall time dt={dt:.3f}")
-            elif last_sim_time is None:
-                timing_state = "FIRST_FRAME"
-                dt = sleep_time
-                last_sim_time = current_time
-                logger.info(f"[{self.agent_id}] Timing state: FIRST_FRAME — initial sim_time={current_time:.3f}")
-            elif current_time == last_sim_time:
-                timing_state = "PAUSED_ZERO_DT"
-                dt = 0.0
-            elif current_time < last_sim_time:
-                if current_time < 0.5:
-                    timing_state = "TIME_RESET"
-                    dt = sleep_time
-                    last_sim_time = current_time
-                    with self.state_lock:
-                        self.last_velocity = np.zeros(3)
-                        if hasattr(self, "planner_cfg"):
-                            self.path_planner.configure(self.planner_cfg)
-                    logger.info(f"[{self.agent_id}] Timing state: TIME_RESET — simulator reset detected at t={current_time:.3f}")
-                else:
-                    timing_state = "OUT_OF_ORDER"
-                    dt = 0.0
-                    logger.warning(
-                        f"[{self.agent_id}] Timing state: OUT_OF_ORDER — "
-                        f"sim_time decreased ({current_time:.3f} < {last_sim_time:.3f}). Skipping step."
-                    )
-            else:
-                raw_dt = current_time - last_sim_time
-                if raw_dt > self.max_control_dt:
-                    timing_state = "LARGE_DT"
-                    dt = self.max_control_dt
-                    last_sim_time = current_time
-                    logger.warning(
-                        f"[{self.agent_id}] Timing state: LARGE_DT — "
-                        f"raw_dt={raw_dt:.3f}s exceeds max_control_dt={self.max_control_dt:.3f}s. Clamping dt."
-                    )
-                else:
-                    timing_state = "NORMAL"
-                    dt = raw_dt
-                    last_sim_time = current_time
+            if timing_state == TimingState.TIME_RESET:
+                with self.state_lock:
+                    self.last_velocity = np.zeros(3)
+                    self._goal_hold_ticks = 0
+                    self._prev_to_goal_vec = None
+                if hasattr(self, "planner_cfg"):
+                    self.path_planner.configure(self.planner_cfg)
+                logger.info(
+                    f"[{self.agent_id}] Timing state: TIME_RESET — "
+                    f"sim_time={current_time!r}"
+                )
+            elif timing_state == TimingState.OUT_OF_ORDER:
+                logger.warning(
+                    f"[{self.agent_id}] Timing state: OUT_OF_ORDER — "
+                    f"sim_time={current_time!r}; skipping control integration"
+                )
 
-            # Check communication freshness unless paused
-            sensor_age = time.monotonic() - sensor_wall_time
-            if timing_state != "PAUSED_ZERO_DT" and sensor_age > self.sensor_timeout_s:
+            # Communication freshness is wall-clock based.  A paused simulator
+            # may legitimately have zero simulation dt, but if the simulator is
+            # advancing while sensor messages stop arriving, fail safe.
+            if (
+                timing_state != TimingState.PAUSED_ZERO_DT
+                and not self.timing.sensor_is_fresh()
+            ):
                 safe_cmd = _zero_cmd
                 self.pub_cmd_vel.put(json.dumps(safe_cmd))
                 with self.state_lock:
@@ -409,7 +405,8 @@ class DenddronAgent:
                 self.step_count += 1
                 if self.step_count % 100 == 0:
                     logger.warning(
-                        f"[{self.agent_id}] Sensor stream stale ({sensor_age*1000.0:.0f} ms); holding zero cmd"
+                        f"[{self.agent_id}] Sensor stream stale "
+                        f"({sensor_age*1000.0:.0f} ms); holding zero cmd"
                     )
                 _sleep_to_next_tick()
                 continue
