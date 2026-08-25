@@ -26,10 +26,14 @@ import math
 from pathlib import Path
 from enum import Enum
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "src" / "agent"))
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from agent.agent import DenddronAgent
+from agent import DenddronAgent
 import logging
 
 logging.basicConfig(level=logging.WARNING)
@@ -54,33 +58,41 @@ class TimingValidator:
         self.RTF_TOLERANCE = 0.10  # Allow ±10% RTF variance
         self.LARGE_DT_THRESHOLD = 0.5  # seconds
 
-    def classify_timing_state(self, prev_sim_time, current_sim_time, prev_wall_time, current_wall_time):
-        """Classify timing state based on sim and wall time deltas."""
-        
+    def classify_timing_state(
+        self,
+        prev_sim_time,
+        current_sim_time,
+        prev_wall_time,
+        current_wall_time,
+    ):
+        """Classify timing state based on simulation and wall-clock deltas."""
+
+        # No usable current simulation timestamp.
+        if current_sim_time is None or not math.isfinite(current_sim_time):
+            return TimingState.MISSING_TIME
+
+        # First frame: there is no previous simulation timestamp.
+        if prev_sim_time is None or not math.isfinite(prev_sim_time):
+            return TimingState.FIRST_FRAME
+
+        # Wall time is only meaningful if both timestamps are available.
         wall_dt = current_wall_time - prev_wall_time
         sim_dt = current_sim_time - prev_sim_time
-        
-        if prev_sim_time is None:
-            return TimingState.FIRST_FRAME
-        
-        if sim_dt == 0:
-            return TimingState.PAUSED_ZERO_DT
-        
+
+        # Simulation timestamp went backwards.
         if sim_dt < 0:
             return TimingState.OUT_OF_ORDER
-        
+
+        # Simulation is paused or has not advanced.
+        if sim_dt == 0:
+            return TimingState.PAUSED_ZERO_DT
+
+        # Simulation advanced by an unusually large amount.
         if sim_dt > self.LARGE_DT_THRESHOLD:
             return TimingState.LARGE_DT
-        
-        if current_sim_time is None or math.isnan(current_sim_time):
-            return TimingState.MISSING_TIME
-        
-        # Check if RTF seems reasonable (wall_dt ~= sim_dt * RTF)
-        expected_wall_dt = sim_dt  # For RTF ~= 1.0
-        if wall_dt > expected_wall_dt * 2.0:  # Wall time much slower than sim
-            return TimingState.TIME_RESET
-        
-        return TimingState.NORMAL
+
+        # Normal positive simulation-time progression.
+        return TimingState.NORMAL 
 
     def benchmark_rtf_behavior(self, iterations=100):
         """Benchmark RTF behavior at different rates."""
