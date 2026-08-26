@@ -371,7 +371,7 @@ class DenddronAgent:
             timing = self.timing.step(current_time)
             timing_state = timing.state
             dt = timing.sim_dt
-            sensor_age = timing.sensor_wall_age()
+            sensor_age = timing.sensor_wall_age
 
             if timing_state == TimingState.TIME_RESET:
                 with self.state_lock:

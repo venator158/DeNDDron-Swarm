@@ -1,14 +1,9 @@
 {
   "assigned": {
-    "3ab87156d278": "drone_1",
-    "b4aec2489a3e": "drone_2",
-    "eefee7e10b22": "drone_3",
-    "16286bf00626": "drone_4",
-    "a6dbd0af9530": "drone_5",
-    "cba4559c6201": "drone_6",
-    "cc8205224c14": "drone_7",
-    "fb741bfdee9d": "drone_8",
-    "7a9f28b0c67d": "drone_9",
-    "fa13ab7330ff": "drone_10"
+    "b73d23cf3d07": "drone_1",
+    "596893d58d17": "drone_2",
+    "72d24daaebf0": "drone_3",
+    "93994cc199b8": "drone_4",
+    "70c0875d323a": "drone_5"
   }
 }
