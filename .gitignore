@@ -40,3 +40,5 @@
 # debug information files
 *.dwo
 
+#test report
+pre_consensus_validation_report.md
