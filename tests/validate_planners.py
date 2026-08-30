@@ -240,10 +240,14 @@ class PlannerValidator:
         }
         
         for test_case in test_cases:
+            import numpy as np
             vmap = VoxelMap()
             
-            # Place obstacle at specified altitude
-            obs_x, obs_y = 30.0, 0.0
+            # Place obstacle within ORCA's influence radius (8m) and the
+            # VoxelMap query radius.  Previous value of 30m was outside the
+            # 20m query radius, so obstacles were never returned — causing
+            # false-negative "excluded" results for Cases 1 and 4.
+            obs_x, obs_y = 5.0, 0.0
             vmap.mark_occupied(obs_x, obs_y, test_case["obstacle_z"], confidence=1.0, current_time=time.time())
             
             agent_pos = {"x": 0.0, "y": 0.0, "z": test_case["agent_z"]}
@@ -253,37 +257,35 @@ class PlannerValidator:
             orca = ORCAStrategy()
             orca.configure(orca_config)
             
-            # Test obstacle inclusion/exclusion
-            included_count = 0
-            excluded_count = 0
-            convergence_steps = 0
-            oscillations = 0
+            # --- Direct vertical-filter test ---
+            # Use ORCA's internal constraint generator to check whether the
+            # obstacle produces an ORCA half-plane.  This isolates the
+            # vertical envelope logic from VoxelMap's spatial query radius.
+            agent_pos_2d = np.array([agent_pos["x"], agent_pos["y"]], dtype=float)
+            agent_vel_2d = np.array([1.0, 0.0], dtype=float)
+            orca_lines = orca._compute_obstacle_orca_lines(
+                agent_pos_2d, agent_vel_2d, vmap, test_case["agent_z"],
+            )
             
+            included_count = len(orca_lines)   # >0 means obstacle was included
+            excluded_count = 0 if included_count > 0 else 1
+            
+            # Also run a trajectory convergence check
+            convergence_steps = 0
             for sim_step in range(iterations):
                 try:
-                    # Get obstacles
-                    nearby_obs = vmap.get_nearby_obstacles(agent_pos["x"], agent_pos["y"], agent_pos["z"], radius=20.0)
-                    
-                    # Compute velocity
                     velocity = orca.compute_velocity(
                         current_pose=agent_pos,
                         goal_pose=goal_pos,
                         voxel_map=vmap
                     )
                     
-                    # Determine if obstacle was included in constraints
-                    if len(nearby_obs) > 0:
-                        included_count += 1
-                    else:
-                        excluded_count += 1
-                    
-                    # Check for oscillation (alternating velocity direction)
                     if sim_step > 10:
                         vx = velocity.get("linear", {}).get("x", 0)
                         vy = velocity.get("linear", {}).get("y", 0)
                         vz = velocity.get("linear", {}).get("z", 0)
                         speed = math.sqrt(vx**2 + vy**2 + vz**2)
-                        if speed > 0.1:  # Moving
+                        if speed > 0.1:
                             convergence_steps += 1
                 
                 except Exception as e:
@@ -298,6 +300,7 @@ class PlannerValidator:
             print(f"\n{test_case['name']:30s} {status}")
             print(f"  Expected:       {'included' if expected_inclusion else 'excluded'}")
             print(f"  Actual:         {'included' if actual_inclusion else 'excluded'}")
+            print(f"  ORCA lines:     {included_count}")
             print(f"  Convergence:    {convergence_steps}/{iterations} steps")
             
             self.results[f"orca_{test_case['name']}"] = {

@@ -158,9 +158,7 @@ class MetricsNode:
 
                 agent = self._agents[agent_id]
                 agent.update_pose(x, y, z, vx, vy, vz)
-
-                # Proximity collision detection against all other alive agents
-                self._check_collisions_locked(agent_id)
+                # Collision detection runs asynchronously in _collision_loop thread
 
         except Exception as e:
             log.warning(f"Error in _on_sensors: {e}")
