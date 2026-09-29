@@ -1,13 +1,28 @@
 import math
 import unittest
 
-from threats import (DEFAULT_THREAT_TYPES, Threat, closest_point_of_approach, engagement_point, eta,
+from threats import (DEFAULT_THREAT_TYPES, aim_velocity, Threat, closest_point_of_approach, engagement_point, eta,
                      parse_threat_types, position_at, priority_order, slot_point, time_to_intercept)
 
 LOC = {"x": 0.0, "y": 30.0, "z": 20.0}
 
 
 class TestGeometry(unittest.TestCase):
+    def test_aim_velocity_passes_through_aim_point_beside_ship(self):
+        p = (120.0, -90.0, 20.0)
+        v = aim_velocity(p, 12.0, 25.0)
+        self.assertAlmostEqual(math.hypot(v[0], v[1]), 12.0)
+        self.assertEqual(v[2], 0.0)
+        # Aim point: 25 m from the ship, perpendicular to the initial line of sight.
+        b = math.atan2(p[1], p[0])
+        aim = (-math.sin(b) * 25.0, math.cos(b) * 25.0)
+        t = math.hypot(aim[0] - p[0], aim[1] - p[1]) / 12.0
+        q = position_at(p, v, 0.0, t)
+        self.assertAlmostEqual(q[0], aim[0], places=6)
+        self.assertAlmostEqual(q[1], aim[1], places=6)
+        cpa, _ = closest_point_of_approach(p, v, 0.0)
+        self.assertLessEqual(math.hypot(cpa[0], cpa[1]), 25.0)
+
     def test_cpa_of_crossing_track(self):
         # Flies along y = 30 from x = -100 at 5 m/s: CPA is (0, 30) after 20 s.
         cpa, t = closest_point_of_approach((-100.0, 30.0, 20.0), (5.0, 0.0, 0.0), t0=10.0)

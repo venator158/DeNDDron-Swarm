@@ -5,6 +5,15 @@ from threat_queue import ThreatQueue
 
 
 class TestThreatQueue(unittest.TestCase):
+    def test_update_rekeys_without_duplicates(self):
+        q = ThreatQueue()
+        q.push("T1", 50.0)
+        q.push("T2", 30.0)
+        q.update("T1", 10.0)          # manoeuvre: T1 now reaches its CPA first
+        self.assertEqual(q.ordered(), ["T1", "T2"])
+        self.assertEqual(len(q), 2)
+        self.assertEqual([q.pop(), q.pop(), q.pop()], ["T1", "T2", None])
+
     def test_orders_by_time_of_cpa(self):
         q = ThreatQueue()
         for tid, t in [("T1", 50.0), ("T2", 20.0), ("T3", 35.0)]:

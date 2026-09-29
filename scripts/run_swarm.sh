@@ -46,6 +46,11 @@ while [[ $# -gt 0 ]]; do
       export RADIO_QOS="$2"
       shift 2
       ;;
+    --maneuver-p)
+      # Probability that a threat turns once mid-flight (the ship updates the job topic).
+      export THREAT_MANEUVER_P="$2"
+      shift 2
+      ;;
     --rtf)
       # Real-time factor: run the simulation (and the swarm's protocol clocks) this many times faster.
       export SIM_RTF="$2"

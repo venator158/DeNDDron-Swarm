@@ -94,6 +94,16 @@ def slot_point(point: Vec3, slot: int, n_slots: int, radius: float) -> Vec3:
     return (point[0] + radius * math.cos(ang), point[1] + radius * math.sin(ang), point[2])
 
 
+def aim_velocity(p: Vec3, speed: float, miss: float) -> Vec3:
+    """Level velocity of `speed` from p toward a point `miss` m beside the ship (at the origin),
+    perpendicular to the line of sight: the threat passes the ship at about that distance."""
+    bearing = math.atan2(p[1], p[0])
+    dx = -math.sin(bearing) * miss - p[0]
+    dy = math.cos(bearing) * miss - p[1]
+    n = math.hypot(dx, dy)
+    return (speed * dx / n, speed * dy / n, 0.0)
+
+
 # Shared by the ship's feasibility check and the drones' bids so both agree.
 ETA_MARGIN = 1.25      # planner detours and imperfect speed profile vs. the ideal trapezoid
 ORDER_SLACK_S = 2.0    # bid window + award before a drone starts flying

@@ -114,6 +114,7 @@ services:
       THREAT_FIRST_S: ${THREAT_FIRST_S:-20}
       THREAT_SEED: ${THREAT_SEED:-42}
       THREAT_TYPES: ${THREAT_TYPES:-}
+      THREAT_MANEUVER_P: ${THREAT_MANEUVER_P:-0}
     command: >
       sh -c 'exec python -u ship.py --sim-bus "$${SIM_BUS}"'
     networks:

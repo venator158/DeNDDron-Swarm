@@ -206,7 +206,9 @@ function renderDetail(s) {
     ["engagement point", `${fmt(t.point.x)}, ${fmt(t.point.y)}, ${fmt(t.point.z)} m in ${fmt(t.t_to_engage_s)} s`],
   ];
   if (f) rows.push(["TTI(" + t.level + ")", `${fmt(f.tti_s)} s with ${f.free} free drones — <span class="${f.feasible ? "ok" : "bad"}">${esc(f.reason)}</span>`]);
-  if (t.holders.length) rows.push(["engaged drones", t.holders.join(", ")]);
+  if (t.holders.length) rows.push(["confirmed drones", t.holders.join(", ")]);
+  if (t.pending && t.pending.length) rows.push(["awaiting confirmation", t.pending.join(", ")]);
+  if (t.maneuvers) rows.push(["manoeuvres", t.maneuvers]);
   if (Object.keys(t.detonated).length) rows.push(["detonations (miss m)", Object.entries(t.detonated).map(([d, m]) => `${d}: ${m}`).join(", ")]);
   if (t.full_award_ms !== null) rows.push(["decision latency", `first award ${t.first_award_ms} ms, all ${t.full_award_ms} ms after approval`]);
   $("detail").innerHTML = rows.map(([k, v]) => `<div class="k">${k}</div><div>${v}</div>`).join("");
@@ -241,7 +243,7 @@ function renderRadio(s) {
 function renderEvents(s) {
   $("events").innerHTML = s.events.slice().reverse().map((e) => {
     const { wall, sim_time, kind, ...rest } = e;
-    const cls = ["destroyed", "approved", "engaged"].includes(kind) ? "ok"
+    const cls = ["destroyed", "approved", "confirmed"].includes(kind) ? "ok"
               : ["leaked", "impact", "failed", "missed", "approval_rejected"].includes(kind) ? "bad" : "";
     return `<div><span class="muted">${esc(wall)} t=${fmt(sim_time)}</span> <b class="${cls}">${esc(kind)}</b> ${
       esc(Object.entries(rest).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))}</div>`;

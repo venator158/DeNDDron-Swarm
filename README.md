@@ -42,6 +42,7 @@ The first run builds the images, which takes several minutes. Add `--build` afte
 | `--first-threat S` | 20 | sim seconds before the first detection |
 | `--algorithm orca\|apf` | `orca` | path planner |
 | `--seed S` | 42 | spawn layout and threat scenario |
+| `--maneuver-p P` | 0 | probability that a threat turns once mid-flight (`THREAT_MANEUVER_P`) |
 | `--rtf K` | 1 | run the simulation K times faster than real time (see [Faster than real time](#faster-than-real-time)) |
 | `--radio-qos default\|tuned` | `default` | Zenoh QoS profile for the radio (`RADIO_QOS`) |
 | `--build` | off | rebuild the images |
@@ -142,13 +143,15 @@ The assigned drones take up slots 4 m apart around that point and **detonate at 
 | `sim/clock` | onboard | sim → ship | `{sim_time}` at 10 Hz |
 | `sim/detonation` | onboard | drone → ship | `{agent_id, threat_id, sim_time, x, y, z}` (physical event, observed by radar) |
 | `sim/threat_tracks` | onboard | ship → sim | `{threat_id, type, level, status, t0, p0, v}` for Gazebo markers |
-| `swarm/heartbeat/{id}` | radio | drone → all | `{state, link, pose, threat_id, t_engage}` at 2 Hz |
+| `swarm/heartbeat/{id}` | radio | drone → all | `{state, link, pose, threat_id, t_engage, confirmed}` at 2 Hz |
 | `swarm/heartbeat_relay/{id}` | radio | drone → ship | a peer's heartbeat, forwarded when the ship's roster lacks that peer |
 | `swarm/telemetry/{id}` | radio | drone → ship | instrumentation, 1 Hz |
 | `ship/roster` | radio | ship → drones | `{count, members[]}` at 1 Hz: drones the ship hears |
 | `swarm/threats` | radio | ship → drones | engagement order `{wave_id, threats[{threat_id, type, level, required, location, t_engage}]}` |
 | `swarm/bids` | radio | drone → all | `{agent_id, wave_id, costs{threat_id: ETA s}}` |
-| `swarm/awards` | radio | drone → all, ship | `{threat_id, agent_id, cost, status: engaged\|withdrawn\|missed, slot, t_engage}` |
+| `swarm/awards` | radio | drone → all, ship | `{threat_id, agent_id, wave_id, cost, status: engaged\|withdrawn\|missed\|released, slot, t_engage}` |
+| `ship/ack/{id}` | radio | ship → drone | `{threat_id, wave_id, accepted, job}`, plus the job state when accepted |
+| `ship/jobs/{threat_id}` | radio | ship → the job's drones | `{status, seq, point, t_engage, cpa, t_cpa, track, holders{drone: slot}, n_slots}` at 2 Hz |
 | `ship/threat_status` | radio | ship → all | `{threat_id, status}` |
 
 ## Engagement protocol
@@ -161,24 +164,35 @@ The allocation is decentralized (`src/agent/auction.py`).
    - threats are taken highest level first;
    - each threat gets its `required` fastest drones, ties broken by drone ID;
    - **all or nothing**: a threat that cannot get every drone it needs gets none, and those drones stay free.
-4. Each winner publishes an award, takes its slot (slot index = rank among the winners, sorted by ID), and flies there.
-5. **Conflict repair.** If views diverged and a threat collects more than `level` drones, the drones with worse bids withdraw. If a threat is left short, the ship re-announces it for the missing drones, at most 3 times and only while there is still time.
-   - The radio is best-effort, so each award and withdrawal is sent 3 times (now and on the next two heartbeat ticks, 0.5 s apart). A newer status for the same threat replaces the pending copies.
-   - Before re-announcing, the ship also counts drones whose latest heartbeat says they are engaging the threat, so a lost award no longer sends a second drone.
-6. At the detonation time, a drone within 8 m of its slot (the kill radius) detonates:
+4. Each winner is only **tentatively** engaged. It publishes an award (with the order ID), starts flying toward its slot, and subscribes to the job topic `ship/jobs/{threat}`. The drones carry no seeker, so an engaged drone depends on the ship for the target's position; it is not fire-and-forget.
+5. **The ship confirms** (`src/common/jobs.py`). It collects the awards for a threat for 0.3 s, then confirms the best bids up to the number of drones still needed, and gives each a slot. It sends each one an ACK on `ship/ack/{drone}`; the rest get a NACK and become free again. The ship hears every drone, so this also settles conflicts between drones that could not hear each other.
+   - The radio is best-effort, so each award and withdrawal is sent 3 times (now and on the next two heartbeat ticks, 0.5 s apart). A newer status for the same threat replaces the pending copies. The ship ACKs every copy it gets from a confirmed drone.
+   - Until confirmed, a drone still yields to better awards from its peers. Once confirmed, only the ship can release it.
+   - No ACK within 3 s (sim) means the drone abandons the job, withdraws and becomes free. A drone never detonates without confirmation.
+6. **Job topic.** While a job is active, the ship publishes `ship/jobs/{threat}` at 2 Hz. It carries the latest engagement point and detonation time, the expected CPA, the track, and the confirmed drones with their slots. Being listed there also counts as an ACK, which covers a lost ACK.
+   - Drones re-aim on every update. Threats can manoeuvre (`--maneuver-p P`: with probability P a threat turns once, re-aiming past the ship), and the update reaches the drones within one publish.
+   - When the threat is resolved, the job says so (3 times), and drones that have not detonated become free again.
+   - A confirmed drone that is not listed any more has been released, and becomes free. The ship drops a confirmed drone whose heartbeat shows no job for 2 s, which covers a lost withdrawal.
+7. **Re-announcement.** If a threat is left short, the ship re-announces it for the missing drones, at most 3 times and only while there is still time. It counts confirmed, pending and detonated drones, and drones whose latest heartbeat says they are engaged, so a lost award never sends a second drone.
+8. At the detonation time, a confirmed drone within 8 m of its slot (the kill radius) detonates:
    - it publishes `sim/detonation`;
    - it despawns;
    - its container stays up but idle, so it is never respawned.
 
    A drone that is not in position aborts, publishes `missed`, and holds position.
 
-Decision latency from approval to the last award is about 0.8–1.2 s. Almost all of it is the 1 s bid window.
+Decision latency, from approval until every drone the threat needs is confirmed, is about 1.4 s: the 1 s bid window, the 0.3 s confirmation window, and radio round trips.
+
+Measured (8 drones, `--rtf 3`):
+- **30% loss:** 6 runs, 4/4 destroyed with exactly 4 drones in every run. The ship settled 5 conflicts, where two drones both believed they had won.
+- **Manoeuvres:** 3 two-drone threats, each turning once, moved their engagement points by 18, 10 and 22 m. The first two were destroyed. For the third, the point moved 22 m with only 1.7 s more time, so its drones could not reach it; they aborted and stayed alive instead of detonating 25 m away.
 
 ### Membership and link loss
 - Each drone heartbeats at 2 Hz. The ship publishes the roster (drones heard in the last 3 s) at 1 Hz. The dashboard's drone count and free count come from it.
 - A drone considers its **radio link up** while it hears the ship or any peer within 3 s.
 - **Link lost, no job:** the drone holds position and does not bid.
-- **Link lost, engaged:** the drone continues to its slot and detonates at the allocated time. That needs only local state. The detonation is observed through the onboard bus, standing in for the ship's radar.
+- **Link lost, confirmed job:** the drone continues to the last engagement point and time the job topic gave it, and detonates then. It gets no more target updates, so a manoeuvre after the loss makes it miss. The detonation is observed through the onboard bus, standing in for the ship's radar.
+- **Link lost before confirmation:** no ACK arrives, so the drone abandons the job after 3 s.
 - **Link lost at auction close:** the drone ignores the result, because it was computed from whatever bids reached it.
 - **Not in the ship's roster although it hears the ship:** the drone keeps heartbeating and logs a warning. Any drone that is itself in the roster and hears that peer forwards the peer's heartbeat on `swarm/heartbeat_relay/{id}` once a second. The ship accepts it as membership, and the dashboard marks the drone *relayed*. Zenoh 1.10 peers do not relay for each other, so this is done at the application level.
 
@@ -209,13 +223,13 @@ Setup: `degradation_sweep.py --rtf 3 --repeats 3`. Each run uses 8 drones and th
 | 64 kbit/s | 4 | 4 | 1360 ms | 0 | 1.00 |
 | **24 kbit/s** | **2.7–3** | 2.7–3 | **17,500–19,200 ms** | 5–6 | 0.71 |
 
-The loss rows are from the run with every fix below. The other rows come from the full sweep, which ran before the last fix; that fix affects only conflicts between drones, which only the loss rows showed.
+The loss rows are from the run with the award fixes below. The other rows come from the full sweep, which ran before the last of those fixes; that fix affects only conflicts between drones, which only the loss rows showed. All rows predate ship confirmation (see [Engagement protocol](#engagement-protocol)), which adds about 0.35 s to decision latency.
 
 - **Wasted drones.** Before these fixes, one run per cell spent up to 7 drones on 4 threats at 30% loss, with 3 re-announces. Three fixes brought it to 4, with no re-announces:
   - drones send each award 3 times;
   - before re-announcing, the ship also counts drones whose heartbeats say they are engaged;
   - a drone that has already heard a better award for a threat does not take it when its own auction closes.
-- **Remaining case.** Once in 6 runs at 30% loss, two drones engaged the same threat. The worse drone never heard the better one's bid or any of its 3 award copies, although the ship heard both. That suggests the direct link between those two drones was down. Conflict repair between drones cannot fix that; the ship would need to rebroadcast competing awards.
+- **Remaining case, now fixed.** Once in 6 runs at 30% loss, two drones engaged the same threat. The worse drone never heard the better one's bid or any of its 3 award copies, although the ship heard both. That suggests the direct link between those two drones was down, which conflict repair between drones cannot fix. Ship confirmation fixes it: in 6 more runs at 30% loss, the ship settled 5 such conflicts and every run used exactly 4 drones.
 - **Bandwidth.** 64 kbit/s is fine. At 24 kbit/s, routine traffic alone overfills the link:
   - each drone sends heartbeats (to every peer and the ship) and telemetry, and those outgoing bytes are more than 24 kbit/s;
   - the backlog builds in the kernel's first-in-first-out queue, not in Zenoh's, so Zenoh priorities (`tuned`) cannot move orders ahead;
@@ -278,6 +292,7 @@ Where each implemented feature lives.
 | | threat min-heap by TCPA | `src/ship/threat_queue.py` |
 | | roster from heartbeats (+ relayed) | `ship.py` (`_on_heartbeat`, `_on_relayed_heartbeat`, `members`) |
 | | feasibility (TTI vs. time to engagement), operator approval, orders, re-announcement | `ship.py` (`feasibility`, `approve`, `_announce`, `_retry_underassigned`) |
+| | job confirmation (ACK/NACK, slots), job topic, heartbeat reconciliation, threat manoeuvres | `src/common/jobs.py`, `ship.py` (`_arbitrate`, `_publish_jobs`, `_reconcile`, `_maneuver`) |
 | | kill assessment, leak/impact/failed | `ship.py` (`_on_detonation`, `_age_tracks`) |
 | | instrumentation aggregation, event log (`/state/ship_log.jsonl`), HTTP/SSE API | `ship.py` (`snapshot`, `make_handler`) |
 | | operator dashboard (map, heap queue, approval, swarm table, radio, events) | `src/ship/dashboard.html` |
@@ -288,6 +303,7 @@ Where each implemented feature lives.
 | | sim-time / wall-time handling | `src/agent/timing.py` |
 | | protocol clock scaled by the real-time factor (`SIM_RTF`) | `src/common/simclock.py` |
 | | bidding (ETA), engagement, slots, detonation / abort | `agent.py` (`_on_threat_wave`, `_calculate_costs`, `_service_auctions`, `_check_engagement`) |
+| | ACK wait and timeout, job topic updates, release | `agent.py` (`_on_ack`, `_on_job`, `_apply_job`, `_abandon`) |
 | | decentralized all-or-nothing priority assignment, conflict yield | `src/agent/auction.py` |
 | | heartbeat, roster check, link state, peer relay | `agent.py` (`_heartbeat_loop`, `_on_roster`, `_relay_unheard_peers`) |
 | | telemetry (loop, sensors, perception, planner, CPU, radio) | `src/agent/telemetry.py` |
@@ -374,7 +390,8 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 - **Best-effort radio.** The radio runs over UDP, so messages can be lost under packet loss; see [Degraded communications](#degraded-communications).
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
 - **Shared simulation clock.** Detonation times use the simulator's clock, which every node shares. A distributed clock is future work.
-- **Idealized threats.** They fly straight lines at constant speed, and a detonation within the kill radius always kills (no kill probability).
+- **Idealized threats.** They fly straight lines at constant speed, apart from at most one optional turn, and a detonation within the kill radius always kills (no kill probability).
+- **No re-planning after a manoeuvre.** The job's drones follow the new point, but the ship does not re-check whether they can still make it, or bring in closer free drones.
 - **Greedy assignment.** Orders are assigned per order, highest level first, not globally optimized. A drone waiting on one order's result skips any other order that arrives before that result.
 - **Planar perception.** The lidar is 2D, and voxels are placed at the drone's own altitude. ORCA uses greedy projection, not a full linear program.
 - **No security.** Radio traffic is unauthenticated: a forged order or bid would be acted on.

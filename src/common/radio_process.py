@@ -36,7 +36,7 @@ def _worker(conn, subnet, routing_mode, lease_ms):
         print("[radio child] open_timeout", session.config().get_json("transport/unicast/open_timeout")
               if hasattr(session, "config") else "?", file=sys.stderr, flush=True)
     stats = {"put_max": 0.0, "last_rx": time.monotonic(), "rx_gap": 0.0, "t": time.monotonic()}
-    publishers, subscribers = {}, []
+    publishers, subscribers = {}, {}
     send_lock = threading.Lock()
 
     def forwarder(sub_id):
@@ -73,7 +73,11 @@ def _worker(conn, subnet, routing_mode, lease_ms):
                     stats.update(put_max=0.0, rx_gap=0.0, t=t0)
         elif op == "sub":
             _, sub_id, key = cmd
-            subscribers.append(session.declare_subscriber(key, forwarder(sub_id)))
+            subscribers[sub_id] = session.declare_subscriber(key, forwarder(sub_id))
+        elif op == "unsub":
+            sub = subscribers.pop(cmd[1], None)
+            if sub is not None:
+                sub.undeclare()
         elif op == "close":
             break
     session.close()
@@ -91,8 +95,12 @@ class _Publisher:
 
 
 class _Subscriber:
+    def __init__(self, radio, sub_id):
+        self._radio, self._id = radio, sub_id
+
     def undeclare(self):
-        pass
+        self._radio._callbacks[self._id] = None
+        self._radio._send(("unsub", self._id))
 
 
 class RadioProcess:
@@ -118,8 +126,9 @@ class RadioProcess:
 
     def declare_subscriber(self, key, callback):
         self._callbacks.append(callback)
-        self._send(("sub", len(self._callbacks) - 1, key))
-        return _Subscriber()
+        sub_id = len(self._callbacks) - 1
+        self._send(("sub", sub_id, key))
+        return _Subscriber(self, sub_id)
 
     def put(self, key, data):
         self._send(("put", key, data))
@@ -166,9 +175,10 @@ class RadioProcess:
                 op, sub_id, key, payload = self._conn.recv()
             except (EOFError, OSError):
                 return
-            if op != "msg":
+            callback = self._callbacks[sub_id] if op == "msg" else None
+            if callback is None:
                 continue
             try:
-                self._callbacks[sub_id](Sample(key, payload))
+                callback(Sample(key, payload))
             except Exception as e:
                 log.warning("radio callback error on %s: %s", key, e)

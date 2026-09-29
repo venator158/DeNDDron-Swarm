@@ -33,9 +33,11 @@ from pathlib import Path
 from links import open_onboard
 import simclock
 from radio_process import RadioProcess
+from jobs import arbitrate
 from threat_queue import ThreatQueue
-from threats import (DEFAULT_THREAT_TYPES, ETA_MARGIN, ORDER_SLACK_S, Threat, closest_point_of_approach,
-                     engagement_point, eta, parse_threat_types, position_at, time_to_intercept)
+from threats import (DEFAULT_THREAT_TYPES, ETA_MARGIN, ORDER_SLACK_S, Threat, aim_velocity,
+                     closest_point_of_approach, engagement_point, eta, parse_threat_types, position_at,
+                     time_to_intercept)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [Ship] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("Ship")
@@ -46,6 +48,10 @@ ROSTER_HZ = 1.0
 RETRY_AFTER_S = 3.0        # seconds (simclock) before an under-assigned engagement is re-announced
 MAX_ANNOUNCES = 3
 SHIP_RADIUS = 16.0
+ACK_WINDOW_S = 0.3         # collect competing awards for a threat this long before confirming
+JOB_HZ = 2.0               # job topic updates per (sim) second
+JOB_CLOSE_REPEATS = 3      # "closed" job updates sent after a threat is resolved (lossy radio)
+HB_MISMATCH_S = 2.0        # a confirmed drone whose heartbeat shows another job this long is dropped
 
 
 def _env(name, default, cast):
@@ -61,23 +67,39 @@ class Track:
 
     def __init__(self, threat_id, kind, level, p0, v, t0, defended_radius):
         self.threat_id, self.type, self.level = threat_id, kind, level
-        self.p0, self.v, self.t0 = p0, v, t0
-        self.cpa, self.t_cpa = closest_point_of_approach(p0, v, t0)
-        self.cpa_dist = math.hypot(self.cpa[0], self.cpa[1])
-        self.point, self.t_engage = engagement_point(p0, v, t0, defended_radius)
+        self.defended_radius = defended_radius
+        self.retrack(p0, v, t0)
         self.status = "tracking"        # tracking | approved | destroyed | leaked | impact | failed
-        self.holders = set()            # drones engaged
+        self.confirmed = {}             # drone -> slot: engagements the ship has ACKed (the job's holders)
+        self.pending = {}               # drone -> (bid cost, order id): awards awaiting arbitration
+        self.pending_since = None
+        self.rejected = set()           # (drone, order id) refused: repeats of that award get a NACK again
+        self.mismatch = {}              # confirmed drone -> simclock time its heartbeat started disagreeing
+        self.job_seq = 0
+        self.close_repeats = 0
+        self.maneuver_at = None         # sim time of the planned heading change, if any
+        self.maneuvers = 0
         self.detonated = {}             # drone -> miss distance (m)
         self.hits = set()               # detonations within kill radius
         self.missed = set()             # drones that aborted
         self.announces = 0
         self.orders = []                # order (wave) ids sent for this threat
-        self.over_assigned = False      # more drones engaged/detonated than the level, at any time
         self.last_announce = None
         self.approved_wall = None       # simclock time of approval
-        self.award_events = set()       # (drone, status) already logged: awards are sent several times
+        self.award_events = set()       # (drone, status, order) already logged: awards are sent several times
         self.first_award_ms = None
         self.full_award_ms = None
+
+    def retrack(self, p0, v, t0):
+        """New track segment (detection or manoeuvre): recompute CPA and the engagement point."""
+        self.p0, self.v, self.t0 = p0, v, t0
+        self.cpa, self.t_cpa = closest_point_of_approach(p0, v, t0)
+        self.cpa_dist = math.hypot(self.cpa[0], self.cpa[1])
+        self.point, self.t_engage = engagement_point(p0, v, t0, self.defended_radius)
+
+    @property
+    def holders(self):
+        return set(self.confirmed)
 
     @property
     def active(self):
@@ -94,6 +116,7 @@ class Ship:
         self.args = args
         self.types = parse_threat_types(args.threat_types) if args.threat_types else DEFAULT_THREAT_TYPES
         self.rng = random.Random(args.seed)
+        self.maneuver_rng = random.Random(args.seed + 1)   # separate, so the scenario is unchanged
         self.lock = threading.RLock()
 
         self.sim_time = None
@@ -194,28 +217,120 @@ class Ship:
             tr = self.tracks.get(a["threat_id"])
             if tr is None:
                 return
-            agent, status = a["agent_id"], a.get("status", "engaged")
-            first = (agent, status) not in tr.award_events
-            tr.award_events.add((agent, status))
+            agent, status, wave = a["agent_id"], a.get("status", "engaged"), a.get("wave_id")
+            first = (agent, status, wave) not in tr.award_events
+            tr.award_events.add((agent, status, wave))
             if status == "engaged":
                 if agent in tr.detonated or agent in self.expended:
                     return   # late repeat of an award already acted on
-                tr.holders.add(agent)
-                if len(tr.holders | set(tr.detonated)) > tr.level:
-                    tr.over_assigned = True
-                if tr.approved_wall is not None:
-                    ms = round((simclock.now() - tr.approved_wall) * 1000)
-                    tr.first_award_ms = tr.first_award_ms or ms
-                    if len(tr.holders) >= tr.level and tr.full_award_ms is None:
-                        tr.full_award_ms = ms
+                if agent in tr.confirmed:
+                    self._send_ack(tr, agent, True, wave)     # repeat: the ACK may have been lost
+                    return
+                if (agent, wave) in tr.rejected or tr.status != "approved":
+                    self._send_ack(tr, agent, False, wave)
+                    return
+                if not tr.pending:
+                    tr.pending_since = simclock.now()
+                tr.pending[agent] = (float(a.get("cost") or 0.0), wave)
+                if tr.approved_wall is not None and tr.first_award_ms is None:
+                    tr.first_award_ms = round((simclock.now() - tr.approved_wall) * 1000)
                 if first:
-                    self.event("engaged", threat=tr.threat_id, drone=agent, slot=a.get("slot"))
+                    self.event("award", threat=tr.threat_id, drone=agent, cost=a.get("cost"), order=wave)
             else:
-                tr.holders.discard(agent)
+                tr.confirmed.pop(agent, None)
+                tr.pending.pop(agent, None)
+                tr.mismatch.pop(agent, None)
                 if status == "missed":
                     tr.missed.add(agent)
                 if first:
                     self.event(status, threat=tr.threat_id, drone=agent)
+
+    # ----------------------------------------------------------------- jobs
+    def _send_ack(self, tr, agent, accepted, wave=None):
+        msg = {"threat_id": tr.threat_id, "agent_id": agent, "wave_id": wave, "accepted": accepted,
+               "job": f"ship/jobs/{tr.threat_id}"}
+        if accepted:
+            msg.update(self._job_msg(tr))
+        self.radio.put(f"ship/ack/{agent}", json.dumps(msg))
+
+    def _job_msg(self, tr):
+        return {"threat_id": tr.threat_id, "status": "active" if tr.active else tr.status, "seq": tr.job_seq,
+                "type": tr.type, "level": tr.level, "point": _xyz(tr.point), "t_engage": tr.t_engage,
+                "cpa": _xyz(tr.cpa), "t_cpa": tr.t_cpa, "track": tr.track_msg(),
+                "holders": dict(tr.confirmed), "n_slots": tr.level}
+
+    def _publish_job(self, tr):
+        tr.job_seq += 1
+        self.radio.put(f"ship/jobs/{tr.threat_id}", json.dumps(self._job_msg(tr)))
+
+    def _arbitrate(self):
+        """Confirm the best pending awards per threat once the collection window has passed."""
+        for tr in self.tracks.values():
+            if not tr.pending or simclock.now() - tr.pending_since < ACK_WINDOW_S:
+                continue
+            need = tr.level - len(tr.hits) - len(tr.confirmed) if tr.status == "approved" else 0
+            accepted, rejected = arbitrate({d: c for d, (c, _) in tr.pending.items()}, tr.confirmed,
+                                           need, tr.level)
+            for agent, slot in accepted.items():
+                tr.confirmed[agent] = slot
+                self._send_ack(tr, agent, True, tr.pending[agent][1])
+                self.event("confirmed", threat=tr.threat_id, drone=agent, slot=slot)
+            for agent in rejected:
+                wave = tr.pending[agent][1]
+                tr.rejected.add((agent, wave))
+                self._send_ack(tr, agent, False, wave)
+                self.event("rejected", threat=tr.threat_id, drone=agent, order=wave)
+            tr.pending.clear()
+            if (tr.approved_wall is not None and tr.full_award_ms is None
+                    and len(tr.confirmed) + len(tr.hits) >= tr.level):
+                tr.full_award_ms = round((simclock.now() - tr.approved_wall) * 1000)
+            if accepted:
+                self._publish_job(tr)
+
+    def _publish_jobs(self):
+        for tr in self.tracks.values():
+            if tr.status == "approved":
+                self._publish_job(tr)
+            elif tr.close_repeats > 0:
+                tr.close_repeats -= 1
+                self._publish_job(tr)
+
+    def _reconcile(self):
+        """Drop confirmed drones whose heartbeats show they left the job (their withdrawal was lost)."""
+        members = set(self.members())
+        now = simclock.now()
+        for tr in self.tracks.values():
+            if tr.status != "approved":
+                continue
+            for agent in list(tr.confirmed):
+                hb = self.drones.get(agent, {}).get("hb", {})
+                if agent not in members or hb.get("threat_id") == tr.threat_id:
+                    tr.mismatch.pop(agent, None)      # unheard drones keep their job (link loss)
+                    continue
+                since = tr.mismatch.setdefault(agent, now)
+                if now - since >= HB_MISMATCH_S:
+                    del tr.confirmed[agent]
+                    del tr.mismatch[agent]
+                    self.event("dropped", threat=tr.threat_id, drone=agent, reason="heartbeat shows no job")
+
+    def _maneuver(self, now):
+        """Threats with a planned manoeuvre turn once, re-aiming past the ship."""
+        for tr in self.tracks.values():
+            if not tr.active or tr.maneuver_at is None or now < tr.maneuver_at:
+                continue
+            tr.maneuver_at = None
+            p = position_at(tr.p0, tr.v, tr.t0, now)
+            speed = math.hypot(tr.v[0], tr.v[1])
+            miss = self.maneuver_rng.uniform(-self.args.max_miss, self.args.max_miss)
+            old_point, old_t = tr.point, tr.t_engage
+            tr.retrack(p, aim_velocity(p, speed, miss), now)
+            tr.maneuvers += 1
+            self.queue.update(tr.threat_id, tr.t_cpa)
+            self.pub_tracks.put(json.dumps(tr.track_msg()))
+            self.event("maneuver", threat=tr.threat_id, point_shift_m=round(math.dist(old_point, tr.point), 1),
+                       t_engage_shift_s=round(tr.t_engage - old_t, 1))
+            if tr.status == "approved":
+                self._publish_job(tr)
 
     def _on_detonation(self, sample):
         d = self._parse(sample)
@@ -227,7 +342,7 @@ class Ship:
             tp = position_at(tr.p0, tr.v, tr.t0, float(d["sim_time"]))
             miss = math.dist(tp, (d["x"], d["y"], d["z"]))
             tr.detonated[d["agent_id"]] = round(miss, 2)
-            tr.holders.discard(d["agent_id"])
+            tr.confirmed.pop(d["agent_id"], None)
             if miss <= self.args.kill_radius:
                 tr.hits.add(d["agent_id"])
             self.event("detonation", threat=tr.threat_id, drone=d["agent_id"], miss_m=round(miss, 2),
@@ -256,12 +371,11 @@ class Ship:
         p0 = (rng_m * math.cos(bearing), rng_m * math.sin(bearing), z)
         # Aim somewhere near the ship: miss distance up to max_miss, sideways to the line of sight.
         miss = self.rng.uniform(-a.max_miss, a.max_miss)
-        aim = (-math.sin(bearing) * miss, math.cos(bearing) * miss)
-        dx, dy = aim[0] - p0[0], aim[1] - p0[1]
-        n = math.hypot(dx, dy)
-        v = (tt.speed * dx / n, tt.speed * dy / n, 0.0)
+        v = aim_velocity(p0, tt.speed, miss)
 
         tr = Track(f"T{self.detected}", kind, tt.level, p0, v, now, a.defended_radius)
+        if a.maneuver_p > 0 and self.maneuver_rng.random() < a.maneuver_p:
+            tr.maneuver_at = now + self.maneuver_rng.uniform(0.3, 0.6) * (tr.t_engage - now)
         self.tracks[tr.threat_id] = tr
         self.queue.push(tr.threat_id, tr.t_cpa)
         self.pub_tracks.put(json.dumps(tr.track_msg()))
@@ -270,7 +384,12 @@ class Ship:
                    t_to_engage_s=round(tr.t_engage - now, 1))
 
     def _close(self, tr, status):
+        was_job = tr.status == "approved"
         tr.status = status
+        tr.pending.clear()
+        if was_job:   # tell the job's drones it is over (surviving ones become free)
+            tr.close_repeats = JOB_CLOSE_REPEATS
+            self._publish_job(tr)
         self.queue.remove(tr.threat_id)
         self.pub_tracks.put(json.dumps(tr.track_msg()))
         self.pub_status.put(json.dumps({"threat_id": tr.threat_id, "status": status}))
@@ -281,7 +400,8 @@ class Ship:
         for tr in list(self.tracks.values()):
             if not tr.active:
                 continue
-            if tr.status == "approved" and now > tr.t_engage + 1.0 and not tr.holders and len(tr.hits) < tr.level:
+            if (tr.status == "approved" and now > tr.t_engage + 1.0 and not tr.confirmed and not tr.pending
+                    and len(tr.hits) < tr.level):
                 self._close(tr, "failed")      # engagement time passed without a kill
             elif now >= tr.t_cpa:
                 self._close(tr, "impact" if tr.cpa_dist <= SHIP_RADIUS else "leaked")
@@ -356,7 +476,7 @@ class Ship:
                 continue
             # A lost award must not trigger a re-announce (and a second drone) when the
             # drone's heartbeats show it engaging, so count those too.
-            assigned = len(tr.holders | set(tr.detonated) | self._engaged_by_heartbeat(tr))
+            assigned = len(set(tr.confirmed) | set(tr.pending) | set(tr.detonated) | self._engaged_by_heartbeat(tr))
             missing = tr.level - assigned
             if missing <= 0:
                 continue
@@ -367,16 +487,22 @@ class Ship:
 
     # --------------------------------------------------------------- loop
     def run(self):
-        last_roster = 0.0
+        last_roster = last_job = 0.0
         while True:
             with self.lock:
                 now = self.sim_time
                 if now is not None:
                     if self.args.max_threats != 0:
                         self._maybe_detect(now)
+                    self._maneuver(now)
                     self._age_tracks(now)
+                    self._arbitrate()
+                    self._reconcile()
                     self._retry_underassigned(now)
                 wall = simclock.now()
+                if wall - last_job >= 1.0 / JOB_HZ:
+                    last_job = wall
+                    self._publish_jobs()
                 if wall - last_roster >= 1.0 / ROSTER_HZ:
                     last_roster = wall
                     members = self.members()
@@ -388,7 +514,7 @@ class Ship:
                         self.rx_counts.clear()
                         self.rx_bytes.clear()
                         self._rx_window_start = wall
-            simclock.sleep(0.1)
+            simclock.sleep(0.05)
 
     # ------------------------------------------------------------ snapshot
     def _agreement(self, tr):
@@ -425,7 +551,9 @@ class Ship:
             "award_latency_ms_max": max(lat) if lat else None,
             "never_fully_assigned": sum(1 for t in engaged if t["full_award_ms"] is None),
             "reannounces": sum(max(0, t["announces"] - 1) for t in engaged),
-            "over_assigned": sum(1 for t in engaged if t["over_assigned"]),
+            "over_assigned": sum(1 for t in engaged if len(t["detonated"]) > t["level"]),
+            "rejected_awards": sum(t["rejected"] for t in engaged),
+            "maneuvers": sum(t["maneuvers"] for t in s["threats"]),
             "missed_slots": sum(len(t["missed"]) for t in engaged),
             "agreement_mean": round(sum(agree) / len(agree), 3) if agree else None,
             "drones_expended": s["roster"]["expended"],
@@ -450,7 +578,8 @@ class Ship:
                     "t_to_engage_s": None if now is None else round(tr.t_engage - now, 1),
                     "holders": sorted(tr.holders), "hits": sorted(tr.hits), "detonated": tr.detonated,
                     "missed": sorted(tr.missed), "announces": tr.announces,
-                    "over_assigned": tr.over_assigned, "agreement": self._agreement(tr),
+                    "pending": sorted(tr.pending), "rejected": len(tr.rejected), "maneuvers": tr.maneuvers,
+                    "agreement": self._agreement(tr),
                     "first_award_ms": tr.first_award_ms, "full_award_ms": tr.full_award_ms,
                 }
                 if tr.status == "tracking" and now is not None:
@@ -556,6 +685,8 @@ def main():
     ap.add_argument("--detect-max", type=float, default=_env("DETECT_MAX_M", 190.0, float))
     ap.add_argument("--max-miss", type=float, default=_env("MAX_MISS_M", 30.0, float),
                     help="largest lateral miss distance of generated tracks")
+    ap.add_argument("--maneuver-p", type=float, default=_env("THREAT_MANEUVER_P", 0.0, float),
+                    help="probability that a threat turns once, re-aiming past the ship")
     ap.add_argument("--defended-radius", type=float, default=_env("DEFENDED_RADIUS_M", 45.0, float))
     ap.add_argument("--kill-radius", type=float, default=_env("KILL_RADIUS_M", 8.0, float))
     ap.add_argument("--log-path", default=os.environ.get("SHIP_LOG", "/state/ship_log.jsonl"))

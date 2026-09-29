@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import time
 from collections import OrderedDict
 import threading
@@ -24,6 +25,8 @@ class DenddronAgent:
     TELEMETRY_HZ = 1.0
     LINK_TIMEOUT_S = 3.0       # no radio traffic for this long = disconnected from the swarm
     AWARD_RESENDS = 2          # extra copies of each award/withdrawal, one per heartbeat tick (lossy radio)
+    ACK_TIMEOUT_S = 3.0        # sim s: a won job the ship has not confirmed by then is abandoned
+    RETARGET_MIN_M = 0.5       # job updates that move our slot less than this do not change the goal
     SLOT_RADIUS = 4.0          # m, spacing of drones around an engagement point
     DETONATE_RADIUS = 8.0      # m, must be this close to the slot at t_engage to detonate (= kill radius)
 
@@ -201,6 +204,10 @@ class DenddronAgent:
         self._missing_from_roster = 0
         self._link_was_up = False
         self._award_resends = {}       # threat_id -> [award payload, copies left]; newest status wins
+        # Engagement: set on winning an auction (tentative), confirmed by the ship's ACK or by appearing
+        # in the job topic's holders, updated from the job topic.  Replaced whole, under _eng_lock.
+        self._eng_lock = threading.RLock()
+        self._job_sub = None           # subscription to ship/jobs/{threat_id} while engaged
         self._award_lock = threading.Lock()
 
         # --- Onboard bus (simulator) ---
@@ -222,6 +229,7 @@ class DenddronAgent:
         self.sub_awards    = self.radio.declare_subscriber("swarm/awards", self._on_award_received)
         self.sub_roster    = self.radio.declare_subscriber("ship/roster", self._on_roster)
         self.sub_peers     = self.radio.declare_subscriber("swarm/heartbeat/*", self._on_peer_heartbeat)
+        self.sub_ack       = self.radio.declare_subscriber(f"ship/ack/{self.agent_id}", self._on_ack)
 
         # Start background threads
         self.control_thread = threading.Thread(target=self._reflex_control_loop)
@@ -803,21 +811,110 @@ class DenddronAgent:
                 with self._auction_lock:
                     self.auction.release()
                 continue
+            # Tentative until the ship confirms: start flying now (no time to lose), using our own
+            # view of the slots; the ship's ACK assigns the final slot.
             winners = sorted(r.assignment[t.threat_id])
             slot = winners.index(self.agent_id)
             loc = t.location
-            sp = slot_point((loc["x"], loc["y"], loc["z"]), slot, len(winners), self.SLOT_RADIUS)
-            goal = {"x": sp[0], "y": sp[1], "z": sp[2]}
-            logger.info(f"[{self.agent_id}] ENGAGING {t.threat_id} ({t.type}, level {t.level}): "
-                        f"slot {slot + 1}/{len(winners)} at ({sp[0]:.1f}, {sp[1]:.1f}, {sp[2]:.1f}), "
+            with self.state_lock:
+                now = self.current_time
+            with self._eng_lock:
+                self.engaged_threat = t
+                self._set_engagement({
+                    "threat": t, "wave_id": r.wave_id, "confirmed": False, "since": now, "seq": -1,
+                    "point": (loc["x"], loc["y"], loc["z"]), "t_engage": t.t_engage,
+                    "slot": slot, "n_slots": len(winners),
+                })
+                self._job_sub = self.radio.declare_subscriber(f"ship/jobs/{t.threat_id}", self._on_job)
+            sp = self.engagement["slot_point"]
+            logger.info(f"[{self.agent_id}] ENGAGING {t.threat_id} ({t.type}, level {t.level}), awaiting ACK: "
+                        f"slot {slot + 1}/{len(winners)} at ({sp['x']:.1f}, {sp['y']:.1f}, {sp['z']:.1f}), "
                         f"ETA {r.my_cost:.1f}s, detonate at t={t.t_engage:.1f}")
-            self.engaged_threat = t
-            self.engagement = {"threat": t, "slot_point": goal, "t_engage": t.t_engage}
-            self.set_goal(goal)
             self._publish_award({
-                "threat_id": t.threat_id, "agent_id": self.agent_id, "cost": r.my_cost,
+                "threat_id": t.threat_id, "agent_id": self.agent_id, "cost": r.my_cost, "wave_id": r.wave_id,
                 "status": "engaged", "slot": slot, "t_engage": t.t_engage,
             })
+
+    # ---- job confirmation and updates from the ship ----
+    def _set_engagement(self, eng):
+        """Install an engagement (a new dict) and fly to its slot if the slot moved."""
+        sp = slot_point(eng["point"], eng["slot"], eng["n_slots"], self.SLOT_RADIUS)
+        eng["slot_point"] = {"x": sp[0], "y": sp[1], "z": sp[2]}
+        old = self.engagement
+        self.engagement = eng
+        if old is None or math.dist(sp, tuple(old["slot_point"][k] for k in "xyz")) >= self.RETARGET_MIN_M:
+            self.set_goal(dict(eng["slot_point"]))
+
+    def _apply_job(self, job: dict, confirm: bool) -> None:
+        """Update our engagement from a job message (ACK or job topic).  Caller holds _eng_lock."""
+        eng = self.engagement
+        me = job.get("holders", {}).get(self.agent_id)
+        new = dict(eng)
+        p = job["point"]
+        new.update(point=(p["x"], p["y"], p["z"]), t_engage=float(job["t_engage"]),
+                   seq=int(job.get("seq", eng["seq"])))
+        if me is not None:
+            new.update(slot=int(me), n_slots=int(job.get("n_slots", eng["n_slots"])))
+        if confirm and not eng["confirmed"]:
+            new["confirmed"] = True
+            logger.info(f"[{self.agent_id}] Job {eng['threat'].threat_id} CONFIRMED by ship: "
+                        f"slot {new['slot'] + 1}/{new['n_slots']}, detonate at t={new['t_engage']:.1f}")
+        elif abs(new["t_engage"] - eng["t_engage"]) > 0.05 or math.dist(new["point"], eng["point"]) > 0.05:
+            logger.info(f"[{self.agent_id}] Job {eng['threat'].threat_id} updated: point moved "
+                        f"{math.dist(new['point'], eng['point']):.1f} m, t_engage {new['t_engage']:.1f}")
+        self._set_engagement(new)
+
+    def _on_ack(self, sample):
+        self._radio_heard()
+        self.telemetry.rx("ship/ack")
+        try:
+            ack = self._parse(sample)
+            threat_id, accepted = str(ack["threat_id"]), bool(ack["accepted"])
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] Ignoring malformed ACK: {e}")
+            return
+        with self._eng_lock:
+            eng = self.engagement
+            if eng is None or eng["threat"].threat_id != threat_id:
+                if accepted and not self.destroyed:
+                    # Confirmed for a job we already gave up (e.g. ACK timeout): tell the ship.
+                    self._publish_award({"threat_id": threat_id, "agent_id": self.agent_id, "status": "withdrawn"})
+                return
+            if accepted:
+                self._apply_job(ack, confirm=True)
+            elif ack.get("wave_id") == eng["wave_id"] and not eng["confirmed"]:
+                logger.warning(f"[{self.agent_id}] Job {threat_id} REJECTED by ship (better bids confirmed)")
+                self._abandon(threat_id, "withdrawn")
+
+    def _on_job(self, sample):
+        self._radio_heard()
+        self.telemetry.rx("ship/jobs")
+        try:
+            job = self._parse(sample)
+            threat_id = str(job["threat_id"])
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] Ignoring malformed job update: {e}")
+            return
+        with self._eng_lock:
+            eng = self.engagement
+            if eng is None or eng["threat"].threat_id != threat_id or int(job.get("seq", 0)) < eng["seq"]:
+                return
+            if job.get("status") != "active":
+                logger.info(f"[{self.agent_id}] Job {threat_id} closed by ship ({job.get('status')}); free again")
+                self._abandon(threat_id, "released")
+            elif self.agent_id in job.get("holders", {}):
+                self._apply_job(job, confirm=True)
+            elif eng["confirmed"]:
+                logger.warning(f"[{self.agent_id}] Job {threat_id}: no longer a holder; released by ship")
+                self._abandon(threat_id, "withdrawn")
+            else:
+                self._apply_job(job, confirm=False)   # not confirmed yet: still follow the target
+
+    def _abandon(self, threat_id: str, status: str):
+        """Leave a job and become free.  Caller holds _eng_lock."""
+        with self._auction_lock:
+            self.auction.release()
+        self._disengage(threat_id, status)
 
     def _on_award_received(self, sample):
         self._radio_heard()
@@ -832,21 +929,29 @@ class DenddronAgent:
             return
         if agent_id == self.agent_id:
             return
-        with self._auction_lock:
-            if status == "engaged":
-                must_yield = self.auction.on_award(threat_id, agent_id, cost)
-            else:
-                self.auction.on_withdraw(threat_id, agent_id)
-                must_yield = False
-            if must_yield:
-                self.auction.release()
-        if must_yield and self.engaged_threat is not None and self.engaged_threat.threat_id == threat_id:
-            logger.warning(f"[{self.agent_id}] Yielding {threat_id}: enough drones with better bids engaged")
-            self._disengage(threat_id, "withdrawn")
+        with self._eng_lock:
+            with self._auction_lock:
+                if status == "engaged":
+                    must_yield = self.auction.on_award(threat_id, agent_id, cost)
+                else:
+                    self.auction.on_withdraw(threat_id, agent_id)
+                    must_yield = False
+            eng = self.engagement
+            # Once the ship has confirmed us, only the ship can release us (it hears every drone).
+            if must_yield and eng is not None and eng["threat"].threat_id == threat_id and not eng["confirmed"]:
+                logger.warning(f"[{self.agent_id}] Yielding {threat_id}: enough drones with better bids engaged")
+                self._abandon(threat_id, "withdrawn")
+
+    def _drop_job_sub(self):
+        if self._job_sub is not None:
+            self._job_sub.undeclare()
+            self._job_sub = None
 
     def _disengage(self, threat_id: str, status: str):
-        self.engaged_threat = None
-        self.engagement = None
+        with self._eng_lock:
+            self.engaged_threat = None
+            self.engagement = None
+            self._drop_job_sub()
         self.set_goal(None)   # hold position
         self._publish_award({"threat_id": threat_id, "agent_id": self.agent_id, "status": status})
 
@@ -883,7 +988,17 @@ class DenddronAgent:
         with self.state_lock:
             now = self.current_time
             pose = dict(self.current_pose) if self.current_pose is not None else None
-        if now is None or pose is None or now < eng["t_engage"]:
+        if now is None or pose is None:
+            return
+        if not eng["confirmed"]:
+            if eng["since"] is None or now - eng["since"] > self.ACK_TIMEOUT_S or now >= eng["t_engage"]:
+                logger.warning(f"[{self.agent_id}] No ACK from the ship for {eng['threat'].threat_id} within "
+                               f"{self.ACK_TIMEOUT_S:.0f}s; abandoning the job")
+                with self._eng_lock:
+                    if self.engagement is eng:
+                        self._abandon(eng["threat"].threat_id, "withdrawn")
+            return
+        if now < eng["t_engage"]:
             return
         threat = eng["threat"]
         sp = eng["slot_point"]
@@ -909,8 +1024,10 @@ class DenddronAgent:
         pub_leave.undeclare()
         with self._auction_lock:
             self.auction.release()
-        self.engaged_threat = None
-        self.engagement = None
+        with self._eng_lock:
+            self.engaged_threat = None
+            self.engagement = None
+            self._drop_job_sub()
         self.destroyed = True
         self._send_heartbeat()   # final "expended" heartbeat
         logger.info(f"[{self.agent_id}] DETONATED on {threat.threat_id} ({threat.type}) at t={now:.2f}, "
@@ -942,6 +1059,7 @@ class DenddronAgent:
             "pose": None if pose is None else {k: round(pose[k], 2) for k in ("x", "y", "z")},
             "threat_id": eng["threat"].threat_id if eng else None,
             "t_engage": eng["t_engage"] if eng else None,
+            "confirmed": eng["confirmed"] if eng else None,
         })
 
     def _heartbeat_loop(self):
