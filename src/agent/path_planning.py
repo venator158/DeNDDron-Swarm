@@ -1,6 +1,9 @@
+import logging
 import numpy as np
 from abc import ABC, abstractmethod
 from typing import Dict, Any
+
+_apf_logger = logging.getLogger("APFStrategy")
 
 class PathPlanningStrategy(ABC):
     @abstractmethod
@@ -176,10 +179,10 @@ class APFStrategy(PathPlanningStrategy):
         total_force = attractive + repulsive
         force_norm = float(np.linalg.norm(total_force))
 
-        import sys
-        if np.random.rand() < 0.05:  # Print 5% of the time to avoid log spam
-            print(f"APF Debug: curr={curr_pos}, goal={goal_pos}, to_goal={to_goal}, dist={dist_to_goal:.2f}", file=sys.stderr)
-            print(f"APF Debug: attractive={attractive}, repulsive={repulsive}, total={total_force}", file=sys.stderr)
+        _apf_logger.debug(
+            "APF: curr=%s, goal=%s, dist=%.2f, attractive=%s, repulsive=%s, total=%s",
+            curr_pos, goal_pos, dist_to_goal, attractive, repulsive, total_force,
+        )
 
         desired_v = np.zeros(3, dtype=float)
         if force_norm > 1e-9:

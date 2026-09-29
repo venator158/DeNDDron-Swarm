@@ -86,7 +86,7 @@ class VoxelMap:
             # Update with new confidence (taking max to accumulate evidence)
             current = self.voxels.get(key, 0.0)
             self.voxels[key] = max(current, confidence)
-            self.voxel_timestamps[key] = current_time if current_time else time.time()  # Store actual timestamp
+            self.voxel_timestamps[key] = current_time if current_time is not None else time.time()
 
     def mark_free(self, x: float, y: float, z: float, current_time: float = None):
         """
@@ -104,7 +104,7 @@ class VoxelMap:
             # Only mark as free if not already occupied
             if key not in self.voxels or self.voxels[key] < 0.5:
                 self.voxels[key] = 0.0
-                self.voxel_timestamps[key] = current_time if current_time else time.time()
+                self.voxel_timestamps[key] = current_time if current_time is not None else time.time()
 
     def is_free(self, x: float, y: float, z: float, threshold: float = 0.5) -> bool:
         """
@@ -309,8 +309,8 @@ class VoxelMap:
     def export_to_dict(self) -> dict:
         """Export voxel map to dictionary for serialization."""
         with self.lock:
-            # Convert tuple keys to strings for JSON serialization
-            return {str(k): v for k, v in self.voxels.items()}
+            # Convert tuple keys to "vx,vy,vz" strings for JSON serialization
+            voxels_serializable = {f"{vx},{vy},{vz}": v for (vx, vy, vz), v in self.voxels.items()}
         return {
             "voxels": voxels_serializable,
             "bounds": {
@@ -322,10 +322,14 @@ class VoxelMap:
         }
 
     def import_from_dict(self, data: dict):
-        """Import voxel map from dictionary."""
-        if "voxels" in data:
-            self.voxels = data["voxels"]
-            self.voxel_timestamps = {k: None for k in self.voxels.keys()}
+        """Import voxel map from a dictionary produced by export_to_dict()."""
+        if "voxels" not in data:
+            return
+        voxels = {tuple(int(c) for c in k.split(",")): float(v) for k, v in data["voxels"].items()}
+        with self.lock:
+            self.voxels = voxels
+            # None timestamps are never expired by cleanup_stale_data
+            self.voxel_timestamps = {k: None for k in voxels}
 
     def get_occupied_voxels(self, threshold: float = 0.5) -> list:
         """Get list of occupied voxel centers in world coordinates."""

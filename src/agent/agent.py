@@ -610,7 +610,7 @@ class DenddronAgent:
     # PILLAR 3: JOB HANDLER
     # ==========================================
     def _on_job_received(self, sample):
-        job_data = json.loads(sample.payload.decode('utf-8'))
+        job_data = json.loads(bytes(sample.payload).decode('utf-8'))
         job_id   = job_data.get("job_id")
         target_location = job_data.get("location")
         logger.info(f"[{self.agent_id}] Received new job {job_id} at {target_location}")
@@ -629,7 +629,7 @@ class DenddronAgent:
         logger.info(f"[{self.agent_id}] Placed bid for job {job_id} with cost {cost:.2f}")
 
     def _on_bid_received(self, sample):
-        bid_data = json.loads(sample.payload.decode('utf-8'))
+        bid_data = json.loads(bytes(sample.payload).decode('utf-8'))
         # If someone else has a lower cost for the same job, drop our bid.
         # If we win, call self.set_goal(job.location) — NOT self.current_goal directly.
         pass
