@@ -49,9 +49,12 @@ private:
     std::optional<zenoh::Session> _session;
     std::optional<zenoh::Subscriber<void>> _sub_agent_join;
     std::optional<zenoh::Subscriber<void>> _sub_cmd_vel;
+    std::optional<zenoh::Subscriber<void>> _sub_agent_despawn;
     std::optional<zenoh::Publisher> _pub_metrics;
 
+    // false = despawned (expended drones stay false so a rejoin cannot respawn them)
     std::map<std::string, bool> _spawned_agents;
+    std::vector<std::string> _pending_despawns;   // guarded by _state_mtx, applied in step()
     std::map<std::string, bool> _seen_cmd_vel;
 
     struct SpawnPoint {
@@ -65,6 +68,8 @@ private:
 
     void on_agent_join(const zenoh::Sample& sample);
     void on_cmd_vel(const zenoh::Sample& sample);
+    void on_agent_despawn(const zenoh::Sample& sample);
+    void apply_pending_despawns();
     void load_spawn_config();
 
     std::string generate_drone_sdf(const std::string& agent_id, double x, double y, double z);

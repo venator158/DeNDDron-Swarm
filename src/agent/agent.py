@@ -8,6 +8,8 @@ import os
 from voxel_map import VoxelMap
 from path_planning import APFStrategy, ORCAStrategy
 from timing import TimingManager, TimingState
+from auction import AuctionManager
+from threats import Threat
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
@@ -170,22 +172,39 @@ class DenddronAgent:
             control_period_s=1.0 / self.control_rate_hz,
         )
         
+        # --- Threat engagement (priority-ordered wave auction) ---
+        auction_cfg = global_cfg.get("auction", {})
+        self.auction = AuctionManager(
+            self.agent_id, bid_window_s=float(auction_cfg.get("bid_window_s", 1.0))
+        )
+        self._auction_lock = threading.Lock()
+        self._pending_wave_id = None   # wave we bid in and whose result we await
+        self.engaged_threat = None     # Threat we are flying to intercept
+        # Drones are expendable: once destroyed the agent stays down for good.
+        self.destroyed = False
+
         # --- Publishers ---
-        self.pub_cmd_vel = self.session.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
-        self.pub_bids    = self.session.declare_publisher("swarm/bids")
+        self.pub_cmd_vel    = self.session.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
+        self.pub_bids       = self.session.declare_publisher("swarm/bids")
+        self.pub_awards     = self.session.declare_publisher("swarm/awards")
+        self.pub_intercepts = self.session.declare_publisher("swarm/intercepts")
 
         # --- Subscribers ---
         self.sub_sensors = self.session.declare_subscriber(
             f"drone/{self.agent_id}/sensors",
             self._on_sensor_data
         )
-        self.sub_jobs = self.session.declare_subscriber(
-            "swarm/jobs",
-            self._on_job_received
+        self.sub_threats = self.session.declare_subscriber(
+            "swarm/threats",
+            self._on_threat_wave
         )
         self.sub_bids = self.session.declare_subscriber(
             "swarm/bids",
             self._on_bid_received
+        )
+        self.sub_awards = self.session.declare_subscriber(
+            "swarm/awards",
+            self._on_award_received
         )
 
         # Start background threads
@@ -219,6 +238,8 @@ class DenddronAgent:
     # PILLAR 1: EYES (Obstacle Perception)
     # ==========================================
     def _on_sensor_data(self, sample):
+        if self.destroyed:
+            return
         try:
             payload = json.loads(bytes(sample.payload).decode('utf-8'))
 
@@ -362,6 +383,10 @@ class DenddronAgent:
         }
 
         while self.running:
+            self._service_auctions()
+            self._check_intercept()
+            if self.destroyed:
+                break
             with self.state_lock:
                 current_time = self.current_time
                 current_goal = dict(self.current_goal) if self.current_goal is not None else None
@@ -593,6 +618,13 @@ class DenddronAgent:
                 }
                 self.pub_cmd_vel.put(json.dumps(safe_cmd))
 
+            elif current_goal is None and current_pose is not None:
+                # No tasking: hold station.  The simulator low-pass filters
+                # commands, so zero must be sent continuously to stop a drift.
+                self.pub_cmd_vel.put(json.dumps(_zero_cmd))
+                with self.state_lock:
+                    self.last_velocity = np.zeros(3)
+
             self.step_count += 1
             if self.step_count % 100 == 0 and current_goal is not None and safe_cmd is not None:
                 logger.info(
@@ -607,32 +639,161 @@ class DenddronAgent:
             _sleep_to_next_tick()
 
     # ==========================================
-    # PILLAR 3: JOB HANDLER
+    # PILLAR 3: THREAT HANDLER
     # ==========================================
-    def _on_job_received(self, sample):
-        job_data = json.loads(bytes(sample.payload).decode('utf-8'))
-        job_id   = job_data.get("job_id")
-        target_location = job_data.get("location")
-        logger.info(f"[{self.agent_id}] Received new job {job_id} at {target_location}")
-        cost = self._calculate_job_cost(target_location)
-        self._propose_bid(job_id, cost)
+    def _auction_now(self) -> float:
+        """Sim-time when available (auction windows must track the simulator), else wall time."""
+        with self.state_lock:
+            t = self.current_time
+        return float(t) if t is not None else time.monotonic()
 
-    def _calculate_job_cost(self, location):
-        return np.random.uniform(1.0, 100.0)
+    def _is_free(self) -> bool:
+        """Available for tasking: alive, localized, not engaged and not awaiting a wave result."""
+        with self.state_lock:
+            has_pose = self.current_pose is not None
+        return (
+            has_pose
+            and not self.destroyed
+            and self.engaged_threat is None
+            and self._pending_wave_id is None
+        )
+
+    @staticmethod
+    def _parse(sample) -> dict:
+        return json.loads(bytes(sample.payload).decode("utf-8"))
+
+    def _on_threat_wave(self, sample):
+        try:
+            msg = self._parse(sample)
+            wave_id = str(msg["wave_id"])
+            threats = [Threat.from_dict(t) for t in msg["threats"]]
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] Ignoring malformed threat wave: {e}")
+            return
+
+        logger.info(
+            f"[{self.agent_id}] Wave {wave_id}: "
+            + ", ".join(f"{t.threat_id}({t.type}, level {t.level}, need {t.required})" for t in threats)
+        )
+        with self._auction_lock:
+            if not self.auction.on_wave(wave_id, threats, self._auction_now()):
+                return
+            # A drone already tasked or waiting on another wave sits this one out,
+            # otherwise it could be assigned to two threats.
+            if not self._is_free():
+                return
+            costs = self._calculate_costs(threats)
+            if not costs:
+                return
+            self._pending_wave_id = wave_id
+            self.auction.on_bid(wave_id, self.agent_id, costs)
+        self._propose_bid(wave_id, costs)
+
+    def _calculate_costs(self, threats):
+        """Straight-line distance from our current pose to each threat."""
+        with self.state_lock:
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+        if pose is None:
+            return {}
+        return {
+            t.threat_id: float(np.linalg.norm([
+                t.location["x"] - pose["x"],
+                t.location["y"] - pose["y"],
+                t.location["z"] - pose["z"],
+            ]))
+            for t in threats
+        }
 
     # ==========================================
     # PILLAR 4: CONSENSUS MECHANISM
     # ==========================================
-    def _propose_bid(self, job_id, cost):
-        bid = {"agent_id": self.agent_id, "job_id": job_id, "cost": cost}
-        self.pub_bids.put(json.dumps(bid))
-        logger.info(f"[{self.agent_id}] Placed bid for job {job_id} with cost {cost:.2f}")
+    def _propose_bid(self, wave_id, costs):
+        self.pub_bids.put(json.dumps({"agent_id": self.agent_id, "wave_id": wave_id, "costs": costs}))
+        logger.info(f"[{self.agent_id}] Bid in wave {wave_id}: "
+                    + ", ".join(f"{k}={v:.1f}" for k, v in costs.items()))
 
     def _on_bid_received(self, sample):
-        bid_data = json.loads(bytes(sample.payload).decode('utf-8'))
-        # If someone else has a lower cost for the same job, drop our bid.
-        # If we win, call self.set_goal(job.location) — NOT self.current_goal directly.
-        pass
+        try:
+            bid = self._parse(sample)
+            if bid["agent_id"] == self.agent_id:
+                return  # own bid already recorded when placed
+            with self._auction_lock:
+                self.auction.on_bid(str(bid["wave_id"]), str(bid["agent_id"]), bid["costs"])
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] Ignoring malformed bid: {e}")
+
+    def _service_auctions(self):
+        """Close wave auctions whose window elapsed; called every control tick."""
+        with self._auction_lock:
+            if not self.auction.has_open_waves():
+                return
+            results = self.auction.close_due(self._auction_now())
+            for r in results:
+                if r.wave_id == self._pending_wave_id:
+                    self._pending_wave_id = None
+        for r in results:
+            summary = ", ".join(f"{tid}->{ws}" for tid, ws in r.assignment.items())
+            logger.info(f"[{self.agent_id}] Wave {r.wave_id} assignment: {summary}")
+            if r.my_threat is None or self.destroyed:
+                continue
+            t = r.my_threat
+            logger.info(f"[{self.agent_id}] ENGAGING {t.threat_id} ({t.type}, level {t.level}), cost {r.my_cost:.2f}")
+            self.engaged_threat = t
+            self.set_goal(t.location)
+            self.pub_awards.put(json.dumps({
+                "threat_id": t.threat_id, "agent_id": self.agent_id, "cost": r.my_cost, "status": "engaged",
+            }))
+
+    def _on_award_received(self, sample):
+        try:
+            award = self._parse(sample)
+            threat_id, agent_id = str(award["threat_id"]), str(award["agent_id"])
+            status = award.get("status", "engaged")
+            cost = float(award.get("cost") or 0.0)
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] Ignoring malformed award: {e}")
+            return
+        if agent_id == self.agent_id:
+            return
+        with self._auction_lock:
+            if status == "engaged":
+                must_yield = self.auction.on_award(threat_id, agent_id, cost)
+            else:
+                self.auction.on_withdraw(threat_id, agent_id)
+                must_yield = False
+            if must_yield:
+                self.auction.release()
+        if must_yield and self.engaged_threat is not None and self.engaged_threat.threat_id == threat_id:
+            logger.warning(f"[{self.agent_id}] Yielding {threat_id}: enough drones with better bids engaged")
+            self.engaged_threat = None
+            self.set_goal(None)
+            self.pub_awards.put(json.dumps({
+                "threat_id": threat_id, "agent_id": self.agent_id, "status": "withdrawn",
+            }))
+
+    def _check_intercept(self):
+        """Reaching the engaged threat intercepts it and expends this drone."""
+        threat = self.engaged_threat
+        if threat is None or self.destroyed:
+            return
+        with self.state_lock:
+            reached = self._goal_reached
+        if not reached:
+            return
+        self.pub_intercepts.put(json.dumps({
+            "threat_id": threat.threat_id, "agent_id": self.agent_id, "sim_time": self._auction_now(),
+        }))
+        self.pub_cmd_vel.put(json.dumps({
+            "linear": {"x": 0.0, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
+        }))
+        pub_leave = self.session.declare_publisher("swarm/agents/despawn")
+        pub_leave.put(json.dumps({"agent_id": self.agent_id, "reason": "expended", "threat_id": threat.threat_id}))
+        pub_leave.undeclare()
+        with self._auction_lock:
+            self.auction.release()
+        self.engaged_threat = None
+        self.destroyed = True
+        logger.info(f"[{self.agent_id}] INTERCEPTED {threat.threat_id} ({threat.type}); drone expended")
 
     def shutdown(self):
         self.running = False

@@ -74,6 +74,14 @@ void GazeboSimulator::init() {
         std::move(sub_opt_cmd)
     ));
 
+    auto sub_opt_despawn = zenoh::Session::SubscriberOptions::create_default();
+    _sub_agent_despawn.emplace(_session->declare_subscriber(
+        zenoh::KeyExpr("swarm/agents/despawn"),
+        std::bind(&GazeboSimulator::on_agent_despawn, this, std::placeholders::_1),
+        [](){},
+        std::move(sub_opt_despawn)
+    ));
+
     auto pub_opt = zenoh::Session::PublisherOptions::create_default();
     _pub_metrics.emplace(_session->declare_publisher(
         zenoh::KeyExpr("swarm/metrics"), 
@@ -156,6 +164,39 @@ void GazeboSimulator::on_agent_join(const zenoh::Sample& sample) {
 
     } catch (const std::exception& e) {
         std::cerr << "[GazeboSimulator] Error processing agent join: " << e.what() << std::endl;
+    }
+}
+
+void GazeboSimulator::on_agent_despawn(const zenoh::Sample& sample) {
+    try {
+        auto msg = json::parse(sample.get_payload().as_string());
+        std::string agent_id = msg["agent_id"];
+        std::string reason = msg.value("reason", "unknown");
+        std::cout << "[GazeboSimulator] Despawn requested for " << agent_id
+                  << " (reason: " << reason << ")" << std::endl;
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        _pending_despawns.push_back(agent_id);
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] Error processing agent despawn: " << e.what() << std::endl;
+    }
+}
+
+void GazeboSimulator::apply_pending_despawns() {
+    std::vector<std::string> ids;
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        ids.swap(_pending_despawns);
+        for (const auto& id : ids) {
+            _spawned_agents[id] = false;
+            _drone_states.erase(id);
+        }
+    }
+    for (const auto& id : ids) {
+        if (_gznode) {
+            gazebo::transport::requestNoReply(_gznode, "entity_delete", id);
+            gazebo::transport::requestNoReply(_gznode, "entity_delete", id + "_goal");
+        }
+        std::cout << "[GazeboSimulator] Despawned drone: " << id << std::endl;
     }
 }
 
@@ -522,10 +563,17 @@ void GazeboSimulator::on_world_stats(ConstWorldStatisticsPtr &_msg) {
 }
 
 void GazeboSimulator::step() {
+    apply_pending_despawns();
+
     double current_sim_time = 0.0;
+    // Snapshot live drones: zenoh callbacks mutate _spawned_agents concurrently.
+    std::vector<std::string> active_agents;
     {
         std::lock_guard<std::mutex> lock(_state_mtx);
         current_sim_time = _sim_time;
+        for (const auto& [agent_id, spawned] : _spawned_agents) {
+            if (spawned) active_agents.push_back(agent_id);
+        }
     }
 
     double dt = 0.0;
@@ -540,20 +588,18 @@ void GazeboSimulator::step() {
     // Only publish when simulation time has advanced by at least 0.02s (50Hz) to avoid DDoSing Zenoh
     if (current_sim_time - _last_sensor_pub_time >= 0.02) {
         _last_sensor_pub_time = current_sim_time;
-        for (const auto& [agent_id, spawned] : _spawned_agents) {
-            if (spawned) {
-                json sensor_data = {
-                    {"sim_time", current_sim_time},
-                    {"pose", get_drone_pose(agent_id)},
-                    {"lidar", simulate_lidar(agent_id)}
-                };
-                publish_sensor_data(agent_id, sensor_data);
-            }
+        for (const auto& agent_id : active_agents) {
+            json sensor_data = {
+                {"sim_time", current_sim_time},
+                {"pose", get_drone_pose(agent_id)},
+                {"lidar", simulate_lidar(agent_id)}
+            };
+            publish_sensor_data(agent_id, sensor_data);
         }
     }
     
-    for (const auto& [agent_id, spawned] : _spawned_agents) {
-        if (spawned) {
+    for (const auto& agent_id : active_agents) {
+        {
 
             // Publish LinkData to force Gazebo to move the visual model
             if (_physics_pub && dt > 0.0) {
@@ -601,19 +647,6 @@ void GazeboSimulator::step() {
                             if (inward > 0.0) {
                                 state.linear_velocity.X(state.linear_velocity.X() + nx * inward);
                                 state.linear_velocity.Y(state.linear_velocity.Y() + ny * inward);
-                            }
-                        }
-
-                        // Hard halt at configured goal to guarantee terminal stop.
-                        auto goal_it = _goal_config.find(agent_id);
-                        if (goal_it != _goal_config.end()) {
-                            const ignition::math::Vector3d goal_pos(goal_it->second.x, goal_it->second.y, goal_it->second.z);
-                            const double goal_dist = state.position.Distance(goal_pos);
-                            const double goal_halt_radius = 3.0;
-                            if (goal_dist <= goal_halt_radius) {
-                                state.position = goal_pos;
-                                state.linear_velocity = ignition::math::Vector3d(0.0, 0.0, 0.0);
-                                state.angular_velocity = ignition::math::Vector3d(0.0, 0.0, 0.0);
                             }
                         }
 

@@ -63,7 +63,21 @@ For Metrics, Open another terminal and run the following command
 docker compose logs -f metrics_node
 ```
 
+## Threat Engagement (Naval Defence Scenario)
 
+Drones hold station around the ship until a threat is dispatched. Each threat has a **level**, which is both its priority and the number of drones it needs (default: `uav` = 1, `missile` = 2, `cruise_missile` = 3). Drones are expendable: a drone that reaches its threat intercepts it and is despawned for good.
+
+```bash
+# 8 drones, 5 waves of up to 4 threats, one wave every 20 s
+bash scripts/run_swarm.sh 8 --threats 5 --threats-per-wave 4 --threat-interval 20
+docker compose logs -f threat_dispatcher
+```
+
+Override the mix with `THREAT_MIX="type:level:weight,..."`, e.g. `THREAT_MIX="uav:1:0.3,missile:2:0.3,cruise_missile:3:0.4"`.
+
+- **Dispatcher** (`src/agent/threat_dispatcher.py`): admits threats in priority order only while the sum of their levels fits the free drones, so drones committed never exceed drones alive. Threats that don't fit are reported as unengaged. Under-assigned threats are re-announced.
+- **Allocation** (`src/agent/auction.py`): fully decentralized. Each free drone bids its distance to every threat in a wave; after a short window every drone computes the same priority-greedy assignment (highest level first, each threat takes its `level` cheapest drones, ties broken by drone ID). If views diverge and a threat gets too many drones, the worse bidders yield.
+- **Topics**: `swarm/threats` (waves), `swarm/bids`, `swarm/awards` (engaged / withdrawn), `swarm/intercepts`, `swarm/agents/despawn`.
 
 ### Recent Updates
 - **Agent Initialization**: Python agents now correctly spawn in the Gazebo 3D environment upon joining the Zenoh network.

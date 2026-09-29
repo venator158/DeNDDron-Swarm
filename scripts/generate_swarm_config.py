@@ -143,6 +143,8 @@ def main():
     parser.add_argument("--max-radius", type=float, default=45.0, help="Maximum distance from center")
     parser.add_argument("--min-separation", type=float, default=8.0, help="Minimum spacing between agents")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducible layouts")
+    parser.add_argument("--no-goals", action="store_true",
+                        help="Omit static goals; drones hold station until tasked (threat scenario)")
     parser.add_argument("--algorithm", type=str, default="orca", choices=["orca", "apf"], help="Path planning algorithm (orca or apf)")
     parser.add_argument(
         "--output",
@@ -189,6 +191,10 @@ def main():
 
     if args.algorithm:
         runtime["defaults"]["path_planning"]["algorithm"] = args.algorithm
+
+    if args.no_goals:
+        for agent_cfg in runtime["agents"].values():
+            agent_cfg.pop("goal", None)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(runtime, indent=2) + "\n", encoding="utf-8")

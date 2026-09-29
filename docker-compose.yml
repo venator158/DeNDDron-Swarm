@@ -85,7 +85,7 @@ services:
       gazebo_simulator:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "python"]
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -98,6 +98,34 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ===========================================================================
+  # Threat Dispatcher (optional; enable with: bash scripts/run_swarm.sh N --threats WAVES)
+  # ===========================================================================
+  threat_dispatcher:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    container_name: threat_dispatcher
+    profiles: ["threats"]
+    environment:
+      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
+      THREAT_WAVES: ${THREAT_WAVES:-3}
+      THREAT_INTERVAL_S: ${THREAT_INTERVAL_S:-15}
+      THREATS_PER_WAVE: ${THREATS_PER_WAVE:-4}
+      THREAT_SEED: ${THREAT_SEED:-42}
+      THREAT_MIX: ${THREAT_MIX:-}
+    command: >
+      sh -c 'python -u threat_dispatcher.py --zenoh-router "$${ZENOH_ROUTER_IP}"'
+    networks:
+      - swarm_network
+    depends_on:
+      zenoh_router:
+        condition: service_started
+      gazebo_simulator:
+        condition: service_healthy
+    restart: "no"
+    logging: *agent_logging
 
   # ===========================================================================
   # Metrics Node
@@ -117,7 +145,7 @@ services:
       gazebo_simulator:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "python"]
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
       interval: 10s
       timeout: 5s
       retries: 3
