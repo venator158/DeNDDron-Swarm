@@ -10,7 +10,8 @@ from timing import TimingManager, TimingState
 from auction import AuctionManager
 from telemetry import Telemetry
 from threats import ETA_MARGIN, ORDER_SLACK_S, Threat, eta, slot_point
-from links import open_onboard, open_radio
+from links import open_onboard
+from radio_process import RadioProcess
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
@@ -20,15 +21,16 @@ class DenddronAgent:
     TELEMETRY_HZ = 1.0
     LINK_TIMEOUT_S = 3.0       # no radio traffic for this long = disconnected from the swarm
     SLOT_RADIUS = 4.0          # m, spacing of drones around an engagement point
-    DETONATE_RADIUS = 5.0      # m, must be this close to the slot at t_engage to detonate
+    DETONATE_RADIUS = 8.0      # m, must be this close to the slot at t_engage to detonate (= kill radius)
 
     def __init__(self, agent_id: str, sim_bus_locator: str = None):
         self.agent_id = agent_id
 
         # Onboard bus: this drone's sensors/actuators (simulator).  Radio: the swarm and the ship.
-        logger.info(f"[{self.agent_id}] Opening onboard bus ({sim_bus_locator}) and radio (peer-to-peer)...")
+        # The radio runs in its own process so a radio failure cannot freeze flight control.
+        logger.info(f"[{self.agent_id}] Opening onboard bus ({sim_bus_locator}) and radio (peer-to-peer, own process)...")
+        self.radio = RadioProcess()
         self.onboard = open_onboard(sim_bus_locator)
-        self.radio = open_radio()
         
         # --- Internal State ---
         self.running = True
@@ -188,6 +190,8 @@ class DenddronAgent:
         self.telemetry = Telemetry(1.0 / self.control_rate_hz)
         self._last_radio_rx = None     # monotonic time of the last message from the ship or a peer
         self.peers = {}                # peer drone id -> monotonic time last heard
+        self._peer_heartbeats = {}     # peer drone id -> last heartbeat payload (for relaying)
+        self._roster_time = None       # monotonic time of the last roster
         self.roster = []               # drone ids the ship last reported hearing
         self._missing_from_roster = 0
         self._link_was_up = False
@@ -205,6 +209,7 @@ class DenddronAgent:
         self.pub_awards    = self.radio.declare_publisher("swarm/awards")
         self.pub_heartbeat = self.radio.declare_publisher(f"swarm/heartbeat/{self.agent_id}")
         self.pub_telemetry = self.radio.declare_publisher(f"swarm/telemetry/{self.agent_id}")
+        self.pub_relay     = self.radio
         self.sub_threats   = self.radio.declare_subscriber("swarm/threats", self._on_threat_wave)
         self.sub_bids      = self.radio.declare_subscriber("swarm/bids", self._on_bid_received)
         self.sub_awards    = self.radio.declare_subscriber("swarm/awards", self._on_award_received)
@@ -916,6 +921,7 @@ class DenddronAgent:
                 self._send_heartbeat()
                 tick += 1
                 if tick % ticks_per_telemetry == 0:
+                    self._relay_unheard_peers()
                     snap = self.telemetry.snapshot()
                     snap.update({"agent_id": self.agent_id, "peers_heard": len(self._fresh_peers()),
                                  "voxels": self.voxel_map.get_stats().get("total_voxels", 0)})
@@ -940,21 +946,39 @@ class DenddronAgent:
             return
         self.telemetry.rx("swarm/heartbeat")
         self.peers[peer] = time.monotonic()
+        self._peer_heartbeats[peer] = bytes(sample.payload)
         self._radio_heard()
+
+    def _relay_unheard_peers(self):
+        """Forward heartbeats of peers the ship cannot hear but we can (once per second).
+
+        Zenoh peers do not relay for each other, so a drone whose link to the ship
+        is lost while its links to other drones still work would drop out of the
+        roster.  Only drones that are themselves in a fresh roster relay.
+        """
+        if self.destroyed or self._roster_time is None or time.monotonic() - self._roster_time > self.LINK_TIMEOUT_S:
+            return
+        if self.agent_id not in self.roster:
+            return
+        for peer in self._fresh_peers():
+            if peer not in self.roster and peer in self._peer_heartbeats:
+                self.pub_relay.put(f"swarm/heartbeat_relay/{peer}", self._peer_heartbeats[peer])
+                self.telemetry.tx("swarm/heartbeat_relay", len(self._peer_heartbeats[peer]))
 
     def _on_roster(self, sample):
         self._radio_heard()
         self.telemetry.rx("ship/roster")
         try:
             self.roster = list(self._parse(sample).get("members", []))
+            self._roster_time = time.monotonic()
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed roster: {e}")
             return
         if self.agent_id in self.roster or self.destroyed:
             self._missing_from_roster = 0
             return
-        # The ship cannot hear us although we hear it.  Heartbeats keep going out;
-        # with RADIO_ROUTING=linkstate peers relay them to the ship.
+        # The ship cannot hear us although we hear it.  Heartbeats keep going out,
+        # and peers that hear us relay them (_relay_unheard_peers).
         self._missing_from_roster += 1
         if self._missing_from_roster in (3, 30) or self._missing_from_roster % 300 == 0:
             logger.warning(f"[{self.agent_id}] Not in the ship's roster for {self._missing_from_roster} "

@@ -219,7 +219,7 @@ function renderDrones(s) {
   $("drones").querySelector("tbody").innerHTML = s.drones.map((d) => {
     const m = d.telemetry || {};
     return `<tr><td>${esc(d.id)}</td><td class="st-${esc(d.state)}">${esc(d.state)}</td>
-      <td class="${d.link ? "ok" : "bad"}">${d.state === "expended" ? "" : (d.link ? "up" : "down")}</td>
+      <td class="${d.link ? "ok" : "bad"}">${d.state === "expended" ? "" : (d.link ? "up" : "down")}${d.relayed ? ' <span class="warn">relayed</span>' : ""}</td>
       <td class="num">${fmt(d.hb_age_s)}</td><td>${esc(d.threat_id || "")}</td>
       <td class="num">${fmt(m.cpu_pct)}</td><td class="num">${fmt(m.loop_hz)}</td><td class="num">${fmt(m.loop_p99_ms)}</td>
       <td class="num ${m.overruns > 5 ? "warn" : ""}">${m.overruns ?? "–"}</td>

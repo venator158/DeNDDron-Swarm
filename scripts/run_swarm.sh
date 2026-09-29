@@ -42,10 +42,6 @@ while [[ $# -gt 0 ]]; do
       THREAT_FIRST_S="$2"
       shift 2
       ;;
-    --radio-routing)
-      export RADIO_ROUTING="$2"
-      shift 2
-      ;;
     --build)
       BUILD_FLAG="--build"
       COMPOSE_ARGS+=("$1")

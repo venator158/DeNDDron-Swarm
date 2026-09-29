@@ -8,6 +8,7 @@
   swarm and the ship say to each other.  Peers find each other by multicast
   scouting on the radio interface and connect directly.  Degrading this
   network (tc netem on the radio interface) degrades only swarm comms.
+  Nodes run it in a separate process (radio_process.py).
 """
 
 import fcntl
@@ -46,17 +47,21 @@ def find_interface(subnet: str):
 def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = None) -> zenoh.Session:
     """Peer-mode session bound to the radio network only.
 
-    Routing defaults to linkstate: peers relay for each other (multi-hop), and
-    losing one peer does not black out traffic between the others, which
-    peer_to_peer mode does in Zenoh 1.0.4 when the lost peer's lease expires.
-    A short lease makes peers notice a lost peer sooner.
+    Agents and the ship open this inside a RadioProcess (radio_process.py): when a
+    node loses its radio, Zenoh freezes every session of that process for ~10 s,
+    which must not reach the onboard link.
 
-    Known issue (Zenoh 1.0.4): in the process whose radio is lost, the onboard
-    session stops delivering for ~10 s once, independent of the lease.
+    - lease (RADIO_LEASE_MS, 2 s): how soon a lost peer is noticed.
+    - open/accept timeout (RADIO_OPEN_TIMEOUT_MS, 1 s): with Zenoh's default 10 s,
+      reconnect attempts to a lost peer blacked out traffic between the healthy
+      peers for ~10 s.
+    - routing_mode (RADIO_ROUTING) only exists before Zenoh 1.1; newer versions
+      always route peer-to-peer and ignore it.
     """
     subnet = subnet or os.environ.get("RADIO_SUBNET", "172.21.0.0/16")
     routing_mode = routing_mode or os.environ.get("RADIO_ROUTING", "linkstate")
     lease_ms = lease_ms or int(os.environ.get("RADIO_LEASE_MS", "2000"))
+    open_ms = int(os.environ.get("RADIO_OPEN_TIMEOUT_MS", "1000"))
     iface, ip = find_interface(subnet)
     conf = zenoh.Config()
     conf.insert_json5("mode", '"peer"')
@@ -64,8 +69,14 @@ def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = Non
     conf.insert_json5("listen/endpoints", json.dumps([f"tcp/{ip}:0"]))
     conf.insert_json5("scouting/multicast/enabled", "true")
     conf.insert_json5("scouting/multicast/interface", json.dumps(iface))
-    conf.insert_json5("routing/peer/mode", json.dumps(routing_mode))
     conf.insert_json5("transport/link/tx/lease", str(int(lease_ms)))
+    for key, value in (("routing/peer/mode", json.dumps(routing_mode)),
+                       ("transport/unicast/open_timeout", str(open_ms)),
+                       ("transport/unicast/accept_timeout", str(open_ms))):
+        try:
+            conf.insert_json5(key, value)
+        except zenoh.ZError:
+            pass   # key not supported by this Zenoh version
     return zenoh.open(conf)
 
 

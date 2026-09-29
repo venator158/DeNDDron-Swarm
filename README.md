@@ -13,6 +13,7 @@ This README is the project's only documentation. Keep it up to date when behavio
 - [Engagement protocol](#engagement-protocol)
 - [Degraded communications](#degraded-communications)
 - [Instrumentation](#instrumentation)
+- [Implementation map](#implementation-map)
 - [Agent internals](#agent-internals)
 - [Configuration](#configuration)
 - [Testing](#testing)
@@ -39,7 +40,6 @@ The first run builds the images, which takes several minutes. Add `--build` afte
 | `--threats K` | 0 (radar off) | threats the ship's radar generates; drones get no static goals |
 | `--threat-interval S` | 30 | mean sim seconds between detections |
 | `--first-threat S` | 20 | sim seconds before the first detection |
-| `--radio-routing linkstate\|peer_to_peer` | `linkstate` | Zenoh routing on the radio network |
 | `--algorithm orca\|apf` | `orca` | path planner |
 | `--seed S` | 42 | spawn layout and threat scenario |
 | `--build` | off | rebuild the images |
@@ -100,7 +100,7 @@ The assigned drones take up slots 4 m apart around that point and **detonate at 
 
 - **Two links per node** (`src/common/links.py`).
   - The *onboard bus* goes through a Zenoh router on `sim_net`. It stands in for a drone's own wiring (sensors, actuators, detonation), and for the ship's radar truth. It is not communications.
-  - The *radio* runs peer-to-peer on `radio_net`. Peers find each other by multicast scouting on the radio interface and connect directly. Routing defaults to `linkstate`, so peers relay for each other.
+  - The *radio* runs peer-to-peer on `radio_net` (Zenoh 1.10.1). Peers find each other by multicast scouting on the radio interface and connect directly. Every drone and the ship run the radio **in a separate OS process** (`src/common/radio_process.py`), so a radio failure cannot freeze flight control or C2.
   - Degrading `radio_net` degrades only the communications. The physics keeps working.
 - **Simulator** (`sim/GazeboSimulator.cpp`).
   - Integrates the drones' motion from `cmd_vel`.
@@ -123,6 +123,7 @@ The assigned drones take up slots 4 m apart around that point and **detonate at 
 | `sim/detonation` | onboard | drone → ship | `{agent_id, threat_id, sim_time, x, y, z}` (physical event, observed by radar) |
 | `sim/threat_tracks` | onboard | ship → sim | `{threat_id, type, level, status, t0, p0, v}` for Gazebo markers |
 | `swarm/heartbeat/{id}` | radio | drone → all | `{state, link, pose, threat_id, t_engage}` at 2 Hz |
+| `swarm/heartbeat_relay/{id}` | radio | drone → ship | a peer's heartbeat, forwarded when the ship's roster lacks that peer |
 | `swarm/telemetry/{id}` | radio | drone → ship | instrumentation, 1 Hz |
 | `ship/roster` | radio | ship → drones | `{count, members[]}` at 1 Hz: drones the ship hears |
 | `swarm/threats` | radio | ship → drones | engagement order `{wave_id, threats[{threat_id, type, level, required, location, t_engage}]}` |
@@ -142,7 +143,7 @@ The allocation is decentralized (`src/agent/auction.py`).
    - **all or nothing**: a threat that cannot get every drone it needs gets none, and those drones stay free.
 4. Each winner publishes an award, takes its slot (slot index = rank among the winners, sorted by ID), and flies there.
 5. **Conflict repair.** If views diverged and a threat collects more than `level` drones, the drones with worse bids withdraw. If a threat is left short, the ship re-announces it for the missing drones, at most 3 times and only while there is still time.
-6. At the detonation time, a drone within 5 m of its slot detonates:
+6. At the detonation time, a drone within 8 m of its slot (the kill radius) detonates:
    - it publishes `sim/detonation`;
    - it despawns;
    - its container stays up but idle, so it is never respawned.
@@ -157,26 +158,33 @@ Decision latency from approval to the last award is about 0.8–1.2 s. Almost al
 - **Link lost, no job:** the drone holds position and does not bid.
 - **Link lost, engaged:** the drone continues to its slot and detonates at the allocated time. That needs only local state. The detonation is observed through the onboard bus, standing in for the ship's radar.
 - **Link lost at auction close:** the drone ignores the result, because it was computed from whatever bids reached it.
-- **Heard by the ship but not in its roster:** the drone keeps heartbeating and logs a warning. With `linkstate` routing, other peers relay its traffic, so the drone never needs to ask for re-addition explicitly.
+- **Not in the ship's roster although it hears the ship:** the drone keeps heartbeating and logs a warning. Any drone that is itself in the roster and hears that peer forwards the peer's heartbeat on `swarm/heartbeat_relay/{id}` once a second. The ship accepts it as membership, and the dashboard marks the drone *relayed*. Zenoh 1.10 peers do not relay for each other, so this is done at the application level.
 
 ## Degraded communications
 
-These are first measurements. Radio loss was emulated two ways: removing the radio interface (`docker network disconnect`), and 100% packet loss on it (`tc netem` through Pumba). Both gave the same results.
+Radio loss is emulated two ways: 100% packet loss on the radio interface (`tc netem` through Pumba, which is closest to jamming because the interface stays up), and removing the interface (`docker network disconnect`). Both gave the same results. The tools are in `tools/comms/` (see below).
 
 | Finding | Evidence |
 |---|---|
-| `peer_to_peer` routing (Zenoh 1.0.4): when a lost peer's lease expires, other peers lose **all** traffic from healthy peers for ~8–9 s | isolated 4-peer probe: 2 of 3 healthy peers got nothing for 8 s |
-| `linkstate` routing removes that blackout | same probe: worst gap 0.05 s on every healthy peer. Now the default. |
-| The process whose radio is lost freezes its *onboard* session once, for ~10 s. Same with any lease (10 s, 2 s, 1 s) and with either loss method. | probe: 10.1–10.4 s gap in the jammed drone's 50 Hz onboard stream; healthy drones unaffected |
-| Full system with `linkstate`, idle drone cut: the ship is unaffected (roster 8 → 7). Two healthy drones heard no radio for up to ~7 s, then recovered. | run 4, roster sampled every second |
-| Full system with `linkstate`, *engaged* drone cut: the ship froze for ~10 s (sim clock stopped, roster 0), then recovered | run 4 |
-| Operational effect: a drone whose radio is cut mid-flight can miss its slot | runs 3/4: the cut drone froze (stale sensors → holds position) and arrived 31.7 m / 5.0 m off its slot at detonation time, so it aborted. In run 2 it was cut closer to arrival and still hit (2.6 m). |
+| Zenoh tries to reconnect to a lost peer with a 10 s connect timeout. During those attempts, other peers lost **all** traffic from healthy peers for ~8–10 s. | radio probe: 2 of 3 healthy peers heard nothing for 8.4 s (1.0.4) / 9.8 s (1.10.1) |
+| **Fix 1:** Zenoh 1.10.1 with a 1 s open/accept timeout (`RADIO_OPEN_TIMEOUT_MS`) | radio probe: worst gap 0.05 s on every healthy peer. (On 1.0.4, `linkstate` routing had the same effect, but it no longer exists in 1.10.) |
+| The process whose radio is lost freezes **all** its Zenoh sessions once for ~10 s: every timeout setting, both Zenoh versions, both loss methods | onboard probe: 10.1–10.4 s gap in the jammed drone's 50 Hz onboard stream |
+| **Fix 2:** the radio in its own OS process (`RadioProcess`) | onboard probe: jammed drone's worst onboard gap 25 ms (was 10.4 s) |
+| Full system, before the fixes: the ship froze ~10 s when an engaged drone was cut, and cut drones missed their slots | runs 3/4: ship clock stopped for 10 s; cut drone 31.7 m / 5.0 m off its slot at detonation time, so it aborted |
+| **Full system after the fixes:** a drone jammed right after engaging kept flying on its onboard sensors and destroyed its threat on time. The ship never froze. | run 5: detonation at t = 76.45 s (allocated 76.3 s), 2.86 m from the threat; 0 frozen ship-clock samples |
+| **Still open:** while a peer is being jammed, some *healthy* drones' radio receive stalls ~7 s. Their sending keeps working, and the ship keeps hearing them. | run 5: up to 4 healthy drones reported link down for ~7 s, then recovered. Not reproduced in the isolated probes, so it depends on something the full system has. |
 
-The 10 s freeze is in the Zenoh 1.0.4 runtime that both sessions share. Next steps:
-- upgrade `eclipse-zenoh` (1.10.1 is current);
-- if that doesn't fix it, run the radio in its own process, the way a real drone separates its radio from its flight controller.
+### Tools (`tools/comms/`)
 
-Test tools (not in the repo yet): a 4-peer receive-gap probe, an onboard-stall probe, and a chaos script that cuts an idle drone and an engaged drone during a live run.
+| Script | What it does |
+|---|---|
+| `radio_probe.sh [routing] [netem\|disconnect]` | 4 radio-only peers; cuts one; reports per healthy peer the seconds it heard nobody, the worst gap and the worst process stall |
+| `onboard_probe.sh [routing] [netem\|disconnect]` | drone-like processes with both links; cuts one radio; reports the worst onboard gaps of the cut drone and a healthy one. Set `RADIO_PROCESS=1` to use the separate radio process. |
+| `cut_radio.sh <container> <network> <subnet> [netem\|disconnect] [duration]` | cuts one container's radio (used by the others) |
+| `chaos.py <compose log> [disconnect\|netem]` | during a live run: cuts an idle drone, then the first drone that engages, then restores the idle one |
+| `operator_bot.py [reaction_s] [duration_s]` | stand-in operator: approves feasible threats through the dashboard API, most urgent first |
+
+All probes accept `IMAGE=...` to test another Zenoh build, and they read `RADIO_LEASE_MS` / `RADIO_OPEN_TIMEOUT_MS`.
 
 ## Instrumentation
 
@@ -194,6 +202,43 @@ Every drone sends `swarm/telemetry/{id}` once a second, covering the last second
 The ship adds per-topic radio receive rates, per-threat decision latency (approval → first and last award), and an event log. Events also go to `/state/ship_log.jsonl` in the `swarm_state` volume, for offline analysis. The metrics node logs positions, distance flown and collisions (under 2.5 m).
 
 Measured at 8 drones: about 1.5% CPU per drone, loop p99 about 20–26 ms, perception p99 about 3–12 ms. Radio to the ship is about 170 B/s of heartbeats and 220 B/s of telemetry per drone.
+
+## Implementation map
+
+Where each implemented feature lives.
+
+| Area | Feature | Files |
+|---|---|---|
+| **Launch** | swarm launcher: drones, threat scenario, rebuilds | `scripts/run_swarm.sh` |
+| | spawn layout and planner/kinematics defaults (`swarm_runtime.json`) | `scripts/generate_swarm_config.py` |
+| | services, the two networks, healthchecks, clean shutdown | `docker-compose.yml`, `docker/*.Dockerfile` |
+| **Simulator** | Gazebo bridge: kinematic integration from `cmd_vel`, spawn/despawn | `sim/GazeboSimulator.cpp/.hpp`, `sim/simulator_main.cpp` |
+| | sim clock extrapolated between Gazebo's 5 Hz stats; pose 50 Hz, lidar 10 Hz | `GazeboSimulator.cpp` (`estimated_sim_time`, `step`) |
+| | planar 32-ray lidar (ship + other drones), compact scan | `GazeboSimulator.cpp` (`simulate_lidar`) |
+| | threat markers from the ship's tracks | `GazeboSimulator.cpp` (`on_threat_track`, `move_threat_markers`) |
+| | world: ocean, ship, lighting | `sim/ocean.world` |
+| **Links** | onboard bus (router) and radio (peer-to-peer) session config | `src/common/links.py` |
+| | radio in a separate OS process | `src/common/radio_process.py` |
+| **Threat model** | threat types and levels, CPA/TCPA, engagement point, slots, ETA, TTI | `src/common/threats.py` |
+| **Ship C2** | radar simulation (track generation) | `src/ship/ship.py` (`_maybe_detect`, `Track`) |
+| | threat min-heap by TCPA | `src/ship/threat_queue.py` |
+| | roster from heartbeats (+ relayed) | `ship.py` (`_on_heartbeat`, `_on_relayed_heartbeat`, `members`) |
+| | feasibility (TTI vs. time to engagement), operator approval, orders, re-announcement | `ship.py` (`feasibility`, `approve`, `_announce`, `_retry_underassigned`) |
+| | kill assessment, leak/impact/failed | `ship.py` (`_on_detonation`, `_age_tracks`) |
+| | instrumentation aggregation, event log (`/state/ship_log.jsonl`), HTTP/SSE API | `ship.py` (`snapshot`, `make_handler`) |
+| | operator dashboard (map, heap queue, approval, swarm table, radio, events) | `src/ship/dashboard.html` |
+| **Drone** | agent lifecycle, ID allocation, SIGTERM | `src/agent/main.py` |
+| | perception: voxel map, occupied index, batched ray tracing, expiry | `src/agent/voxel_map.py`, `agent.py` (`_process_lidar`) |
+| | planners (APF, ORCA) | `src/agent/path_planning.py` |
+| | 50 Hz control loop, safety envelope, arrival latch | `agent.py` (`_reflex_control_loop`) |
+| | sim-time / wall-time handling | `src/agent/timing.py` |
+| | bidding (ETA), engagement, slots, detonation / abort | `agent.py` (`_on_threat_wave`, `_calculate_costs`, `_service_auctions`, `_check_engagement`) |
+| | decentralized all-or-nothing priority assignment, conflict yield | `src/agent/auction.py` |
+| | heartbeat, roster check, link state, peer relay | `agent.py` (`_heartbeat_loop`, `_on_roster`, `_relay_unheard_peers`) |
+| | telemetry (loop, sensors, perception, planner, CPU, radio) | `src/agent/telemetry.py` |
+| **Metrics** | positions, distance, proximity collisions (spatial hash) | `src/metrics/main.py` |
+| **Tests / tools** | unit tests and validation scripts | `tests/` (see [Testing](#testing)) |
+| | degraded-comms probes, radio cut, chaos, stand-in operator | `tools/comms/` |
 
 ## Agent internals
 
@@ -231,7 +276,7 @@ Measured at 8 drones: about 1.5% CPU per drone, loop p99 about 20–26 ms, perce
 | `defaults.auction` (optional) | `bid_window_s` (1.0) |
 | `agents.drone_N` | `spawn{x,y,z}`, optional `goal{x,y,z}` and per-drone overrides |
 
-Radio tuning (env): `RADIO_ROUTING` (`linkstate`), `RADIO_LEASE_MS` (2000), `RADIO_SUBNET` (`172.21.0.0/16`).
+Radio tuning (env): `RADIO_OPEN_TIMEOUT_MS` (1000), `RADIO_LEASE_MS` (2000), `RADIO_SUBNET` (`172.21.0.0/16`).
 
 Drone IDs: agent replicas are identical containers. Each claims the lowest free `drone_N` via `config/agent_registry.json`, under a file lock.
 
@@ -260,15 +305,17 @@ config/                 generated runtime files — not tracked
 docker/                 base (zenoh-c/cpp), gazebo, agent, ship, metrics images
 scripts/run_swarm.sh    launcher;  scripts/generate_swarm_config.py
 sim/                    GazeboSimulator (C++ bridge, kinematics, markers), simulator_main.cpp, ocean.world
-src/common/             threat model and geometry (threats.py), Zenoh link factories (links.py)
+src/common/             threat model and geometry (threats.py), Zenoh links (links.py), radio process (radio_process.py)
 src/agent/              drone: agent, auction, planners, voxel map, timing, telemetry
 src/ship/               ship C2 (ship.py), threat min-heap (threat_queue.py), dashboard.html
 src/metrics/main.py     metrics node (collisions, distance)
 tests/                  unit tests and validation scripts
+tools/comms/            degraded-comms probes, radio cut helper, chaos script, stand-in operator
 ```
 
 ## Known limitations
-- **Radio loss freezes a process for ~10 s.** See [Degraded communications](#degraded-communications).
+- **Healthy drones can lose radio receive for ~7 s while a peer is jammed.** See [Degraded communications](#degraded-communications).
+- **Threats don't move in Gazebo.** They move on the dashboard map and in the simulation's own maths, but the Gazebo markers are static models, which ignore pose updates. Drones, the ship and threats are still simple shapes.
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
 - **Shared simulation clock.** Detonation times use the simulator's clock, which every node shares. A distributed clock is future work.
 - **Idealized threats.** They fly straight lines at constant speed, and a detonation within the kill radius always kills (no kill probability).

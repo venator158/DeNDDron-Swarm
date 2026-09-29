@@ -30,7 +30,8 @@ from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from links import open_onboard, open_radio
+from links import open_onboard
+from radio_process import RadioProcess
 from threat_queue import ThreatQueue
 from threats import (DEFAULT_THREAT_TYPES, ETA_MARGIN, ORDER_SLACK_S, Threat, closest_point_of_approach,
                      engagement_point, eta, parse_threat_types, position_at, time_to_intercept)
@@ -110,8 +111,8 @@ class Ship:
         v_max, a_max = self._kinematics()
         self.v_max, self.a_max = v_max, a_max
 
+        self.radio = RadioProcess()          # own process: a radio failure must not freeze C2
         self.onboard = open_onboard(args.sim_bus)
-        self.radio = open_radio()
         self.pub_tracks = self.onboard.declare_publisher("sim/threat_tracks")
         self.pub_orders = self.radio.declare_publisher("swarm/threats")
         self.pub_roster = self.radio.declare_publisher("ship/roster")
@@ -120,6 +121,7 @@ class Ship:
             self.onboard.declare_subscriber("sim/clock", self._on_clock),
             self.onboard.declare_subscriber("sim/detonation", self._on_detonation),
             self.radio.declare_subscriber("swarm/heartbeat/*", self._on_heartbeat),
+            self.radio.declare_subscriber("swarm/heartbeat_relay/*", self._on_relayed_heartbeat),
             self.radio.declare_subscriber("swarm/telemetry/*", self._on_telemetry),
             self.radio.declare_subscriber("swarm/awards", self._on_award),
             self.radio.declare_subscriber("swarm/bids", self._on_bid),
@@ -158,9 +160,19 @@ class Ship:
         hb = self._parse(sample)
         with self.lock:
             d = self.drones.setdefault(hb["agent_id"], {"telemetry": {}})
-            d["hb"], d["seen"] = hb, time.monotonic()
+            d["hb"], d["seen"], d["relayed"] = hb, time.monotonic(), False
             if hb.get("state") == "expended":
                 self.expended.add(hb["agent_id"])
+
+    def _on_relayed_heartbeat(self, sample):
+        """A peer forwarded the heartbeat of a drone we could not hear directly."""
+        self._count_rx("swarm/heartbeat_relay", sample)
+        hb = self._parse(sample)
+        with self.lock:
+            d = self.drones.setdefault(hb["agent_id"], {"telemetry": {}})
+            if "seen" in d and time.monotonic() - d["seen"] < 1.0 and not d.get("relayed"):
+                return   # heard directly anyway
+            d["hb"], d["seen"], d["relayed"] = hb, time.monotonic(), True
 
     def _on_telemetry(self, sample):
         self._count_rx("swarm/telemetry", sample)
@@ -385,7 +397,8 @@ class Ship:
                                if kv[0].split("_")[-1].isdigit() else 0):
                 hb = v.get("hb", {})
                 drones.append({"id": d, "state": "expended" if d in self.expended else hb.get("state"),
-                               "link": hb.get("link"), "pose": hb.get("pose"), "threat_id": hb.get("threat_id"),
+                               "link": hb.get("link"), "relayed": v.get("relayed", False),
+                               "pose": hb.get("pose"), "threat_id": hb.get("threat_id"),
                                "hb_age_s": None if "seen" not in v else round(wall - v["seen"], 1),
                                "telemetry": v.get("telemetry", {})})
             members = self.members()

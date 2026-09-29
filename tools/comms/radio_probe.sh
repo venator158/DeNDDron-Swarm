@@ -14,7 +14,7 @@ cleanup; trap cleanup EXIT
 docker network create --subnet 172.31.0.0/16 probe_radio >/dev/null
 for n in a b c d; do
   docker run -d --name probe_$n --network probe_radio -e NAME=$n -e DURATION=45 -e SUBNET=172.31.0.0/16 \
-    -e RADIO_ROUTING=$ROUTING -e RADIO_LEASE_MS=${RADIO_LEASE_MS:-2000} -e PYTHONPATH=/common \
+    -e RADIO_ROUTING=$ROUTING -e RADIO_LEASE_MS=${RADIO_LEASE_MS:-2000} -e RADIO_OPEN_TIMEOUT_MS=${RADIO_OPEN_TIMEOUT_MS:-} -e PYTHONPATH=/common \
     -v "$REPO/src/common":/common:ro -v "$HERE":/t:ro -w /t "$IMAGE" python -u radio_probe.py >/dev/null
 done
 until [[ $(docker logs probe_a 2>&1 | grep -c rx_gap) -ge 3 ]]; do sleep 1; done
