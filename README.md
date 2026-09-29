@@ -253,6 +253,23 @@ The loss rows are from the run with the award fixes below. The other rows come f
 - **`tuned` vs `default`.** No meaningful difference in any condition, so `default` stays the default.
 - **Impairment method.** `degrade_radio.sh` impairs only UDP. The earlier version impaired all traffic on the radio interface, including the dashboard's TCP connection (Docker forwards `:8080` to the ship's radio address). At 64 kbit/s one dashboard request then took 1.2 s instead of 1 ms, which is why the earlier tuned 64 kbit/s run failed.
 
+### Scaling
+
+Setup: `scaling_sweep.py`. N drones face N/2 threats (default type mix), detected every 240/N sim seconds, so the load per drone stays about the same. Each size runs at the fastest speed the host could sustain (6 cores, 15 GB). Needs the [ARP limit](#quick-start) raised above ~30 drones.
+
+| Drones | Speed (target → achieved) | Host CPU | Drone CPU per 1× | Gazebo CPU | Worst loop (p99) | Oldest sensor frame | Msgs/s received per drone | Msgs/s at ship | Outcome |
+|---|---|---|---|---|---|---|---|---|---|
+| 8 | 3 → 2.95× | 1.9 cores | 7.4% | 33% | 22 ms | 30 ms | 13 | 21 | 4/4 destroyed, 4 drones |
+| 16 | 3 → 2.72× | 3.5 cores | 8.1% | 37% | 33 ms | 47 ms | 27 | 38 | 8/8 destroyed, 10 drones |
+| 25 | 2 → 1.9× | 3.4 cores | 7.3% | 33% | 42 ms | 54 ms | 44 | 60 | 12/12 destroyed, 16 drones |
+| 50 | 1 → 0.87× | 3.8 cores | 9.4% | 26% | 137 ms | 378 ms | 86 | 123 | 22/25 destroyed, 38 drones |
+
+All sizes: no re-announces, no conflicts, full agreement on assignments, decision latency ~1.4 s. The 16-drone run predates the sim-following protocol clock.
+
+- **Radio traffic grows with the square of the swarm.** Each drone hears every other drone's heartbeats, so messages per drone double when the swarm doubles: about 4,300/s swarm-wide at 50 drones.
+- **CPU per drone is roughly constant** at 7–9% of a core per 1× of sim speed (the radio process included), rising slightly with the heartbeats received. 50 drones need about 4–5 cores at real time.
+- **At 50 drones this host is the limit.** Drones are starved of CPU: loop times reach 137 ms (target 20 ms) and sensor frames 378 ms. The 3 failed threats were each one drone of a multi-drone threat arriving 8.3, 12.9 and 10.8 m from its slot, just outside the 8 m kill radius; the protocol itself had no errors. A bigger host, or fewer processes per drone, is needed for clean 50-drone runs.
+
 ### Tools (`tools/comms/`)
 
 | Script | What it does |
