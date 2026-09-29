@@ -47,26 +47,31 @@ def find_interface(subnet: str):
 def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = None) -> zenoh.Session:
     """Peer-mode session bound to the radio network only.
 
-    Agents and the ship open this inside a RadioProcess (radio_process.py): when a
-    node loses its radio, Zenoh freezes every session of that process for ~10 s,
-    which must not reach the onboard link.
+    Agents and the ship open this inside a RadioProcess (radio_process.py), so that
+    no radio problem can freeze their onboard link.
 
+    - protocol (RADIO_PROTO, udp): see the comment below.
     - lease (RADIO_LEASE_MS, 2 s): how soon a lost peer is noticed.
-    - open/accept timeout (RADIO_OPEN_TIMEOUT_MS, 1 s): with Zenoh's default 10 s,
-      reconnect attempts to a lost peer blacked out traffic between the healthy
-      peers for ~10 s.
+    - open/accept timeout (RADIO_OPEN_TIMEOUT_MS, 1 s): bounds connection attempts.
     - routing_mode (RADIO_ROUTING) only exists before Zenoh 1.1; newer versions
       always route peer-to-peer and ignore it.
     """
     subnet = subnet or os.environ.get("RADIO_SUBNET", "172.21.0.0/16")
     routing_mode = routing_mode or os.environ.get("RADIO_ROUTING", "linkstate")
-    lease_ms = lease_ms or int(os.environ.get("RADIO_LEASE_MS", "2000"))
-    open_ms = int(os.environ.get("RADIO_OPEN_TIMEOUT_MS", "1000"))
+    lease_ms = lease_ms or int(os.environ.get("RADIO_LEASE_MS") or 2000)
+    open_ms = int(os.environ.get("RADIO_OPEN_TIMEOUT_MS") or 1000)
     iface, ip = find_interface(subnet)
     conf = zenoh.Config()
     conf.insert_json5("mode", '"peer"')
     # Listen only on the radio address so every peer link runs over the radio network.
-    conf.insert_json5("listen/endpoints", json.dumps([f"tcp/{ip}:0"]))
+    # RADIO_PROTO: "udp" (default), "tcp", or "tcp,udp". With any TCP link, jamming one peer stalled
+    # other peers' traffic (and the jammed node's other Zenoh sessions) for ~10 s inside Zenoh's TCP
+    # link handling; over UDP that does not happen. UDP means best-effort delivery: the protocol
+    # recovers from lost orders/bids/awards by re-announcement and conflict repair.
+    protos = [p.strip() for p in (os.environ.get("RADIO_PROTO") or "udp").split(",") if p.strip()]
+    conf.insert_json5("listen/endpoints", json.dumps([f"{p}/{ip}:0" for p in protos]))
+    if len(protos) > 1:
+        conf.insert_json5("transport/unicast/max_links", str(len(protos)))
     conf.insert_json5("scouting/multicast/enabled", "true")
     conf.insert_json5("scouting/multicast/interface", json.dumps(iface))
     conf.insert_json5("transport/link/tx/lease", str(int(lease_ms)))
@@ -77,6 +82,10 @@ def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = Non
             conf.insert_json5(key, value)
         except zenoh.ZError:
             pass   # key not supported by this Zenoh version
+    # Extra Zenoh settings for experiments, e.g. RADIO_ZENOH_CONFIG='{"routing/interests/timeout": 1000}'.
+    # Unknown keys fail loudly here, so a typo cannot silently change nothing.
+    for key, value in json.loads(os.environ.get("RADIO_ZENOH_CONFIG") or "{}").items():
+        conf.insert_json5(key, json.dumps(value))
     return zenoh.open(conf)
 
 

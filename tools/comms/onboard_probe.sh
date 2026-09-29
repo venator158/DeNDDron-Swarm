@@ -17,7 +17,7 @@ docker run -d --name probe_router --network probe_sim eclipse/zenoh:latest --lis
 sleep 2
 run() {  # name role
   docker create --name probe_$1 --network probe_sim -e NAME=$1 -e ROLE=$2 -e RADIO_ROUTING=$ROUTING \
-    -e RADIO_LEASE_MS=${RADIO_LEASE_MS:-2000} -e RADIO_OPEN_TIMEOUT_MS=${RADIO_OPEN_TIMEOUT_MS:-} -e RADIO_PROCESS=${RADIO_PROCESS:-} -e PYTHONPATH=/common \
+    -e RADIO_LEASE_MS=${RADIO_LEASE_MS:-2000} -e RADIO_OPEN_TIMEOUT_MS=${RADIO_OPEN_TIMEOUT_MS:-} -e RADIO_PROCESS=${RADIO_PROCESS:-} -e RADIO_PROTO=${RADIO_PROTO:-} -e PYTHONPATH=/common \
     -v "$REPO/src/common":/common:ro -v "$HERE":/t:ro -w /t "$IMAGE" python -u onboard_probe.py >/dev/null
 }
 run pub pub; docker start probe_pub >/dev/null

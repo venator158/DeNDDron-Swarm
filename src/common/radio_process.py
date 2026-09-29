@@ -1,9 +1,10 @@
 """Radio in its own OS process.
 
-When a node loses its radio, Zenoh (1.0.4 and 1.10.1 alike) freezes every
-session in that process for ~10 s while it tears the dead links down.  With
-the radio in the same process as the onboard link, a jammed drone lost its own
-sensors for 10 s and missed its engagement.  Here the radio session lives in a
+With TCP radio links, a node that lost its radio froze every Zenoh session in
+its process for ~10 s (Zenoh 1.0.4 and 1.10.1 alike); with the radio in the
+same process as the onboard link, a jammed drone lost its own sensors for 10 s
+and missed its engagement.  The radio now uses UDP, which avoids that freeze,
+and this separation stays as defence in depth.  Here the radio session lives in a
 child process and talks to the parent over a pipe, so a radio failure only
 stops radio traffic, as with a separate radio module on a real drone.
 
@@ -28,12 +29,22 @@ Sample = namedtuple("Sample", ["key_expr", "payload"])
 def _worker(conn, subnet, routing_mode, lease_ms):
     """Child process: owns the Zenoh radio session and relays over the pipe."""
     import links   # imported here so the child opens its own Zenoh runtime
+    import os, sys, time
+    debug = os.environ.get("RADIO_DEBUG") == "1"
     session = links.open_radio(subnet, routing_mode, lease_ms)
+    if debug:
+        print("[radio child] open_timeout", session.config().get_json("transport/unicast/open_timeout")
+              if hasattr(session, "config") else "?", file=sys.stderr, flush=True)
+    stats = {"put_max": 0.0, "last_rx": time.monotonic(), "rx_gap": 0.0, "t": time.monotonic()}
     publishers, subscribers = {}, []
     send_lock = threading.Lock()
 
     def forwarder(sub_id):
         def forward(sample):
+            if debug and str(sample.key_expr) not in publishers:   # remote traffic only
+                now = time.monotonic()
+                stats["rx_gap"] = max(stats["rx_gap"], now - stats["last_rx"])
+                stats["last_rx"] = now
             try:
                 with send_lock:
                     conn.send(("msg", sub_id, str(sample.key_expr), bytes(sample.payload)))
@@ -52,7 +63,14 @@ def _worker(conn, subnet, routing_mode, lease_ms):
             pub = publishers.get(key)
             if pub is None:
                 pub = publishers[key] = session.declare_publisher(key)
+            t0 = time.monotonic()
             pub.put(data)
+            if debug:
+                stats["put_max"] = max(stats["put_max"], time.monotonic() - t0)
+                if t0 - stats["t"] >= 1.0:
+                    print(f"[radio child] put_max={stats['put_max']*1000:.1f}ms rx_gap={stats['rx_gap']*1000:.0f}ms",
+                          file=sys.stderr, flush=True)
+                    stats.update(put_max=0.0, rx_gap=0.0, t=t0)
         elif op == "sub":
             _, sub_id, key = cmd
             subscribers.append(session.declare_subscriber(key, forwarder(sub_id)))

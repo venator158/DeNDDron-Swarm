@@ -100,7 +100,7 @@ The assigned drones take up slots 4 m apart around that point and **detonate at 
 
 - **Two links per node** (`src/common/links.py`).
   - The *onboard bus* goes through a Zenoh router on `sim_net`. It stands in for a drone's own wiring (sensors, actuators, detonation), and for the ship's radar truth. It is not communications.
-  - The *radio* runs peer-to-peer on `radio_net` (Zenoh 1.10.1). Peers find each other by multicast scouting on the radio interface and connect directly. Every drone and the ship run the radio **in a separate OS process** (`src/common/radio_process.py`), so a radio failure cannot freeze flight control or C2.
+  - The *radio* runs peer-to-peer over UDP on `radio_net` (Zenoh 1.10.1). Peers find each other by multicast scouting on the radio interface and connect directly. Every drone and the ship run the radio **in a separate OS process** (`src/common/radio_process.py`), so a radio failure cannot freeze flight control or C2.
   - Degrading `radio_net` degrades only the communications. The physics keeps working.
 - **Simulator** (`sim/GazeboSimulator.cpp`).
   - Integrates the drones' motion from `cmd_vel`.
@@ -166,13 +166,13 @@ Radio loss is emulated two ways: 100% packet loss on the radio interface (`tc ne
 
 | Finding | Evidence |
 |---|---|
-| Zenoh tries to reconnect to a lost peer with a 10 s connect timeout. During those attempts, other peers lost **all** traffic from healthy peers for ~8–10 s. | radio probe: 2 of 3 healthy peers heard nothing for 8.4 s (1.0.4) / 9.8 s (1.10.1) |
-| **Fix 1:** Zenoh 1.10.1 with a 1 s open/accept timeout (`RADIO_OPEN_TIMEOUT_MS`) | radio probe: worst gap 0.05 s on every healthy peer. (On 1.0.4, `linkstate` routing had the same effect, but it no longer exists in 1.10.) |
-| The process whose radio is lost freezes **all** its Zenoh sessions once for ~10 s: every timeout setting, both Zenoh versions, both loss methods | onboard probe: 10.1–10.4 s gap in the jammed drone's 50 Hz onboard stream |
-| **Fix 2:** the radio in its own OS process (`RadioProcess`) | onboard probe: jammed drone's worst onboard gap 25 ms (was 10.4 s) |
-| Full system, before the fixes: the ship froze ~10 s when an engaged drone was cut, and cut drones missed their slots | runs 3/4: ship clock stopped for 10 s; cut drone 31.7 m / 5.0 m off its slot at detonation time, so it aborted |
-| **Full system after the fixes:** a drone jammed right after engaging kept flying on its onboard sensors and destroyed its threat on time. The ship never froze. | run 5: detonation at t = 76.45 s (allocated 76.3 s), 2.86 m from the threat; 0 frozen ship-clock samples |
-| **Still open:** while a peer is being jammed, some *healthy* drones' radio receive stalls ~7 s. Their sending keeps working, and the ship keeps hearing them. | run 5: up to 4 healthy drones reported link down for ~7 s, then recovered. Not reproduced in the isolated probes, so it depends on something the full system has. |
+| **Over TCP radio links**, jamming one peer stalls other peers' traffic for ~10 s: a random subset of healthy peers hear nobody | radio probe, 9 peers, repeated runs: 4–7 of 8 healthy peers silent for 9.8–10.4 s. Not changed by the connect/accept timeout, the interest timeout, the lease, or more send threads. (Earlier single clean runs with a 1 s connect timeout were luck, not a fix.) |
+| Over TCP, the jammed node also freezes **all** its Zenoh sessions once for ~10 s, including the onboard link | onboard probe: 10.1–10.4 s gap in the jammed drone's 50 Hz onboard stream (Zenoh 1.0.4 and 1.10.1) |
+| **Fix: radio over UDP** (`RADIO_PROTO=udp`, default). Both effects disappear. Mixing TCP and UDP brings the stall back. | radio probe, 9 peers, 2 runs: all healthy peers worst gap ≤ 0.06 s; onboard probe with the radio in-process: jammed drone worst gap 25 ms; `tcp,udp`: 7 of 8 peers silent 9.8 s |
+| Defence in depth: the radio runs in its own OS process (`RadioProcess`), so no radio problem can reach flight control or C2 | onboard probe over TCP: jammed drone's worst onboard gap 25 ms (was 10.4 s) |
+| Full system before the fixes: the ship froze ~10 s when an engaged drone was cut; cut drones missed their slots | runs 3/4: ship clock stopped 10 s; cut drone 31.7 m / 5.0 m off its slot at detonation time, so it aborted |
+| **Full system, UDP radio:** jamming an idle drone and then an engaged one affects only those two. No healthy drone lost its link; the ship's roster tracked the jams exactly (8 → 7 → 6). The jammed engaged drone destroyed its threat on time. | run 6, sampled every second (81 samples): 0 samples with a healthy drone down; detonation at t = 76.29 s (allocated 76.3 s), 2.84 m from the threat |
+| Trade-off: over UDP every message is best-effort, so orders, bids and awards can be lost under packet loss. Recovery relies on re-announcement and conflict repair. Measuring that under loss, and tuning Zenoh QoS for it, is the next step. | — |
 
 ### Tools (`tools/comms/`)
 
@@ -184,7 +184,7 @@ Radio loss is emulated two ways: 100% packet loss on the radio interface (`tc ne
 | `chaos.py <compose log> [disconnect\|netem]` | during a live run: cuts an idle drone, then the first drone that engages, then restores the idle one |
 | `operator_bot.py [reaction_s] [duration_s]` | stand-in operator: approves feasible threats through the dashboard API, most urgent first |
 
-All probes accept `IMAGE=...` to test another Zenoh build, and they read `RADIO_LEASE_MS` / `RADIO_OPEN_TIMEOUT_MS`.
+All probes accept `IMAGE=...` to test another Zenoh build and pass through the radio settings (`RADIO_PROTO`, `RADIO_PROCESS`, `RADIO_LEASE_MS`, `RADIO_OPEN_TIMEOUT_MS`, `RADIO_ZENOH_CONFIG`, `RADIO_DEBUG`). `radio_probe.sh` takes `PEERS=N`.
 
 ## Instrumentation
 
@@ -277,7 +277,7 @@ Where each implemented feature lives.
 | `defaults.auction` (optional) | `bid_window_s` (1.0) |
 | `agents.drone_N` | `spawn{x,y,z}`, optional `goal{x,y,z}` and per-drone overrides |
 
-Radio tuning (env): `RADIO_OPEN_TIMEOUT_MS` (1000), `RADIO_LEASE_MS` (2000), `RADIO_SUBNET` (`172.21.0.0/16`).
+Radio tuning (env): `RADIO_PROTO` (`udp`), `RADIO_LEASE_MS` (2000), `RADIO_OPEN_TIMEOUT_MS` (1000), `RADIO_SUBNET` (`172.21.0.0/16`), `RADIO_ZENOH_CONFIG` (JSON object of extra Zenoh settings, for experiments).
 
 Drone IDs: agent replicas are identical containers. Each claims the lowest free `drone_N` via `config/agent_registry.json`, under a file lock.
 
@@ -315,7 +315,7 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 ```
 
 ## Known limitations
-- **Healthy drones can lose radio receive for ~7 s while a peer is jammed.** See [Degraded communications](#degraded-communications).
+- **Best-effort radio.** The radio runs over UDP, so messages can be lost under packet loss; see [Degraded communications](#degraded-communications).
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
 - **Shared simulation clock.** Detonation times use the simulator's clock, which every node shares. A distributed clock is future work.
 - **Idealized threats.** They fly straight lines at constant speed, and a detonation within the kill radius always kills (no kill probability).
