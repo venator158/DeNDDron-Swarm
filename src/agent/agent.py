@@ -14,6 +14,7 @@ from telemetry import Telemetry
 from threats import ETA_MARGIN, ORDER_SLACK_S, Threat, eta, slot_point
 from links import open_onboard
 from radio_process import RadioProcess
+import simclock
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
@@ -22,6 +23,7 @@ class DenddronAgent:
     HEARTBEAT_HZ = 2.0
     TELEMETRY_HZ = 1.0
     LINK_TIMEOUT_S = 3.0       # no radio traffic for this long = disconnected from the swarm
+    AWARD_RESENDS = 2          # extra copies of each award/withdrawal, one per heartbeat tick (lossy radio)
     SLOT_RADIUS = 4.0          # m, spacing of drones around an engagement point
     DETONATE_RADIUS = 8.0      # m, must be this close to the slot at t_engage to detonate (= kill radius)
 
@@ -169,7 +171,7 @@ class DenddronAgent:
 
         self.max_control_dt = float(planner_cfg.get("max_control_dt", 0.2))
         self.sensor_timeout_s = float(planner_cfg.get("sensor_timeout_s", 0.5))
-        self.control_rate_hz = 50.0
+        self.control_rate_hz = 50.0   # per simulated second (the loop runs SIM_RTF times faster in wall time)
         self.timing = TimingManager(
             max_control_dt=self.max_control_dt,
             sensor_timeout_s=self.sensor_timeout_s,
@@ -189,15 +191,17 @@ class DenddronAgent:
         self.destroyed = False
 
         # --- Radio link and membership ---
-        self.telemetry = Telemetry(1.0 / self.control_rate_hz)
-        self._last_radio_rx = None     # monotonic time of the last message from the ship or a peer
-        self.peers = {}                # peer drone id -> monotonic time last heard
+        self.telemetry = Telemetry(1.0 / (self.control_rate_hz * simclock.RTF))
+        self._last_radio_rx = None     # simclock time of the last message from the ship or a peer
+        self.peers = {}                # peer drone id -> simclock time last heard
         self._peer_heartbeats = {}     # peer drone id -> last heartbeat payload (for relaying)
-        self._roster_time = None       # monotonic time of the last roster
+        self._roster_time = None       # simclock time of the last roster
         self._assign_hashes = OrderedDict()   # order id -> short hash of the assignment we computed
         self.roster = []               # drone ids the ship last reported hearing
         self._missing_from_roster = 0
         self._link_was_up = False
+        self._award_resends = {}       # threat_id -> [award payload, copies left]; newest status wins
+        self._award_lock = threading.Lock()
 
         # --- Onboard bus (simulator) ---
         self.pub_cmd_vel    = self.onboard.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
@@ -387,7 +391,7 @@ class DenddronAgent:
         Explicitly handles simulation time vs wall time across explicit timing states:
         FIRST_FRAME, NORMAL, PAUSED_ZERO_DT, OUT_OF_ORDER, TIME_RESET, LARGE_DT, MISSING_TIME.
         """
-        rate_hz   = self.control_rate_hz
+        rate_hz   = self.control_rate_hz * simclock.RTF
         sleep_time = 1.0 / rate_hz
         next_tick = time.monotonic()
 
@@ -677,14 +681,14 @@ class DenddronAgent:
         """Sim-time when available (auction windows must track the simulator), else wall time."""
         with self.state_lock:
             t = self.current_time
-        return float(t) if t is not None else time.monotonic()
+        return float(t) if t is not None else simclock.now()
 
     def _link_up(self) -> bool:
         """Heard the ship or another drone recently."""
-        return self._last_radio_rx is not None and time.monotonic() - self._last_radio_rx <= self.LINK_TIMEOUT_S
+        return self._last_radio_rx is not None and simclock.now() - self._last_radio_rx <= self.LINK_TIMEOUT_S
 
     def _radio_heard(self):
-        self._last_radio_rx = time.monotonic()
+        self._last_radio_rx = simclock.now()
 
     def _is_free(self) -> bool:
         """Available for tasking: alive, localized, not engaged and not awaiting a wave result."""
@@ -810,7 +814,7 @@ class DenddronAgent:
             self.engaged_threat = t
             self.engagement = {"threat": t, "slot_point": goal, "t_engage": t.t_engage}
             self.set_goal(goal)
-            self._radio_put(self.pub_awards, "swarm/awards", {
+            self._publish_award({
                 "threat_id": t.threat_id, "agent_id": self.agent_id, "cost": r.my_cost,
                 "status": "engaged", "slot": slot, "t_engage": t.t_engage,
             })
@@ -844,9 +848,28 @@ class DenddronAgent:
         self.engaged_threat = None
         self.engagement = None
         self.set_goal(None)   # hold position
-        self._radio_put(self.pub_awards, "swarm/awards", {
-            "threat_id": threat_id, "agent_id": self.agent_id, "status": status,
-        })
+        self._publish_award({"threat_id": threat_id, "agent_id": self.agent_id, "status": status})
+
+    def _publish_award(self, award: dict):
+        """Send an award (or withdrawal) now and again on the next AWARD_RESENDS heartbeat ticks.
+
+        A lost award makes the ship re-announce the threat and a second drone engage it, so
+        awards are repeated; receivers treat repeats idempotently.  A newer status for the
+        same threat replaces the pending copies, so a stale "engaged" never follows a withdrawal.
+        """
+        with self._award_lock:
+            self._award_resends[award["threat_id"]] = [award, self.AWARD_RESENDS]
+        self._radio_put(self.pub_awards, "swarm/awards", award)
+
+    def _resend_awards(self):
+        with self._award_lock:
+            due = [entry[0] for entry in self._award_resends.values()]
+            for tid in list(self._award_resends):
+                self._award_resends[tid][1] -= 1
+                if self._award_resends[tid][1] <= 0:
+                    del self._award_resends[tid]
+        for award in due:
+            self._radio_put(self.pub_awards, "swarm/awards", award)
 
     def _check_engagement(self):
         """At the allocated time: detonate if on station, otherwise abort and hold.
@@ -928,6 +951,7 @@ class DenddronAgent:
         while self.running and not self.destroyed:
             try:
                 self._send_heartbeat()
+                self._resend_awards()
                 tick += 1
                 if tick % ticks_per_telemetry == 0:
                     self._relay_unheard_peers()
@@ -944,10 +968,10 @@ class DenddronAgent:
                     self._link_was_up = link
             except Exception as e:
                 logger.warning(f"[{self.agent_id}] heartbeat error: {e}")
-            time.sleep(period)
+            simclock.sleep(period)
 
     def _fresh_peers(self):
-        now = time.monotonic()
+        now = simclock.now()
         return [p for p, t in self.peers.items() if now - t <= self.LINK_TIMEOUT_S]
 
     def _on_peer_heartbeat(self, sample):
@@ -955,7 +979,7 @@ class DenddronAgent:
         if peer == self.agent_id:
             return
         self.telemetry.rx("swarm/heartbeat")
-        self.peers[peer] = time.monotonic()
+        self.peers[peer] = simclock.now()
         self._peer_heartbeats[peer] = bytes(sample.payload)
         self._radio_heard()
 
@@ -966,7 +990,7 @@ class DenddronAgent:
         is lost while its links to other drones still work would drop out of the
         roster.  Only drones that are themselves in a fresh roster relay.
         """
-        if self.destroyed or self._roster_time is None or time.monotonic() - self._roster_time > self.LINK_TIMEOUT_S:
+        if self.destroyed or self._roster_time is None or simclock.now() - self._roster_time > self.LINK_TIMEOUT_S:
             return
         if self.agent_id not in self.roster:
             return
@@ -980,7 +1004,7 @@ class DenddronAgent:
         self.telemetry.rx("ship/roster")
         try:
             self.roster = list(self._parse(sample).get("members", []))
-            self._roster_time = time.monotonic()
+            self._roster_time = simclock.now()
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed roster: {e}")
             return

@@ -44,6 +44,13 @@ void GazeboSimulator::init() {
 
     std::cout << "[GazeboSimulator] Connected to Gazebo transport" << std::endl;
 
+    if (const char* rtf_env = std::getenv("SIM_RTF"); rtf_env != nullptr && std::strlen(rtf_env) > 0) {
+        const double target_rtf = std::clamp(std::atof(rtf_env), 0.1, 10.0);
+        _tick_period = std::chrono::microseconds(static_cast<long>(20000.0 / target_rtf));
+        std::cout << "[GazeboSimulator] Target real-time factor " << target_rtf << ", tick "
+                  << _tick_period.count() << " us" << std::endl;
+    }
+
     // Zenoh Init — connect as a client to the router (same fabric as Python agents).
     // Without this the bridge opens a peer/multicast session that is isolated from
     // the client sessions the Python agents use, so sensor publishes never reach them.
@@ -884,5 +891,5 @@ void GazeboSimulator::step() {
         _last_sim_time = current_sim_time;
     }
     
-    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // 50 Hz real-time tick rate
+    std::this_thread::sleep_for(_tick_period); // 50 Hz of sim time
 }

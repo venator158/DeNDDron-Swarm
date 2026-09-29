@@ -120,6 +120,11 @@ class AuctionManager:
             if mine is not None:
                 self.held, self.held_cost = mine, my_cost
                 self._holders.setdefault(mine.threat_id, {})[self.agent_id] = my_cost
+                # Awards that arrived before our window closed were only recorded: if enough
+                # better-bid drones already hold the threat, our view was stale, so don't take it.
+                if self._must_yield():
+                    self.release()
+                    mine, my_cost = None, None
             results.append(WaveResult(wave.wave_id, assignment, mine, my_cost))
         return results
 

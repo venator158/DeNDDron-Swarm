@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Degrade (or restore) the radio of running swarm containers with tc netem, one qdisc per radio
-# interface, so impairments can be combined. The onboard (simulator) network is not touched.
+# Degrade (or restore) the radio of running swarm containers with tc netem on each radio interface.
+# Only UDP is impaired: the radio is Zenoh over UDP, while TCP on the same interface (Docker forwards
+# the dashboard port, :8080, to the ship's radio address) must pass untouched. A prio root sends all
+# traffic to an unimpaired band and a filter moves IPv4 UDP to the band with netem. The onboard
+# (simulator) network is not touched.
 #
 #   degrade_radio.sh apply "<netem args>" [container...]
 #   degrade_radio.sh clear [container...]
@@ -36,9 +39,13 @@ for n in sorted(os.listdir('/sys/class/net')):
 for c in "${CONTAINERS[@]}"; do
   IF=$(iface_of "$c")
   if [[ "$MODE" == apply ]]; then
-    # shellcheck disable=SC2086
     docker run --rm --net "container:$c" --cap-add NET_ADMIN gaiadocker/iproute2 \
-      qdisc replace dev "$IF" root netem $ARGS
+      qdisc del dev "$IF" root 2>/dev/null || true
+    docker run -i --rm --net "container:$c" --cap-add NET_ADMIN gaiadocker/iproute2 -batch - <<TC
+qdisc add dev $IF root handle 1: prio bands 3 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+qdisc add dev $IF parent 1:3 handle 30: netem $ARGS
+filter add dev $IF parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff flowid 1:3
+TC
   else
     docker run --rm --net "container:$c" --cap-add NET_ADMIN gaiadocker/iproute2 \
       qdisc del dev "$IF" root 2>/dev/null || true

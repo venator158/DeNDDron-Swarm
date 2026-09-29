@@ -40,6 +40,9 @@ private:
     double _stats_real_time = 0.0;          // real time of the last world_stats
     std::chrono::steady_clock::time_point _stats_wall;
     double _rtf = 1.0;
+    // Loop period: 20 ms of sim time at the target real-time factor (SIM_RTF), so drones
+    // get the same sensor and integration rate per simulated second at any speed-up.
+    std::chrono::microseconds _tick_period{20000};
     bool _paused = false;
     double _clock_out = 0.0;                // last value handed out (monotonic)
     double estimated_sim_time();            // requires _state_mtx

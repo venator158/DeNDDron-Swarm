@@ -45,8 +45,13 @@ COPY --from=builder /home/app/sim /home/app/sim
 WORKDIR /home/app
 EXPOSE 11345
 
-CMD echo "[Container] Starting gzserver..." && \
-    gzserver --verbose /home/app/sim/ocean.world &> /tmp/gzserver.log & \
+# SIM_RTF > 1 runs the world faster than real time: 1 ms physics steps at 1000*SIM_RTF steps/s.
+CMD RTF="${SIM_RTF:-1}" && \
+    awk -v rtf="$RTF" '{ sub(/<real_time_factor>[^<]*</, "<real_time_factor>" rtf "<"); \
+        sub(/<real_time_update_rate>[^<]*</, "<real_time_update_rate>" int(1000 * rtf) "<"); print }' \
+        /home/app/sim/ocean.world > /tmp/ocean.world && \
+    echo "[Container] Starting gzserver (real-time factor $RTF)..." && \
+    gzserver --verbose /tmp/ocean.world &> /tmp/gzserver.log & \
     sleep 3 && \
     echo "[Container] Starting gazebo_simulator bridge..." && \
     gazebo_simulator

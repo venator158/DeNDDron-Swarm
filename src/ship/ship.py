@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from links import open_onboard
+import simclock
 from radio_process import RadioProcess
 from threat_queue import ThreatQueue
 from threats import (DEFAULT_THREAT_TYPES, ETA_MARGIN, ORDER_SLACK_S, Threat, closest_point_of_approach,
@@ -40,9 +41,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [Ship] %(message)s",
 log = logging.getLogger("Ship")
 
 HERE = Path(__file__).resolve().parent
-MEMBER_TIMEOUT_S = 3.0     # wall seconds without a heartbeat before a drone leaves the roster
+MEMBER_TIMEOUT_S = 3.0     # seconds (simclock) without a heartbeat before a drone leaves the roster
 ROSTER_HZ = 1.0
-RETRY_AFTER_S = 3.0        # wall seconds before an under-assigned engagement is re-announced
+RETRY_AFTER_S = 3.0        # seconds (simclock) before an under-assigned engagement is re-announced
 MAX_ANNOUNCES = 3
 SHIP_RADIUS = 16.0
 
@@ -73,7 +74,8 @@ class Track:
         self.orders = []                # order (wave) ids sent for this threat
         self.over_assigned = False      # more drones engaged/detonated than the level, at any time
         self.last_announce = None
-        self.approved_wall = None
+        self.approved_wall = None       # simclock time of approval
+        self.award_events = set()       # (drone, status) already logged: awards are sent several times
         self.first_award_ms = None
         self.full_award_ms = None
 
@@ -107,7 +109,7 @@ class Ship:
         self.rx_counts = defaultdict(int)
         self.rx_bytes = defaultdict(int)
         self.rx_rates = {}
-        self._rx_window_start = time.monotonic()
+        self._rx_window_start = simclock.now()
         self.log_file = open(args.log_path, "a", buffering=1) if args.log_path else None
 
         v_max, a_max = self._kinematics()
@@ -162,7 +164,7 @@ class Ship:
         hb = self._parse(sample)
         with self.lock:
             d = self.drones.setdefault(hb["agent_id"], {"telemetry": {}})
-            d["hb"], d["seen"], d["relayed"] = hb, time.monotonic(), False
+            d["hb"], d["seen"], d["relayed"] = hb, simclock.now(), False
             if hb.get("state") == "expended":
                 self.expended.add(hb["agent_id"])
 
@@ -172,9 +174,9 @@ class Ship:
         hb = self._parse(sample)
         with self.lock:
             d = self.drones.setdefault(hb["agent_id"], {"telemetry": {}})
-            if "seen" in d and time.monotonic() - d["seen"] < 1.0 and not d.get("relayed"):
+            if "seen" in d and simclock.now() - d["seen"] < 1.0 and not d.get("relayed"):
                 return   # heard directly anyway
-            d["hb"], d["seen"], d["relayed"] = hb, time.monotonic(), True
+            d["hb"], d["seen"], d["relayed"] = hb, simclock.now(), True
 
     def _on_telemetry(self, sample):
         self._count_rx("swarm/telemetry", sample)
@@ -193,21 +195,27 @@ class Ship:
             if tr is None:
                 return
             agent, status = a["agent_id"], a.get("status", "engaged")
+            first = (agent, status) not in tr.award_events
+            tr.award_events.add((agent, status))
             if status == "engaged":
+                if agent in tr.detonated or agent in self.expended:
+                    return   # late repeat of an award already acted on
                 tr.holders.add(agent)
                 if len(tr.holders | set(tr.detonated)) > tr.level:
                     tr.over_assigned = True
                 if tr.approved_wall is not None:
-                    ms = round((time.monotonic() - tr.approved_wall) * 1000)
+                    ms = round((simclock.now() - tr.approved_wall) * 1000)
                     tr.first_award_ms = tr.first_award_ms or ms
                     if len(tr.holders) >= tr.level and tr.full_award_ms is None:
                         tr.full_award_ms = ms
-                self.event("engaged", threat=tr.threat_id, drone=agent, slot=a.get("slot"))
+                if first:
+                    self.event("engaged", threat=tr.threat_id, drone=agent, slot=a.get("slot"))
             else:
                 tr.holders.discard(agent)
                 if status == "missed":
                     tr.missed.add(agent)
-                self.event(status, threat=tr.threat_id, drone=agent)
+                if first:
+                    self.event(status, threat=tr.threat_id, drone=agent)
 
     def _on_detonation(self, sample):
         d = self._parse(sample)
@@ -280,7 +288,7 @@ class Ship:
 
     # ------------------------------------------------------- swarm picture
     def members(self):
-        now = time.monotonic()
+        now = simclock.now()
         return sorted(d for d, v in self.drones.items()
                       if "seen" in v and now - v["seen"] <= MEMBER_TIMEOUT_S and d not in self.expended)
 
@@ -321,7 +329,7 @@ class Ship:
                 self.event("approval_rejected", threat=threat_id, reason=f["reason"])
                 return False, f["reason"]
             tr.status = "approved"
-            tr.approved_wall = time.monotonic()
+            tr.approved_wall = simclock.now()
             self._announce(tr, tr.level)
             self.event("approved", threat=threat_id, tti_s=f["tti_s"], available_s=f["available_s"])
             return True, "approved"
@@ -332,15 +340,25 @@ class Ship:
         order = Threat(tr.threat_id, tr.type, tr.level, required, _xyz(tr.point), tr.t_engage)
         self.pub_orders.put(json.dumps({"wave_id": f"O{self.order_seq}", "threats": [order.to_dict()]}))
         tr.announces += 1
-        tr.last_announce = time.monotonic()
+        tr.last_announce = simclock.now()
+
+    def _engaged_by_heartbeat(self, tr):
+        """Roster members whose latest heartbeat says they are engaging this threat."""
+        return {d for d in self.members()
+                if self.drones[d]["hb"].get("threat_id") == tr.threat_id
+                and self.drones[d]["hb"].get("state") in ("engaging", "on_station")}
 
     def _retry_underassigned(self, now):
         for tr in self.tracks.values():
             if tr.status != "approved" or tr.announces >= MAX_ANNOUNCES:
                 continue
-            assigned = len(tr.holders | set(tr.detonated))
+            if simclock.now() - tr.last_announce < RETRY_AFTER_S:
+                continue
+            # A lost award must not trigger a re-announce (and a second drone) when the
+            # drone's heartbeats show it engaging, so count those too.
+            assigned = len(tr.holders | set(tr.detonated) | self._engaged_by_heartbeat(tr))
             missing = tr.level - assigned
-            if missing <= 0 or time.monotonic() - tr.last_announce < RETRY_AFTER_S:
+            if missing <= 0:
                 continue
             if tr.t_engage - now <= ORDER_SLACK_S:
                 continue
@@ -358,7 +376,7 @@ class Ship:
                         self._maybe_detect(now)
                     self._age_tracks(now)
                     self._retry_underassigned(now)
-                wall = time.monotonic()
+                wall = simclock.now()
                 if wall - last_roster >= 1.0 / ROSTER_HZ:
                     last_roster = wall
                     members = self.members()
@@ -370,7 +388,7 @@ class Ship:
                         self.rx_counts.clear()
                         self.rx_bytes.clear()
                         self._rx_window_start = wall
-            time.sleep(0.1)
+            simclock.sleep(0.1)
 
     # ------------------------------------------------------------ snapshot
     def _agreement(self, tr):
@@ -417,7 +435,7 @@ class Ship:
     def snapshot(self):
         with self.lock:
             now = self.sim_time
-            wall = time.monotonic()
+            wall = simclock.now()
             threats = []
             order = self.queue.ordered()
             closed = [t for t in self.tracks.values() if not t.active]

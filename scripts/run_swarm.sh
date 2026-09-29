@@ -46,6 +46,11 @@ while [[ $# -gt 0 ]]; do
       export RADIO_QOS="$2"
       shift 2
       ;;
+    --rtf)
+      # Real-time factor: run the simulation (and the swarm's protocol clocks) this many times faster.
+      export SIM_RTF="$2"
+      shift 2
+      ;;
     --build)
       BUILD_FLAG="--build"
       COMPOSE_ARGS+=("$1")
@@ -86,6 +91,9 @@ fi
 export MAX_THREATS THREAT_INTERVAL_S THREAT_FIRST_S THREAT_SEED="$SEED"
 if [[ "$MAX_THREATS" -gt 0 ]]; then
   echo "Ship radar: ${MAX_THREATS} threats, first after ${THREAT_FIRST_S}s, then every ~${THREAT_INTERVAL_S}s (sim time)"
+fi
+if [[ -n "${SIM_RTF:-}" && "${SIM_RTF}" != "1" ]]; then
+  echo "Simulation runs at ${SIM_RTF}x real time"
 fi
 echo "Operator dashboard: http://localhost:8080"
 

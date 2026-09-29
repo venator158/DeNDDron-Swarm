@@ -36,6 +36,7 @@ services:
     container_name: gazebo_simulator
     environment:
       ZENOH_ROUTER_IP: tcp/sim_bus:7447
+      SIM_RTF: ${SIM_RTF:-1}
       GAZEBO_RESOURCE_PATH: /usr/share/gazebo-11:/home/app/sim
       SWARM_RUNTIME_CONFIG: /home/app/config/swarm_runtime.json
       DISPLAY: ${DISPLAY:-:0}
@@ -68,6 +69,7 @@ services:
       SIM_BUS: tcp/sim_bus:7447
       RADIO_SUBNET: 172.21.0.0/16
       RADIO_QOS: ${RADIO_QOS:-default}
+      SIM_RTF: ${SIM_RTF:-1}
       SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
       AGENT_ID_REGISTRY: /app/config/agent_registry.json
     # exec so SIGTERM reaches python and the agent shuts down cleanly
@@ -105,6 +107,7 @@ services:
       SIM_BUS: tcp/sim_bus:7447
       RADIO_SUBNET: 172.21.0.0/16
       RADIO_QOS: ${RADIO_QOS:-default}
+      SIM_RTF: ${SIM_RTF:-1}
       SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
       MAX_THREATS: ${MAX_THREATS:-0}
       THREAT_INTERVAL_S: ${THREAT_INTERVAL_S:-30}

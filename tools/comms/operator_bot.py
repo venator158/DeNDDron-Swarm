@@ -1,7 +1,9 @@
 """Stand-in operator for unattended runs: through the dashboard API, approves every feasible threat,
 most urgent (smallest TCPA) first, after a human-like reaction delay.
 
-    python3 tools/comms/operator_bot.py [reaction_s=3] [duration_s=400]
+    python3 tools/comms/operator_bot.py [reaction_s=3] [duration_s=400] [poll_s=1]
+
+All three are wall seconds; the sweep divides them by the sim's real-time factor.
 """
 import json
 import sys
@@ -11,6 +13,7 @@ import urllib.request
 URL = "http://localhost:8080"
 REACTION_S = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
 DURATION_S = float(sys.argv[2]) if len(sys.argv) > 2 else 400.0
+POLL_S = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
 
 first_feasible = {}
 done = set()
@@ -41,4 +44,4 @@ while time.time() < t_end:
                   f"TTI {f['tti_s']}s / {f['available_s']}s): {resp}", flush=True)
             done.add(tid)
             break   # one approval per poll, most urgent first
-    time.sleep(1)
+    time.sleep(POLL_S)

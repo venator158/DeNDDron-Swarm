@@ -158,6 +158,24 @@ class TestAuctionManager(unittest.TestCase):
         m.on_withdraw("M", "d1")
         self.assertFalse(m.on_award("M", "d2", 2.0))
 
+    def test_award_heard_before_close_prevents_taking_threat(self):
+        # d3 missed d4's better bid, but d4's award arrived before d3's window closed.
+        m3 = AuctionManager("d3")
+        m3.on_wave("W1", [T("M", 1)], now=0.0)
+        m3.on_bid("W1", "d3", {"M": 22.6})
+        self.assertFalse(m3.on_award("M", "d4", 16.3))   # recorded; d3 holds nothing yet
+        r = m3.close_due(now=1.0)[0]
+        self.assertEqual(r.assignment, {"M": ["d3"]})     # its (stale) view of the auction
+        self.assertIsNone(r.my_threat)
+        self.assertIsNone(m3.held)
+
+    def test_worse_award_heard_before_close_does_not_block(self):
+        m = AuctionManager("d1")
+        m.on_wave("W1", [T("M", 1)], now=0.0)
+        m.on_bid("W1", "d1", {"M": 5.0})
+        m.on_award("M", "d2", 9.0)
+        self.assertEqual(m.close_due(now=1.0)[0].my_threat.threat_id, "M")
+
     def test_invalid_window_rejected(self):
         with self.assertRaises(ValueError):
             AuctionManager("d1", bid_window_s=0)

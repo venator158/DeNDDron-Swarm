@@ -2,12 +2,15 @@
 
 Everything is windowed: ``snapshot()`` reports the interval since the last
 snapshot and starts a new window, so the numbers are live rates and latencies
-rather than lifetime averages.
+rather than lifetime averages.  Radio rates are per simulated second (comparable at any
+SIM_RTF); loop timing and CPU are real time.
 """
 
 import threading
 import time
 from collections import defaultdict
+
+import simclock
 
 
 def _pct(values, q):
@@ -69,6 +72,7 @@ class Telemetry:
         wall, cpu = time.monotonic(), time.process_time()
         with self._lock:
             span = max(1e-6, wall - self._wall0)
+            sim_span = span * simclock.RTF
             ms = lambda v: None if v is None else round(v * 1000.0, 2)
             out = {
                 "window_s": round(span, 2),
@@ -82,9 +86,9 @@ class Telemetry:
                 "sensor_age_max_ms": ms(max(self._sensor_ages) if self._sensor_ages else None),
                 "perception_p99_ms": ms(_pct(self._perception, 0.99)),
                 "planner_p99_ms": ms(_pct(self._planner, 0.99)),
-                "rx_per_s": {k: round(v / span, 1) for k, v in self._rx.items()},
-                "tx_per_s": {k: round(v / span, 1) for k, v in self._tx.items()},
-                "tx_bytes_per_s": round(self._tx_bytes / span),
+                "rx_per_s": {k: round(v / sim_span, 1) for k, v in self._rx.items()},
+                "tx_per_s": {k: round(v / sim_span, 1) for k, v in self._tx.items()},
+                "tx_bytes_per_s": round(self._tx_bytes / sim_span),
             }
             self._reset(wall, cpu)
         return out
