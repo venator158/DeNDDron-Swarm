@@ -106,7 +106,7 @@ The assigned drones take up slots 4 m apart around that point and **detonate at 
   - Integrates the drones' motion from `cmd_vel`.
   - Publishes pose at 50 Hz and a compact 32-ray planar lidar at 10 Hz.
   - Publishes the sim clock at 10 Hz.
-  - Moves threat markers along the ship's tracks.
+  - Moves threat models along the ship's tracks, nose along the direction of flight: a fixed-wing UAV (yellow), a finned missile (orange), a longer winged cruise missile (red). Drones are quadcopters in their swarm colour. All shapes are visual-only primitives, so they add no physics load.
   - Despawns drones for good when they detonate.
   - Gazebo reports sim time only every 0.2 s, so the bridge extrapolates between updates using the observed real-time factor.
 - **Ship** (`src/ship/ship.py`): radar simulation, threat queue, roster, feasibility, orders, kill assessment, instrumentation aggregation, and the dashboard (`dashboard.html`).
@@ -215,8 +215,9 @@ Where each implemented feature lives.
 | **Simulator** | Gazebo bridge: kinematic integration from `cmd_vel`, spawn/despawn | `sim/GazeboSimulator.cpp/.hpp`, `sim/simulator_main.cpp` |
 | | sim clock extrapolated between Gazebo's 5 Hz stats; pose 50 Hz, lidar 10 Hz | `GazeboSimulator.cpp` (`estimated_sim_time`, `step`) |
 | | planar 32-ray lidar (ship + other drones), compact scan | `GazeboSimulator.cpp` (`simulate_lidar`) |
-| | threat markers from the ship's tracks | `GazeboSimulator.cpp` (`on_threat_track`, `move_threat_markers`) |
-| | world: ocean, ship, lighting | `sim/ocean.world` |
+| | threat models (by type) moved along the ship's tracks | `GazeboSimulator.cpp` (`generate_threat_sdf`, `on_threat_track`, `move_threat_markers`) |
+| | quadcopter drone model; model deletion (despawn, destroyed threats) | `GazeboSimulator.cpp` (`generate_drone_sdf`, `delete_model`) |
+| | world: ocean, lighting, frigate (~31 m, sized to the simulator's 16 m ship radius) | `sim/ocean.world` |
 | **Links** | onboard bus (router) and radio (peer-to-peer) session config | `src/common/links.py` |
 | | radio in a separate OS process | `src/common/radio_process.py` |
 | **Threat model** | threat types and levels, CPA/TCPA, engagement point, slots, ETA, TTI | `src/common/threats.py` |
@@ -315,7 +316,6 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 
 ## Known limitations
 - **Healthy drones can lose radio receive for ~7 s while a peer is jammed.** See [Degraded communications](#degraded-communications).
-- **Threats don't move in Gazebo.** They move on the dashboard map and in the simulation's own maths, but the Gazebo markers are static models, which ignore pose updates. Drones, the ship and threats are still simple shapes.
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
 - **Shared simulation clock.** Detonation times use the simulator's clock, which every node shares. A distributed clock is future work.
 - **Idealized threats.** They fly straight lines at constant speed, and a detonation within the kill radius always kills (no kill probability).

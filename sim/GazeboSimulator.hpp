@@ -31,6 +31,8 @@ private:
     gazebo::transport::NodePtr _gznode;
     gazebo::transport::PublisherPtr _factory_pub;  // For spawning models
     gazebo::transport::PublisherPtr _physics_pub;  // For applying forces to models
+    gazebo::transport::PublisherPtr _request_pub;  // Persistent ~/request publisher (entity_delete)
+    void delete_model(const std::string& name);
     gazebo::transport::SubscriberPtr _stats_sub;   // For receiving simulation time
     // Gazebo publishes world_stats at only ~5 Hz, so sim time is extrapolated
     // between messages with the observed real-time factor (guarded by _state_mtx).

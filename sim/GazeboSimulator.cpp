@@ -34,6 +34,11 @@ void GazeboSimulator::init() {
     _factory_pub->WaitForConnection();
 
     _physics_pub = _gznode->Advertise<gazebo::msgs::Model>("~/model/modify");
+
+    // One connected publisher for deletions: transport::requestNoReply() advertises a new
+    // publisher per call and its first message is lost before the connection is up.
+    _request_pub = _gznode->Advertise<gazebo::msgs::Request>("~/request");
+    _request_pub->WaitForConnection();
     
     _stats_sub = _gznode->Subscribe("~/world_stats", &GazeboSimulator::on_world_stats, this);
 
@@ -200,16 +205,23 @@ void GazeboSimulator::apply_pending_despawns() {
     }
     for (const auto& id : ids) {
         if (_gznode) {
-            gazebo::transport::requestNoReply(_gznode, "entity_delete", id);
-            gazebo::transport::requestNoReply(_gznode, "entity_delete", id + "_goal");
+            delete_model(id);
+            delete_model(id + "_goal");
         }
         std::cout << "[GazeboSimulator] Despawned drone: " << id << std::endl;
     }
     for (const auto& name : models) {
         if (_gznode) {
-            gazebo::transport::requestNoReply(_gznode, "entity_delete", name);
+            delete_model(name);
         }
     }
+}
+
+void GazeboSimulator::delete_model(const std::string& name) {
+    if (!_request_pub) return;
+    gazebo::msgs::Request* req = gazebo::msgs::CreateRequest("entity_delete", name);
+    _request_pub->Publish(*req);
+    delete req;
 }
 
 void GazeboSimulator::on_threat_track(const zenoh::Sample& sample) {
@@ -256,52 +268,101 @@ void GazeboSimulator::on_threat_track(const zenoh::Sample& sample) {
 
 void GazeboSimulator::move_threat_markers(double sim_time) {
     if (!_physics_pub) return;
-    std::vector<std::pair<std::string, ignition::math::Vector3d>> poses;
+    struct MarkerPose { std::string name; ignition::math::Vector3d p; double yaw; };
+    std::vector<MarkerPose> poses;
     {
         std::lock_guard<std::mutex> lock(_state_mtx);
         for (const auto& [id, m] : _threat_markers) {
-            poses.emplace_back("threat_" + id, m.p0 + m.v * (sim_time - m.t0));
+            poses.push_back({"threat_" + id, m.p0 + m.v * (sim_time - m.t0), std::atan2(m.v.Y(), m.v.X())});
         }
     }
-    for (const auto& [name, p] : poses) {
+    for (const auto& mp : poses) {
         gazebo::msgs::Model msg;
-        msg.set_name(name);
+        msg.set_name(mp.name);
         gazebo::msgs::Vector3d* pos = msg.mutable_pose()->mutable_position();
-        pos->set_x(p.X());
-        pos->set_y(p.Y());
-        pos->set_z(p.Z());
+        pos->set_x(mp.p.X());
+        pos->set_y(mp.p.Y());
+        pos->set_z(mp.p.Z());
+        // Nose (+x of the model) along the direction of flight.
         gazebo::msgs::Quaternion* rot = msg.mutable_pose()->mutable_orientation();
-        rot->set_w(1.0);
+        rot->set_x(0.0);
+        rot->set_y(0.0);
+        rot->set_z(std::sin(mp.yaw / 2.0));
+        rot->set_w(std::cos(mp.yaw / 2.0));
         _physics_pub->Publish(msg);
     }
 }
 
+namespace {
+// One SDF <visual>: geometry XML, pose "x y z roll pitch yaw", colour, optional glow/transparency.
+std::string sdf_visual(const std::string& name, const std::string& geometry, const std::string& pose,
+                       double r, double g, double b, double glow = 0.0, double transparency = 0.0) {
+    std::stringstream v;
+    v << "<visual name='" << name << "'><pose>" << pose << "</pose><geometry>" << geometry << "</geometry>"
+      << "<material><ambient>" << r << " " << g << " " << b << " 1</ambient>"
+      << "<diffuse>" << r << " " << g << " " << b << " 1</diffuse>"
+      << "<emissive>" << r * glow << " " << g * glow << " " << b * glow << " 1</emissive></material>";
+    if (transparency > 0.0) v << "<transparency>" << transparency << "</transparency>";
+    v << "</visual>";
+    return v.str();
+}
+std::string box(double x, double y, double z) {
+    std::stringstream g;
+    g << "<box><size>" << x << " " << y << " " << z << "</size></box>";
+    return g.str();
+}
+std::string cyl(double r, double l) {
+    std::stringstream g;
+    g << "<cylinder><radius>" << r << "</radius><length>" << l << "</length></cylinder>";
+    return g.str();
+}
+std::string sph(double r) {
+    std::stringstream g;
+    g << "<sphere><radius>" << r << "</radius></sphere>";
+    return g.str();
+}
+// SDF cylinders are built along z; appending this to a pose lays one along x.
+const std::string ALONG_X = " 0 1.5708 0";
+}  // namespace
+
 std::string GazeboSimulator::generate_threat_sdf(const std::string& threat_id, const std::string& type,
                                                  int level, double x, double y, double z) {
-    // Red, larger for higher threat levels; tint by type so types are distinguishable.
-    double r = 1.0, g = 0.1, b = 0.1;
-    if (type == "uav") { g = 0.8; }            // yellow
-    else if (type == "missile") { g = 0.45; }  // orange
-    const double radius = 0.6 + 0.4 * level;
+    // Visual-only primitives (no collision, no physics cost), drawn ~1.5x real size so they stay
+    // visible at 200 m. Nose points along +x; move_threat_markers yaws the model along its track.
+    // The link is kinematic, not static: Gazebo ignores ~/model/modify pose updates on static models.
+    std::stringstream v;
+    if (type == "uav") {                       // fixed-wing drone, yellow
+        const double r = 1.0, g = 0.85, b = 0.15;
+        v << sdf_visual("fuselage", cyl(0.18, 2.2), "0 0 0" + ALONG_X, r, g, b, 0.4)
+          << sdf_visual("wing", box(0.5, 3.2, 0.06), "0.2 0 0 0 0 0", r, g, b, 0.4)
+          << sdf_visual("tailplane", box(0.3, 1.0, 0.05), "-1.0 0 0 0 0 0", r, g, b, 0.4)
+          << sdf_visual("fin", box(0.3, 0.05, 0.5), "-1.0 0 0.25 0 0 0", r, g, b, 0.4)
+          << sdf_visual("prop", cyl(0.35, 0.04), "1.15 0 0" + ALONG_X, 0.1, 0.1, 0.1, 0.0, 0.3);
+    } else if (type == "missile") {            // finned missile, orange
+        const double r = 1.0, g = 0.5, b = 0.1;
+        v << sdf_visual("body", cyl(0.22, 3.4), "0 0 0" + ALONG_X, r, g, b, 0.4)
+          << sdf_visual("nose", sph(0.22), "1.7 0 0 0 0 0", 0.9, 0.9, 0.9, 0.2)
+          << sdf_visual("fins_v", box(0.5, 0.04, 0.9), "-1.45 0 0 0 0 0", r, g, b, 0.4)
+          << sdf_visual("fins_h", box(0.5, 0.9, 0.04), "-1.45 0 0 0 0 0", r, g, b, 0.4)
+          << sdf_visual("exhaust", sph(0.25), "-1.85 0 0 0 0 0", 1.0, 0.9, 0.3, 1.0, 0.2);
+    } else {                                   // cruise missile (or unknown type), red, longer, winged
+        const double r = 0.95, g = 0.15, b = 0.1;
+        v << sdf_visual("body", cyl(0.28, 5.2), "0 0 0" + ALONG_X, r, g, b, 0.4)
+          << sdf_visual("nose", sph(0.28), "2.6 0 0 0 0 0", 0.9, 0.9, 0.9, 0.2)
+          << sdf_visual("wings", box(0.6, 2.6, 0.05), "0.2 0 0 0 0 0", r, g, b, 0.4)
+          << sdf_visual("fins_v", box(0.5, 0.04, 1.0), "-2.35 0 0 0 0 0", r, g, b, 0.4)
+          << sdf_visual("fins_h", box(0.5, 1.0, 0.04), "-2.35 0 0 0 0 0", r, g, b, 0.4)
+          << sdf_visual("exhaust", sph(0.3), "-2.75 0 0 0 0 0", 1.0, 0.9, 0.3, 1.0, 0.2);
+    }
+    (void)level;   // the type already encodes the level; shape and colour identify it
 
     std::stringstream sdf;
-    sdf << "<?xml version='1.0'?>"
-        << "<sdf version='1.6'>"
-        << "  <model name='threat_" << threat_id << "'>"
-        << "    <static>true</static>"
-        << "    <pose>" << x << " " << y << " " << z << " 0 0 0</pose>"
-        << "    <link name='link'>"
-        << "      <visual name='visual'>"
-        << "        <geometry><sphere><radius>" << radius << "</radius></sphere></geometry>"
-        << "        <material>"
-        << "          <ambient>" << r << " " << g << " " << b << " 1.0</ambient>"
-        << "          <diffuse>" << r << " " << g << " " << b << " 1.0</diffuse>"
-        << "          <emissive>" << r * 0.6 << " " << g * 0.6 << " " << b * 0.6 << " 1.0</emissive>"
-        << "        </material>"
-        << "      </visual>"
-        << "    </link>"
-        << "  </model>"
-        << "</sdf>";
+    sdf << "<?xml version='1.0'?><sdf version='1.6'>"
+        << "<model name='threat_" << threat_id << "'>"
+        << "<pose>" << x << " " << y << " " << z << " 0 0 0</pose>"
+        << "<link name='base'><kinematic>1</kinematic><gravity>0</gravity>"
+        << v.str()
+        << "</link></model></sdf>";
     return sdf.str();
 }
 
@@ -381,13 +442,15 @@ std::string GazeboSimulator::generate_drone_sdf(const std::string& agent_id, dou
         << "      <collision name='collision'>"
         << "        <geometry><sphere><radius>1.25</radius></sphere></geometry>"
         << "      </collision>"
-        << "      <visual name='visual'>"
-        << "        <geometry><sphere><radius>1.25</radius></sphere></geometry>"
-        << "        <material>"
-        << "          <ambient>" << r << " " << g << " " << b << " 1.0</ambient>"
-        << "          <diffuse>" << r << " " << g << " " << b << " 1.0</diffuse>"
-        << "        </material>"
-        << "      </visual>"
+        // Quadcopter, ~2 m across (drawn larger than a real small drone so it stays visible):
+        // body in the swarm colour, two crossed arms, four translucent rotor discs.
+        << sdf_visual("body", box(0.7, 0.7, 0.25), "0 0 0 0 0 0", r, g, b, 0.2)
+        << sdf_visual("arm_a", box(2.0, 0.1, 0.08), "0 0 0.05 0 0 0.7854", 0.2, 0.2, 0.22)
+        << sdf_visual("arm_b", box(2.0, 0.1, 0.08), "0 0 0.05 0 0 -0.7854", 0.2, 0.2, 0.22)
+        << sdf_visual("rotor_1", cyl(0.42, 0.03), "0.707 0.707 0.12 0 0 0", 0.05, 0.05, 0.05, 0.0, 0.4)
+        << sdf_visual("rotor_2", cyl(0.42, 0.03), "-0.707 0.707 0.12 0 0 0", 0.05, 0.05, 0.05, 0.0, 0.4)
+        << sdf_visual("rotor_3", cyl(0.42, 0.03), "-0.707 -0.707 0.12 0 0 0", 0.05, 0.05, 0.05, 0.0, 0.4)
+        << sdf_visual("rotor_4", cyl(0.42, 0.03), "0.707 -0.707 0.12 0 0 0", 0.05, 0.05, 0.05, 0.0, 0.4)
         << "    </link>"
         << "  </model>"
         << "</sdf>";
