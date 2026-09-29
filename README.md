@@ -1,15 +1,18 @@
 # DeNDDron Swarm
 
-**De**centralized **N**aval **D**efence **Dron**e swarm. Drones hold station around a ship and, when threats appear, decide among themselves which drones intercept which threats. There is no central controller. Drones are expendable: each one is destroyed when it intercepts a threat.
+**De**centralized **N**aval **D**efence **Dron**e swarm. Expendable drones hold station around a ship. The ship's radar reports incoming threats, and the operator approves each interception on a live dashboard. The drones then decide among themselves which of them engage. The assigned drones fly to the engagement point, wait there, and detonate at the allocated time.
 
-The simulation runs in Gazebo. Every drone runs as its own Python agent in its own container, and all components talk over Zenoh.
+The simulation runs in Gazebo. Every drone is its own Python agent in its own container. The drones and the ship talk peer-to-peer over Zenoh, with no central router.
 
 This README is the project's only documentation. Keep it up to date when behaviour changes.
 
 ## Contents
 - [Quick start](#quick-start)
-- [Threat engagement](#threat-engagement)
+- [Operator workflow](#operator-workflow)
 - [Architecture](#architecture)
+- [Engagement protocol](#engagement-protocol)
+- [Degraded communications](#degraded-communications)
+- [Instrumentation](#instrumentation)
 - [Agent internals](#agent-internals)
 - [Configuration](#configuration)
 - [Testing](#testing)
@@ -18,226 +21,257 @@ This README is the project's only documentation. Keep it up to date when behavio
 
 ## Quick start
 
-Requirements: Docker with Compose v2, and an X11 display if you want the Gazebo window.
+Requirements: Docker with Compose v2, and an X11 display for the Gazebo window.
 
 ```bash
-# 3 drones flying to static goals (basic navigation check)
-bash scripts/run_swarm.sh 3
-
-# Naval defence scenario: 8 drones, 5 waves of up to 4 threats, one wave every 20 s
-bash scripts/run_swarm.sh 8 --threats 5 --threats-per-wave 4 --threat-interval 20
+xhost +local:docker                                   # let containers open windows
+bash scripts/run_swarm.sh 8 --threats 6               # 8 drones, radar generates 6 threats
+# operator dashboard:  http://localhost:8080
+docker exec -it gazebo_simulator gzclient             # optional: 3D view
+docker compose down                                   # stop (every service shuts down cleanly)
 ```
 
-The first run builds the images, which takes several minutes. Later runs reuse them. Add `--build` after changing code.
+The first run builds the images, which takes several minutes. Add `--build` after changing code.
 
 | Option | Default | Meaning |
 |---|---|---|
 | `N` (first argument) | 3 | number of drones |
+| `--threats K` | 0 (radar off) | threats the ship's radar generates; drones get no static goals |
+| `--threat-interval S` | 30 | mean sim seconds between detections |
+| `--first-threat S` | 20 | sim seconds before the first detection |
+| `--radio-routing linkstate\|peer_to_peer` | `linkstate` | Zenoh routing on the radio network |
 | `--algorithm orca\|apf` | `orca` | path planner |
-| `--seed S` | 42 | seed for spawn layout and threat generation |
-| `--threats WAVES` | 0 (off) | enable the threat dispatcher with this many waves |
-| `--threats-per-wave K` | 4 | at most K threats per wave (the actual number is random, from 1 to K) |
-| `--threat-interval S` | 15 | wall-clock seconds between waves |
-| `--build` | off | rebuild the Docker images |
-| `THREAT_MIX` env | `uav:1:0.5,missile:2:0.35,cruise_missile:3:0.15` | threat types as `type:level:weight` |
+| `--seed S` | 42 | spawn layout and threat scenario |
+| `--build` | off | rebuild the images |
 
-The launcher does four things:
-1. It generates `config/swarm_runtime.json`, which holds spawn points and planner/kinematics defaults.
-2. It writes `.swarm.env`.
-3. It resets the drone-ID registry.
-4. It runs `docker compose up --scale agent=N`.
+Radar environment variables (ship): `THREAT_TYPES` (`type:level:speed:weight,...`), `DETECT_MIN_M`/`DETECT_MAX_M` (150/190), `MAX_MISS_M` (30), `DEFENDED_RADIUS_M` (45), `KILL_RADIUS_M` (8).
 
-In threat mode, drones get no static goals.
+With no `--threats`, drones fly to the static goals in `config/swarm_runtime.json`. That is a basic navigation check.
 
-### Watching the simulation
+## Operator workflow
 
-```bash
-xhost +local:docker                            # let containers open windows on your display
-bash scripts/run_swarm.sh 8 --threats 5        # in one terminal
-docker exec -it gazebo_simulator gzclient      # in another: opens the Gazebo window
-```
+The dashboard is at `http://localhost:8080`. It is served by the ship and updates 4 times a second.
 
-In the window, threats show up as glowing spheres when they are dispatched: yellow for a UAV, orange for a missile, red for a cruise missile, larger for higher levels. Each sphere disappears once the threat is neutralized. Drones vanish when they are expended. Unengaged threats are never dispatched, so they are not drawn. Set `THREAT_INITIAL_DELAY_S` (default 25) to get more time to open the window before the first wave.
+1. **Detection.** When the radar picks up a threat, the threat appears on the tactical map and in the **threat queue**. The queue is a min-heap ordered by TCPA (time to closest point of approach), so the most urgent threat is always on top. Each row shows:
+   - type and level;
+   - TCPA, and CPA distance from the ship;
+   - time until the engagement point is reached;
+   - **TTI(L)**: how long the `L` nearest free drones need to get there.
+2. **Feasibility.** A threat can be approved only if both hold:
+   - at least `level` drones are free;
+   - `TTI(level) + 2 s slack < time until engagement`.
 
-To follow individual services:
+   Otherwise the Approve button is disabled and the reason is shown.
+3. **Approval.** The operator selects the threat and approves it. The ship re-checks feasibility at that moment and sends the engagement order to the swarm.
+4. **Engagement.** The swarm assigns drones itself. The map draws each engaged drone's line to its engagement point. The event log records: detected, approved, engaged, detonation (with miss distance), and then destroyed, leaked or impact.
 
-```bash
-docker compose logs -f threat_dispatcher       # waves, admissions, intercepts, final summary
-docker compose logs -f metrics_node            # live dashboard: positions, speed, distance, collisions
-docker compose logs -f agent                   # all drones
-docker compose down                            # stop everything
-```
+Threat levels are both priority and the number of drones needed:
 
-## Threat engagement
+| Type | Level | Speed |
+|---|---|---|
+| `uav` | 1 | 2.5 m/s |
+| `missile` | 2 | 3.5 m/s |
+| `cruise_missile` | 3 | 4.5 m/s |
 
-### Threat levels
-Every threat has a **level**. The level is both its priority and the number of drones needed to intercept it.
+Speeds are scaled to the drones' 4 m/s.
 
-| Type | Level (drones needed) |
-|---|---|
-| `uav` | 1 |
-| `missile` | 2 |
-| `cruise_missile` | 3 |
+### Engagement geometry
+The ship reports each threat as a straight-line track with its CPA and TCPA. The drones intercept at the **engagement point**:
+- the CPA, if the threat passes outside the defended radius (45 m);
+- otherwise, the point where the track first crosses the defended radius. A threat aimed at the ship has its CPA on the ship itself, so intercepting there would be too late.
 
-### Rules
-1. **Never commit more drones than exist.** The dispatcher only engages threats while the sum of their levels fits within the free drones:
-
-   `committed ≤ alive`
-
-   Here, *committed* means drones already engaged plus drones still owed to open threats, and *alive* counts drones that have not been expended. Threats are considered highest level first. A threat that doesn't fit is reported as **unengaged** and never dispatched.
-2. **All or nothing.** The swarm itself also refuses a threat it cannot fully cover. If fewer free drones bid than the threat needs, no drone engages it, and those drones stay free for lower-priority threats.
-3. **Expendable drones.** A drone that reaches its threat intercepts it and is despawned permanently. The simulator removes its model and never respawns it.
-
-### Allocation protocol
-The protocol is decentralized. It lives in `src/agent/auction.py`.
-
-1. The dispatcher publishes a **wave** of threats on `swarm/threats`.
-2. Each free drone publishes one bid on `swarm/bids`. The bid lists its cost, the straight-line distance, for every threat in the wave.
-3. After a short bid window (`auction.bid_window_s`, default 1 s of sim time), every drone independently runs the same deterministic assignment:
-   - threats are taken highest level first, with ties broken by threat ID;
-   - each threat takes its `level` cheapest unassigned drones, with ties broken by drone ID, or no drones at all if it cannot be fully covered;
-   - each drone is assigned to at most one threat.
-
-   Drones that received the same bids therefore compute the same answer without talking to each other.
-4. Each assigned drone publishes an award (`status: engaged`) on `swarm/awards` and flies to the threat.
-5. **Conflict repair.** Drones may see different bids, for example after a lost message. If a threat ends up with more drones than its level, a drone backs off (`status: withdrawn`) once it sees `level` drones with better bids.
-6. **Re-announcement.** If a threat is left short of drones, the dispatcher re-announces it for just the missing number. After `--max-announces` attempts it abandons the threat.
-7. **Interception.** On arrival, the drone publishes to `swarm/intercepts` and `swarm/agents/despawn`, then shuts down its control loop. The process stays up so the container does not restart and respawn it.
-
-A drone that is already engaged, or that is waiting for another wave's result, does not bid.
-
-### Dispatcher summary
-At the end of a run the dispatcher prints a summary like this:
-
-```
-SUMMARY (all waves resolved): 5 waves, 11 threats generated
-  engaged=5 neutralized=5 abandoned=0 unengaged(no budget)=6
-  drones expended=8 alive at end=0 peak committed=3
-  invariant (committed <= alive) violations=0, threats with more drones than level=0
-```
-
-The dispatcher exits with code 0 only if there were no invariant violations, no over-assigned threats and no abandoned threats.
+The assigned drones take up slots 4 m apart around that point and **detonate at the allocated time**, the moment the threat arrives. The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
 
 ## Architecture
 
 ```
-                         Zenoh router (tcp/udp 7447)
-   ┌────────────────────────────┼─────────────────────────────────┐
-   │                            │                                 │
-Gazebo simulator (C++)     Agent × N (Python)             Threat dispatcher (Python, optional)
- - integrates drone motion  - voxel map from lidar         - generates waves, enforces the budget
- - 32-ray planar lidar      - APF / ORCA planner           - tracks liveness, awards, intercepts
- - spawns / despawns models - 50 Hz control loop          Metrics node (Python)
-                            - bids, engages, intercepts    - distance, speed, collisions
+                 sim_net (Zenoh router "sim_bus")              radio_net (peer-to-peer, no router)
+                 = each drone's own sensors/actuators          = all communications
+  ┌──────────────────┐   sensors 50 Hz, lidar 10 Hz   ┌──────────┐   heartbeats, orders,   ┌──────────┐
+  │ Gazebo simulator │ ─────────────────────────────▶ │ drone ×N │ ◀────bids, awards─────▶ │ drone ×N │
+  │ (C++ bridge)     │ ◀──── cmd_vel, detonation ──── │ (Python) │                         └──────────┘
+  │                  │ ── sim clock ──┐                └──────────┘                              ▲
+  │                  │ ◀─ tracks ──┐  │                      ▲ roster, orders    heartbeats,     │
+  └──────────────────┘             │  ▼                      │                   telemetry       │
+                                 ┌─────────────────────────────┐                                 │
+                                 │ ship: radar, C2, dashboard  │ ────────────────────────────────┘
+                                 └─────────────────────────────┘   metrics node: sim_net observer
 ```
 
-The simulator (`sim/GazeboSimulator.cpp`) runs next to `gzserver` (world: `sim/ocean.world`). It does its own kinematic integration from the velocity commands, and uses Gazebo for visualisation. The ship is modelled as a cylinder at the origin: radius 16 m for the lidar, and a 17.5 m keep-out in the physics.
+- **Two links per node** (`src/common/links.py`).
+  - The *onboard bus* goes through a Zenoh router on `sim_net`. It stands in for a drone's own wiring (sensors, actuators, detonation), and for the ship's radar truth. It is not communications.
+  - The *radio* runs peer-to-peer on `radio_net`. Peers find each other by multicast scouting on the radio interface and connect directly. Routing defaults to `linkstate`, so peers relay for each other.
+  - Degrading `radio_net` degrades only the communications. The physics keeps working.
+- **Simulator** (`sim/GazeboSimulator.cpp`).
+  - Integrates the drones' motion from `cmd_vel`.
+  - Publishes pose at 50 Hz and a compact 32-ray planar lidar at 10 Hz.
+  - Publishes the sim clock at 10 Hz.
+  - Moves threat markers along the ship's tracks.
+  - Despawns drones for good when they detonate.
+  - Gazebo reports sim time only every 0.2 s, so the bridge extrapolates between updates using the observed real-time factor.
+- **Ship** (`src/ship/ship.py`): radar simulation, threat queue, roster, feasibility, orders, kill assessment, instrumentation aggregation, and the dashboard (`dashboard.html`).
+- **Drones** (`src/agent/`): perception, planning, the 50 Hz control loop, decentralized allocation, heartbeat and telemetry.
 
-### Zenoh topics
+### Topics
 
-| Topic | Publisher → Subscriber | Payload |
-|---|---|---|
-| `swarm/agents/join` | agent → simulator, metrics | `{agent_id, type}` — spawn this drone |
-| `swarm/agents/despawn` | agent → simulator, metrics | `{agent_id, reason, threat_id?}` — remove this drone |
-| `drone/{id}/sensors` | simulator → agent, metrics, dispatcher | `{sim_time, pose{x,y,z,yaw,vx,vy,vz}, lidar[{angle,distance,intensity}]}` at 50 Hz |
-| `swarm/{id}/cmd_vel` | agent → simulator | `{linear{x,y,z}, angular{x,y,z}}` |
-| `swarm/threats` | dispatcher → agents | `{wave_id, threats[{threat_id, type, level, required, location}]}` |
-| `swarm/bids` | agent → agents | `{agent_id, wave_id, costs{threat_id: cost}}` |
-| `swarm/awards` | agent → agents, dispatcher | `{threat_id, agent_id, cost, status: engaged\|withdrawn}` |
-| `swarm/intercepts` | agent → dispatcher | `{threat_id, agent_id, sim_time}` |
-| `swarm/metrics/summary` | metrics → anyone | swarm summary every 5 s |
+| Topic | Link | Direction | Payload |
+|---|---|---|---|
+| `drone/{id}/sensors` | onboard | sim → drone, metrics | `{sim_time, pose, lidar?{angle_step, ranges[], hits[]}}` |
+| `swarm/{id}/cmd_vel` | onboard | drone → sim | `{linear, angular}` |
+| `swarm/agents/join`, `swarm/agents/despawn` | onboard | drone → sim, metrics | spawn / remove this drone |
+| `sim/clock` | onboard | sim → ship | `{sim_time}` at 10 Hz |
+| `sim/detonation` | onboard | drone → ship | `{agent_id, threat_id, sim_time, x, y, z}` (physical event, observed by radar) |
+| `sim/threat_tracks` | onboard | ship → sim | `{threat_id, type, level, status, t0, p0, v}` for Gazebo markers |
+| `swarm/heartbeat/{id}` | radio | drone → all | `{state, link, pose, threat_id, t_engage}` at 2 Hz |
+| `swarm/telemetry/{id}` | radio | drone → ship | instrumentation, 1 Hz |
+| `ship/roster` | radio | ship → drones | `{count, members[]}` at 1 Hz: drones the ship hears |
+| `swarm/threats` | radio | ship → drones | engagement order `{wave_id, threats[{threat_id, type, level, required, location, t_engage}]}` |
+| `swarm/bids` | radio | drone → all | `{agent_id, wave_id, costs{threat_id: ETA s}}` |
+| `swarm/awards` | radio | drone → all, ship | `{threat_id, agent_id, cost, status: engaged\|withdrawn\|missed, slot, t_engage}` |
+| `ship/threat_status` | radio | ship → all | `{threat_id, status}` |
 
-### Drone IDs
-Agent replicas are identical containers. On startup, each claims the lowest free `drone_N` from `config/swarm_runtime.json`. The claim is recorded in `config/agent_registry.json` under a file lock, keyed by container hostname.
+## Engagement protocol
+
+The allocation is decentralized (`src/agent/auction.py`).
+
+1. The ship publishes an engagement order on `swarm/threats`. It carries the engagement point, the detonation time, and `required` drones.
+2. Each **free** drone (idle, localized, not waiting on another order) bids its ETA to the point. The ETA uses a trapezoidal speed profile at 4 m/s and 1 m/s², times a 1.25 margin. A drone only bids if it can arrive before the detonation time.
+3. After a 1 s bid window (sim time), every drone runs the same deterministic assignment:
+   - threats are taken highest level first;
+   - each threat gets its `required` fastest drones, ties broken by drone ID;
+   - **all or nothing**: a threat that cannot get every drone it needs gets none, and those drones stay free.
+4. Each winner publishes an award, takes its slot (slot index = rank among the winners, sorted by ID), and flies there.
+5. **Conflict repair.** If views diverged and a threat collects more than `level` drones, the drones with worse bids withdraw. If a threat is left short, the ship re-announces it for the missing drones, at most 3 times and only while there is still time.
+6. At the detonation time, a drone within 5 m of its slot detonates:
+   - it publishes `sim/detonation`;
+   - it despawns;
+   - its container stays up but idle, so it is never respawned.
+
+   A drone that is not in position aborts, publishes `missed`, and holds position.
+
+Decision latency from approval to the last award is about 0.8–1.2 s. Almost all of it is the 1 s bid window.
+
+### Membership and link loss
+- Each drone heartbeats at 2 Hz. The ship publishes the roster (drones heard in the last 3 s) at 1 Hz. The dashboard's drone count and free count come from it.
+- A drone considers its **radio link up** while it hears the ship or any peer within 3 s.
+- **Link lost, no job:** the drone holds position and does not bid.
+- **Link lost, engaged:** the drone continues to its slot and detonates at the allocated time. That needs only local state. The detonation is observed through the onboard bus, standing in for the ship's radar.
+- **Link lost at auction close:** the drone ignores the result, because it was computed from whatever bids reached it.
+- **Heard by the ship but not in its roster:** the drone keeps heartbeating and logs a warning. With `linkstate` routing, other peers relay its traffic, so the drone never needs to ask for re-addition explicitly.
+
+## Degraded communications
+
+These are first measurements. Radio loss was emulated two ways: removing the radio interface (`docker network disconnect`), and 100% packet loss on it (`tc netem` through Pumba). Both gave the same results.
+
+| Finding | Evidence |
+|---|---|
+| `peer_to_peer` routing (Zenoh 1.0.4): when a lost peer's lease expires, other peers lose **all** traffic from healthy peers for ~8–9 s | isolated 4-peer probe: 2 of 3 healthy peers got nothing for 8 s |
+| `linkstate` routing removes that blackout | same probe: worst gap 0.05 s on every healthy peer. Now the default. |
+| The process whose radio is lost freezes its *onboard* session once, for ~10 s. Same with any lease (10 s, 2 s, 1 s) and with either loss method. | probe: 10.1–10.4 s gap in the jammed drone's 50 Hz onboard stream; healthy drones unaffected |
+| Full system with `linkstate`, idle drone cut: the ship is unaffected (roster 8 → 7). Two healthy drones heard no radio for up to ~7 s, then recovered. | run 4, roster sampled every second |
+| Full system with `linkstate`, *engaged* drone cut: the ship froze for ~10 s (sim clock stopped, roster 0), then recovered | run 4 |
+| Operational effect: a drone whose radio is cut mid-flight can miss its slot | runs 3/4: the cut drone froze (stale sensors → holds position) and arrived 31.7 m / 5.0 m off its slot at detonation time, so it aborted. In run 2 it was cut closer to arrival and still hit (2.6 m). |
+
+The 10 s freeze is in the Zenoh 1.0.4 runtime that both sessions share. Next steps:
+- upgrade `eclipse-zenoh` (1.10.1 is current);
+- if that doesn't fix it, run the radio in its own process, the way a real drone separates its radio from its flight controller.
+
+Test tools (not in the repo yet): a 4-peer receive-gap probe, an onboard-stall probe, and a chaos script that cuts an idle drone and an engaged drone during a live run.
+
+## Instrumentation
+
+Every drone sends `swarm/telemetry/{id}` once a second, covering the last second. The dashboard's *Swarm instrumentation* table shows it:
+
+| Field | Meaning |
+|---|---|
+| `cpu_pct` | process CPU |
+| `loop_hz`, `loop_p50_ms`, `loop_p99_ms`, `loop_work_p99_ms`, `overruns` | 50 Hz control loop timing. An overrun is a tick longer than 1.5 × 20 ms. |
+| `sensor_age_p50_ms`, `sensor_age_max_ms` | age of the newest onboard sensor frame, sampled every tick |
+| `perception_p99_ms`, `planner_p99_ms` | lidar processing per scan; planner per tick |
+| `rx_per_s`, `tx_per_s`, `tx_bytes_per_s` | radio messages per topic, and bytes sent |
+| `peers_heard`, `voxels` | peers heard in the last 3 s; voxel map size |
+
+The ship adds per-topic radio receive rates, per-threat decision latency (approval → first and last award), and an event log. Events also go to `/state/ship_log.jsonl` in the `swarm_state` volume, for offline analysis. The metrics node logs positions, distance flown and collisions (under 2.5 m).
+
+Measured at 8 drones: about 1.5% CPU per drone, loop p99 about 20–26 ms, perception p99 about 3–12 ms. Radio to the ship is about 170 B/s of heartbeats and 220 B/s of telemetry per drone.
 
 ## Agent internals
 
-Each agent (`src/agent/agent.py`) has four parts.
+`src/agent/agent.py`:
 
 1. **Eyes: `voxel_map.py`.**
-   - A sparse 3D occupancy grid (0.5 m voxels) in world coordinates.
-   - Each lidar sweep is ray-traced in one batch: cells along each ray are marked free, and the endpoint is marked occupied if the ray hit something.
-   - Voxels expire after 0.5 s, so moving drones don't leave trails.
-   - Rays longer than 50 m, or with non-positive distance, are ignored.
-2. **Reflexes: `path_planning.py` and the 50 Hz control loop.**
-   - **APF:** attraction to the goal plus exponentially decaying repulsion from nearby voxels and the ship. The repulsion is soft-saturated, and there is stuck detection with growing attraction.
-   - **ORCA:** one velocity half-plane per nearby voxel, plus one for the ship, solved by iterative projection. It works in the XY plane with a vertical filter; altitude is handled separately.
-   - After planning, the loop applies:
+   - A sparse 3D occupancy grid with 0.5 m voxels.
+   - Each lidar scan is ray-traced in one vectorized batch.
+   - Occupied voxels are indexed separately, so obstacle queries touch only those (about 0.01 ms).
+   - Voxels expire after 0.5 s, cleaned up incrementally batch by batch.
+2. **Reflexes: `path_planning.py` and the 50 Hz loop.**
+   - Planning uses APF or ORCA against the voxels and the ship.
+   - The loop then applies:
      - a floor/ceiling guard,
      - damping near obstacles,
      - service-radius containment,
-     - a braking envelope near the goal,
+     - a braking envelope,
      - acceleration and speed limits.
 
-     Arrival latches after `goal_control.settle_ticks`. An untasked drone keeps sending zero velocity so that it holds position.
-3. **Timing: `timing.py`.**
-   - Simulation time drives the physics integration. Wall-clock time drives sensor freshness.
-   - It detects these states: first frame, normal, paused, out of order, time reset, large dt and missing time.
-   - If sensor data is stale, the drone commands zero velocity.
-4. **Threat handling and consensus: `auction.py` and `threats.py`.** See [Allocation protocol](#allocation-protocol).
-
-The **metrics node** (`src/metrics/main.py`):
-- tracks each drone's distance, speed, time alive and proximity collisions (under 2.5 m, checked with a spatial hash);
-- prints a dashboard;
-- publishes `swarm/metrics/summary`;
-- saves `/state/metrics_log.json`.
+     Arrival latches and the drone holds position.
+   - An untasked drone keeps sending zero velocity, so it holds.
+3. **Timing: `timing.py`.** Simulation time drives the physics integration. Wall-clock time drives sensor freshness. If sensor data is stale, the drone commands zero velocity.
+4. **Engagement: `auction.py` + `src/common/threats.py`.** Covers bidding, assignment, slots, and the detonation time. See [Engagement protocol](#engagement-protocol).
+5. **Telemetry: `telemetry.py`.**
 
 ## Configuration
 
-`config/swarm_runtime.json` is generated on every launch and is not tracked in git. To change the defaults, edit `GLOBAL_DEFAULTS` in `scripts/generate_swarm_config.py`. Per-drone overrides can go under `agents.<id>` in the runtime file.
+`config/swarm_runtime.json` is generated on every launch and is not tracked in git. To change the defaults, edit `GLOBAL_DEFAULTS` in `scripts/generate_swarm_config.py`.
 
 | Section | Keys |
 |---|---|
-| `defaults.path_planning` | `algorithm`, gains/radii for APF, `step_size`, `goal_tolerance`, `braking_radius`, `ship_keepout_radius`, `velocity_smoothing`; optional `time_horizon_obst`, `agent_radius`, `max_control_dt`, `sensor_timeout_s` |
-| `defaults.kinematics` | `max_velocity` (4 m/s), `max_acceleration` (1 m/s²), `min_z`, `max_z`, `max_service_radius` |
+| `defaults.path_planning` | `algorithm`, APF gains and radii, `step_size`, `goal_tolerance`, `braking_radius`, `ship_keepout_radius`, `velocity_smoothing`; optional `time_horizon_obst`, `agent_radius`, `max_control_dt`, `sensor_timeout_s` |
+| `defaults.kinematics` | `max_velocity` (4 m/s), `max_acceleration` (1 m/s²), `min_z`, `max_z`, `max_service_radius` — also used by the ship's TTI |
 | `defaults.goal_control` | `tolerance`, `stop_radius`, `tolerance_xy`, `tolerance_z`, `settle_ticks` |
 | `defaults.auction` (optional) | `bid_window_s` (1.0) |
 | `agents.drone_N` | `spawn{x,y,z}`, optional `goal{x,y,z}` and per-drone overrides |
 
-To generate a layout by hand:
+Radio tuning (env): `RADIO_ROUTING` (`linkstate`), `RADIO_LEASE_MS` (2000), `RADIO_SUBNET` (`172.21.0.0/16`).
 
-```bash
-python3 scripts/generate_swarm_config.py --agents 6 --min-radius 30 --max-radius 45 --min-separation 8 --seed 1 [--no-goals]
-```
+Drone IDs: agent replicas are identical containers. Each claims the lowest free `drone_N` via `config/agent_registry.json`, under a file lock.
 
 ## Testing
 
 ```bash
-python3 -m pytest tests -q                 # unit tests, ~2 s
+python3 -m pytest tests -q                 # unit tests, ~1 s
 python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre_consensus_validation_report.md (git-ignored)
 ```
 
 | File | Covers |
 |---|---|
-| `test_auction.py` | deterministic assignment, priority order, all-or-nothing, tie-breaks, early/late bids, conflict yield |
-| `test_threats.py` | budget admission (`sum(levels) ≤ free`), priority order, threat serialization, mix parsing |
+| `test_auction.py` | deterministic priority assignment, all-or-nothing, tie-breaks, early/late bids, conflict yield |
+| `test_threats.py` | CPA/TCPA, engagement point (CPA vs. defended-radius crossing), slots, ETA, TTI, serialization |
+| `test_threat_queue.py` | min-heap ordering by TCPA, lazy removal |
+| `test_voxel_map_batch.py` | batched ray tracing, occupied index vs. brute force, incremental expiry, clock reset |
 | `test_apf.py`, `test_orca_vertical_filter.py` | planner force bounds, ORCA vertical envelope |
-| `test_voxel_map_batch.py`, `benchmark_voxelmap.py` | batched ray-trace correctness and throughput |
 | `test_timing_manager.py`, `test_time_handling.py` | timing states |
 | `test_metrics_spatial_hash.py` | spatial-hash collision check matches brute force |
-| `validate_*.py` | planner scenarios, timing, metrics overhead, worker-thread lifecycle |
-
-The Gazebo end-to-end check is running the swarm itself: the dispatcher's exit code and summary report the result.
+| `benchmark_voxelmap.py`, `validate_*.py` | throughput, planner scenarios, timing, metrics overhead, worker lifecycle |
 
 ## Repository layout
 
 ```
-config/                 generated runtime files (swarm_runtime.json, agent_registry.json) — not tracked
-docker/                 base (zenoh-c/cpp), gazebo, agent, metrics images
-scripts/run_swarm.sh    launcher
-scripts/generate_swarm_config.py
-sim/                    GazeboSimulator (C++ bridge + kinematics), simulator_main.cpp, ocean.world
-src/agent/              agent, planners, voxel map, timing, auction, threats, threat_dispatcher
-src/metrics/main.py     metrics node
+config/                 generated runtime files — not tracked
+docker/                 base (zenoh-c/cpp), gazebo, agent, ship, metrics images
+scripts/run_swarm.sh    launcher;  scripts/generate_swarm_config.py
+sim/                    GazeboSimulator (C++ bridge, kinematics, markers), simulator_main.cpp, ocean.world
+src/common/             threat model and geometry (threats.py), Zenoh link factories (links.py)
+src/agent/              drone: agent, auction, planners, voxel map, timing, telemetry
+src/ship/               ship C2 (ship.py), threat min-heap (threat_queue.py), dashboard.html
+src/metrics/main.py     metrics node (collisions, distance)
 tests/                  unit tests and validation scripts
 ```
 
 ## Known limitations
-- **Threats don't move.** They are fixed points; there is no intercept geometry and no time-to-impact.
-- **Assignments are greedy.** They are made in priority order, not globally optimal. Overlapping waves are not jointly optimized, and a drone waiting on one wave's result skips another.
-- **Only partly exercised live.** The retry and back-off paths are covered by unit tests. Live runs so far had no message loss, so these paths never actually ran.
-- **2D perception.** The lidar is planar, and voxels are placed at the drone's own altitude.
-- **ORCA is simplified.** It resolves constraints by greedy projection rather than a full linear program, and it avoids other drones only through lidar voxels.
-- **Untested at scale.** Performance above about 12 drones hasn't been measured.
-- **No shutdown handling.** Agents don't handle SIGTERM, so `docker compose down` kills them (exit code 137).
-- **No security.** Zenoh traffic is unauthenticated and unencrypted.
+- **Radio loss freezes a process for ~10 s.** See [Degraded communications](#degraded-communications).
+- **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
+- **Shared simulation clock.** Detonation times use the simulator's clock, which every node shares. A distributed clock is future work.
+- **Idealized threats.** They fly straight lines at constant speed, and a detonation within the kill radius always kills (no kill probability).
+- **Greedy assignment.** Orders are assigned per order, highest level first, not globally optimized. A drone waiting on one order's result skips any other order that arrives before that result.
+- **Planar perception.** The lidar is 2D, and voxels are placed at the drone's own altitude. ORCA uses greedy projection, not a full linear program.
+- **No security.** Radio traffic is unauthenticated: a forged order or bid would be acted on.

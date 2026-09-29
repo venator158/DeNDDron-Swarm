@@ -74,21 +74,16 @@ void GazeboSimulator::init() {
         std::move(sub_opt_cmd)
     ));
 
-    auto sub_opt_threats = zenoh::Session::SubscriberOptions::create_default();
-    _sub_threats.emplace(_session->declare_subscriber(
-        zenoh::KeyExpr("swarm/threats"),
-        std::bind(&GazeboSimulator::on_threats, this, std::placeholders::_1),
+    auto sub_opt_tracks = zenoh::Session::SubscriberOptions::create_default();
+    _sub_threat_tracks.emplace(_session->declare_subscriber(
+        zenoh::KeyExpr("sim/threat_tracks"),
+        std::bind(&GazeboSimulator::on_threat_track, this, std::placeholders::_1),
         [](){},
-        std::move(sub_opt_threats)
+        std::move(sub_opt_tracks)
     ));
 
-    auto sub_opt_intercepts = zenoh::Session::SubscriberOptions::create_default();
-    _sub_intercepts.emplace(_session->declare_subscriber(
-        zenoh::KeyExpr("swarm/intercepts"),
-        std::bind(&GazeboSimulator::on_intercept, this, std::placeholders::_1),
-        [](){},
-        std::move(sub_opt_intercepts)
-    ));
+    auto pub_opt_clock = zenoh::Session::PublisherOptions::create_default();
+    _pub_clock.emplace(_session->declare_publisher(zenoh::KeyExpr("sim/clock"), std::move(pub_opt_clock)));
 
     auto sub_opt_despawn = zenoh::Session::SubscriberOptions::create_default();
     _sub_agent_despawn.emplace(_session->declare_subscriber(
@@ -217,46 +212,67 @@ void GazeboSimulator::apply_pending_despawns() {
     }
 }
 
-void GazeboSimulator::on_threats(const zenoh::Sample& sample) {
-    try {
-        auto msg = json::parse(sample.get_payload().as_string());
-        for (const auto& t : msg["threats"]) {
-            const std::string threat_id = t["threat_id"];
-            const std::string type = t.value("type", "unknown");
-            const int level = t.value("level", 1);
-            const auto& loc = t["location"];
-            {
-                std::lock_guard<std::mutex> lock(_state_mtx);
-                // Re-announcements repeat a threat; draw it once.
-                if (!_threat_markers.emplace(threat_id, ThreatMarker{level, 0}).second) continue;
-            }
-            if (_factory_pub) {
-                gazebo::msgs::Factory factory_msg;
-                factory_msg.set_sdf(generate_threat_sdf(threat_id, type, level,
-                    loc.value("x", 0.0), loc.value("y", 0.0), loc.value("z", 10.0)));
-                _factory_pub->Publish(factory_msg);
-            }
-            std::cout << "[GazeboSimulator] Threat marker: " << threat_id << " (" << type
-                      << ", level " << level << ")" << std::endl;
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "[GazeboSimulator] Error processing threat wave: " << e.what() << std::endl;
-    }
-}
-
-void GazeboSimulator::on_intercept(const zenoh::Sample& sample) {
+void GazeboSimulator::on_threat_track(const zenoh::Sample& sample) {
+    // {threat_id, type, level, status, t0, p0{x,y,z}, v{x,y,z}} from the ship's radar picture
     try {
         auto msg = json::parse(sample.get_payload().as_string());
         const std::string threat_id = msg["threat_id"];
-        std::lock_guard<std::mutex> lock(_state_mtx);
-        auto it = _threat_markers.find(threat_id);
-        if (it == _threat_markers.end()) return;
-        if (++it->second.intercepts == it->second.level) {
-            _pending_model_deletes.push_back("threat_" + threat_id);
-            std::cout << "[GazeboSimulator] Threat neutralized: " << threat_id << std::endl;
+        const std::string status = msg.value("status", "active");
+        const std::string model = "threat_" + threat_id;
+
+        if (status != "active") {
+            std::lock_guard<std::mutex> lock(_state_mtx);
+            if (_threat_markers.erase(threat_id) > 0) {
+                _pending_model_deletes.push_back(model);
+                std::cout << "[GazeboSimulator] Threat " << threat_id << " " << status << std::endl;
+            }
+            return;
+        }
+
+        const auto& p0 = msg["p0"];
+        const auto& v = msg["v"];
+        ThreatMarker marker{
+            ignition::math::Vector3d(p0["x"].get<double>(), p0["y"].get<double>(), p0["z"].get<double>()),
+            ignition::math::Vector3d(v["x"].get<double>(), v["y"].get<double>(), v["z"].get<double>()),
+            msg["t0"].get<double>()
+        };
+        bool is_new = false;
+        {
+            std::lock_guard<std::mutex> lock(_state_mtx);
+            is_new = _threat_markers.find(threat_id) == _threat_markers.end();
+            _threat_markers[threat_id] = marker;
+        }
+        if (is_new && _factory_pub) {
+            gazebo::msgs::Factory factory_msg;
+            factory_msg.set_sdf(generate_threat_sdf(threat_id, msg.value("type", "unknown"), msg.value("level", 1),
+                                                    marker.p0.X(), marker.p0.Y(), marker.p0.Z()));
+            _factory_pub->Publish(factory_msg);
+            std::cout << "[GazeboSimulator] Threat marker: " << threat_id << std::endl;
         }
     } catch (const std::exception& e) {
-        std::cerr << "[GazeboSimulator] Error processing intercept: " << e.what() << std::endl;
+        std::cerr << "[GazeboSimulator] Error processing threat track: " << e.what() << std::endl;
+    }
+}
+
+void GazeboSimulator::move_threat_markers(double sim_time) {
+    if (!_physics_pub) return;
+    std::vector<std::pair<std::string, ignition::math::Vector3d>> poses;
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        for (const auto& [id, m] : _threat_markers) {
+            poses.emplace_back("threat_" + id, m.p0 + m.v * (sim_time - m.t0));
+        }
+    }
+    for (const auto& [name, p] : poses) {
+        gazebo::msgs::Model msg;
+        msg.set_name(name);
+        gazebo::msgs::Vector3d* pos = msg.mutable_pose()->mutable_position();
+        pos->set_x(p.X());
+        pos->set_y(p.Y());
+        pos->set_z(p.Z());
+        gazebo::msgs::Quaternion* rot = msg.mutable_pose()->mutable_orientation();
+        rot->set_w(1.0);
+        _physics_pub->Publish(msg);
     }
 }
 
@@ -576,7 +592,9 @@ json GazeboSimulator::simulate_lidar(const std::string& agent_id) {
         return -1.0;
     };
 
-    json lidar_data = json::array();
+    // Compact scan: ray i points at angle i * angle_step; ranges rounded to cm.
+    json ranges = json::array();
+    json hits = json::array();
     for (int i = 0; i < num_rays; ++i) {
         const double angle = (2.0 * M_PI * i) / static_cast<double>(num_rays);
         const double dx = std::cos(angle);
@@ -606,30 +624,27 @@ json GazeboSimulator::simulate_lidar(const std::string& agent_id) {
         }
 
         const double measured = std::max(0.0, std::min(closest, max_range));
-        lidar_data.push_back({
-            {"angle", angle},
-            {"distance", measured},
-            {"intensity", hit ? 0.9 : 0.2},
-            {"ray_id", i}
-        });
+        ranges.push_back(std::round(measured * 100.0) / 100.0);
+        hits.push_back(hit ? 1 : 0);
     }
-    return lidar_data;
+    return {{"angle_step", 2.0 * M_PI / num_rays}, {"ranges", ranges}, {"hits", hits}};
 }
 
 json GazeboSimulator::get_drone_pose(const std::string& agent_id) {
     std::lock_guard<std::mutex> lock(_state_mtx);
     if (_drone_states.find(agent_id) != _drone_states.end()) {
         const auto& state = _drone_states[agent_id];
+        auto mm = [](double v) { return std::round(v * 1000.0) / 1000.0; };
         return {
-            {"x", state.position.X()},
-            {"y", state.position.Y()},
-            {"z", state.position.Z()},
+            {"x", mm(state.position.X())},
+            {"y", mm(state.position.Y())},
+            {"z", mm(state.position.Z())},
             {"roll", 0.0},
             {"pitch", 0.0},
             {"yaw", 0.0},
-            {"vx", state.linear_velocity.X()},
-            {"vy", state.linear_velocity.Y()},
-            {"vz", state.linear_velocity.Z()}
+            {"vx", mm(state.linear_velocity.X())},
+            {"vy", mm(state.linear_velocity.Y())},
+            {"vz", mm(state.linear_velocity.Z())}
         };
     }
     return {{"x",0},{"y",0},{"z",1},{"roll",0},{"pitch",0},{"yaw",0},{"vx",0},{"vy",0},{"vz",0}};
@@ -645,10 +660,31 @@ void GazeboSimulator::publish_sensor_data(const std::string& agent_id, const jso
 }
 
 void GazeboSimulator::on_world_stats(ConstWorldStatisticsPtr &_msg) {
-    if (_msg->has_sim_time()) {
-        std::lock_guard<std::mutex> lock(_state_mtx);
-        _sim_time = _msg->sim_time().sec() + _msg->sim_time().nsec() * 1e-9;
+    if (!_msg->has_sim_time()) return;
+    const double sim = _msg->sim_time().sec() + _msg->sim_time().nsec() * 1e-9;
+    const double real = _msg->has_real_time() ? _msg->real_time().sec() + _msg->real_time().nsec() * 1e-9 : 0.0;
+    std::lock_guard<std::mutex> lock(_state_mtx);
+    if (_stats_real_time > 0.0 && real > _stats_real_time && sim >= _sim_time) {
+        const double rtf = (sim - _sim_time) / (real - _stats_real_time);
+        _rtf = std::clamp(0.8 * _rtf + 0.2 * rtf, 0.0, 10.0);
     }
+    if (sim + 1.0 < _clock_out) {
+        _clock_out = sim;           // world reset: let the clock go back
+    }
+    _paused = _msg->has_paused() && _msg->paused();
+    _sim_time = sim;
+    _stats_real_time = real;
+    _stats_wall = std::chrono::steady_clock::now();
+}
+
+double GazeboSimulator::estimated_sim_time() {
+    double est = _sim_time;
+    if (_sim_time > 0.0 && !_paused) {
+        const double since = std::chrono::duration<double>(std::chrono::steady_clock::now() - _stats_wall).count();
+        est += std::min(since, 0.5) * _rtf;
+    }
+    _clock_out = std::max(_clock_out, est);   // never step backwards between stats
+    return _clock_out;
 }
 
 void GazeboSimulator::step() {
@@ -659,7 +695,7 @@ void GazeboSimulator::step() {
     std::vector<std::string> active_agents;
     {
         std::lock_guard<std::mutex> lock(_state_mtx);
-        current_sim_time = _sim_time;
+        current_sim_time = estimated_sim_time();
         for (const auto& [agent_id, spawned] : _spawned_agents) {
             if (spawned) active_agents.push_back(agent_id);
         }
@@ -675,16 +711,30 @@ void GazeboSimulator::step() {
     }
 
     // Only publish when simulation time has advanced by at least 0.02s (50Hz) to avoid DDoSing Zenoh
+    // Pose at 50 Hz; a lidar scan rides along every 0.1 s of sim time (10 Hz).
     if (current_sim_time - _last_sensor_pub_time >= 0.02) {
         _last_sensor_pub_time = current_sim_time;
+        const bool with_lidar = current_sim_time - _last_lidar_pub_time >= 0.1;
+        if (with_lidar) _last_lidar_pub_time = current_sim_time;
         for (const auto& agent_id : active_agents) {
             json sensor_data = {
                 {"sim_time", current_sim_time},
-                {"pose", get_drone_pose(agent_id)},
-                {"lidar", simulate_lidar(agent_id)}
+                {"pose", get_drone_pose(agent_id)}
             };
+            if (with_lidar) {
+                sensor_data["lidar"] = simulate_lidar(agent_id);
+            }
             publish_sensor_data(agent_id, sensor_data);
         }
+    }
+
+    if (current_sim_time - _last_clock_pub_time >= 0.1 && _pub_clock) {
+        _last_clock_pub_time = current_sim_time;
+        _pub_clock->put(zenoh::Bytes(json{{"sim_time", current_sim_time}}.dump()));
+    }
+
+    if (dt > 0.0) {
+        move_threat_markers(current_sim_time);
     }
     
     for (const auto& agent_id : active_agents) {

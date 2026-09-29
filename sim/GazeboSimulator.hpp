@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 #include <zenoh.hxx>
 #include <optional>
+#include <algorithm>
+#include <chrono>
 #include <map>
 #include <string>
 #include <vector>
@@ -30,7 +32,16 @@ private:
     gazebo::transport::PublisherPtr _factory_pub;  // For spawning models
     gazebo::transport::PublisherPtr _physics_pub;  // For applying forces to models
     gazebo::transport::SubscriberPtr _stats_sub;   // For receiving simulation time
-    double _sim_time = 0.0;
+    // Gazebo publishes world_stats at only ~5 Hz, so sim time is extrapolated
+    // between messages with the observed real-time factor (guarded by _state_mtx).
+    double _sim_time = 0.0;                 // sim time of the last world_stats
+    double _stats_real_time = 0.0;          // real time of the last world_stats
+    std::chrono::steady_clock::time_point _stats_wall;
+    double _rtf = 1.0;
+    bool _paused = false;
+    double _clock_out = 0.0;                // last value handed out (monotonic)
+    double estimated_sim_time();            // requires _state_mtx
+    double _last_lidar_pub_time = -1.0;
     double _last_sim_time = 0.0;
     double _last_sensor_pub_time = 0.0;
 
@@ -50,17 +61,19 @@ private:
     std::optional<zenoh::Subscriber<void>> _sub_agent_join;
     std::optional<zenoh::Subscriber<void>> _sub_cmd_vel;
     std::optional<zenoh::Subscriber<void>> _sub_agent_despawn;
-    std::optional<zenoh::Subscriber<void>> _sub_threats;
-    std::optional<zenoh::Subscriber<void>> _sub_intercepts;
+    std::optional<zenoh::Subscriber<void>> _sub_threat_tracks;
+    std::optional<zenoh::Publisher> _pub_clock;
+    double _last_clock_pub_time = 0.0;
 
     // false = despawned (expended drones stay false so a rejoin cannot respawn them)
     std::map<std::string, bool> _spawned_agents;
     std::vector<std::string> _pending_despawns;   // guarded by _state_mtx, applied in step()
 
-    // Threat markers (visual only): threat_id -> drones needed / intercepts so far
+    // Threat markers (visual only), moved along the ship's straight-line tracks
     struct ThreatMarker {
-        int level;
-        int intercepts;
+        ignition::math::Vector3d p0;   // position at t0
+        ignition::math::Vector3d v;    // velocity
+        double t0;                     // sim time of p0
     };
     std::map<std::string, ThreatMarker> _threat_markers;          // guarded by _state_mtx
     std::vector<std::string> _pending_model_deletes;              // guarded by _state_mtx
@@ -78,8 +91,8 @@ private:
     void on_agent_join(const zenoh::Sample& sample);
     void on_cmd_vel(const zenoh::Sample& sample);
     void on_agent_despawn(const zenoh::Sample& sample);
-    void on_threats(const zenoh::Sample& sample);
-    void on_intercept(const zenoh::Sample& sample);
+    void on_threat_track(const zenoh::Sample& sample);
+    void move_threat_markers(double sim_time);
     std::string generate_threat_sdf(const std::string& threat_id, const std::string& type,
                                     int level, double x, double y, double z);
     void apply_pending_despawns();

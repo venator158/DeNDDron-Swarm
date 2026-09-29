@@ -2,6 +2,7 @@ import argparse
 import fcntl
 import json
 import os
+import signal
 import socket
 import time
 from pathlib import Path
@@ -87,10 +88,10 @@ def main():
         help="Unique ID for this drone",
     )
     parser.add_argument(
-        "--zenoh-router",
+        "--sim-bus",
         type=str,
-        default=os.getenv("ZENOH_ROUTER_IP", None),
-        help="Locator for Zenoh router (e.g. tcp/zenoh_router:7447)",
+        default=os.getenv("SIM_BUS", None),
+        help="Locator of the simulator's Zenoh router (onboard bus), e.g. tcp/sim_bus:7447",
     )
     parser.add_argument(
         "--runtime-config",
@@ -108,14 +109,18 @@ def main():
     args = parser.parse_args()
 
     agent_id = args.agent_id if args.agent_id else allocate_agent_id(args.runtime_config, args.id_registry)
-    agent = DenddronAgent(agent_id=agent_id, router_locator=args.zenoh_router)
+    agent = DenddronAgent(agent_id=agent_id, sim_bus_locator=args.sim_bus)
 
+    # docker stop sends SIGTERM: shut down cleanly instead of being killed after the grace period.
+    stop = {"requested": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.update(requested=True))
     try:
-        while True:
-            time.sleep(1.0)
+        while not stop["requested"]:
+            time.sleep(0.5)
     except KeyboardInterrupt:
-        print(f"\n[{agent_id}] Shutting down...")
-        agent.shutdown()
+        pass
+    print(f"[{agent_id}] Shutting down...", flush=True)
+    agent.shutdown()
 
 
 if __name__ == "__main__":

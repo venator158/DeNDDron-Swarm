@@ -23,6 +23,7 @@ import zenoh
 import json
 import math
 import os
+import signal
 import threading
 import time
 import logging
@@ -439,6 +440,9 @@ class MetricsNode:
 
 # ---------------------------------------------------------------------------
 def main():
+    # Running as PID 1 in the container: SIGTERM is ignored unless handled.
+    # Route it through the KeyboardInterrupt path so the final log is saved.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     router = os.environ.get("ZENOH_ROUTER_IP", None)
 
     log.info("Connecting to Zenoh...")

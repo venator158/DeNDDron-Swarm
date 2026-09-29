@@ -1,45 +1,41 @@
 # ===========================================================================
-# DeNDDron Swarm Docker Compose Configuration (Optimized 2026)
+# DeNDDron Swarm
+#
+# Two networks:
+#   sim_net   - the simulator's Zenoh router ("sim bus"): each drone's own
+#               sensors/actuators, sim clock, detonations, threat tracks for
+#               Gazebo. Stands in for onboard wiring, not communications.
+#   radio_net - peer-to-peer Zenoh (no router) between drones and the ship.
+#               Degrade this network to study degraded communications.
 # ===========================================================================
 
 services:
-  # ===========================================================================
-  # DeNDDron Base (Shared Dependency)
-  # ===========================================================================
   denddron_base:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
     image: denddron_base:latest
 
-  # ===========================================================================
-  # Zenoh Router
-  # ===========================================================================
-  zenoh_router:
+  # Simulator bus (onboard links only)
+  sim_bus:
     image: eclipse/zenoh:latest
-    container_name: zenoh_router
-    ports:
-      - "7447:7447/tcp"
-      - "7447:7447/udp"
+    container_name: sim_bus
     environment:
       RUST_LOG: info
     networks:
-      - swarm_network
+      - sim_net
     restart: unless-stopped
     command: >
       --listen tcp/0.0.0.0:7447
-      --listen udp/0.0.0.0:7447
+      --no-multicast-scouting
 
-  # ===========================================================================
-  # Gazebo Simulator
-  # ===========================================================================
   gazebo_simulator:
     build:
       context: .
       dockerfile: docker/gazebo.Dockerfile
     container_name: gazebo_simulator
     environment:
-      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
+      ZENOH_ROUTER_IP: tcp/sim_bus:7447
       GAZEBO_RESOURCE_PATH: /usr/share/gazebo-11:/home/app/sim
       SWARM_RUNTIME_CONFIG: /home/app/config/swarm_runtime.json
       DISPLAY: ${DISPLAY:-:0}
@@ -50,9 +46,9 @@ services:
     devices:
       - /dev/dri:/dev/dri
     networks:
-      - swarm_network
+      - sim_net
     depends_on:
-      - zenoh_router
+      - sim_bus
       - denddron_base
     healthcheck:
       test: ["CMD-SHELL", "grep -a gazebo_simulator /proc/[0-9]*/cmdline >/dev/null 2>&1 || exit 1"]
@@ -63,23 +59,25 @@ services:
     ports:
       - "11345:11345"
 
-  # ===========================================================================
-  # Agent Service (Scale with: docker compose up --scale agent=<N>)
-  # ===========================================================================
+  # Drones (scale with: docker compose up --scale agent=<N>)
   agent:
     build:
       context: .
       dockerfile: docker/agent.Dockerfile
     environment:
-      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
+      SIM_BUS: tcp/sim_bus:7447
+      RADIO_SUBNET: 172.21.0.0/16
+      RADIO_ROUTING: ${RADIO_ROUTING:-linkstate}
       SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
       AGENT_ID_REGISTRY: /app/config/agent_registry.json
+    # exec so SIGTERM reaches python and the agent shuts down cleanly
     command: >
-      sh -c 'python -u main.py --zenoh-router "$${ZENOH_ROUTER_IP}"'
+      sh -c 'exec python -u main.py --sim-bus "$${SIM_BUS}"'
     networks:
-      - swarm_network
+      - sim_net
+      - radio_net
     depends_on:
-      zenoh_router:
+      sim_bus:
         condition: service_started
       gazebo_simulator:
         condition: service_healthy
@@ -90,7 +88,6 @@ services:
       retries: 3
     restart: unless-stopped
     volumes:
-      - swarm_state:/state
       - ./config:/app/config
     logging: &agent_logging
       driver: "json-file"
@@ -98,49 +95,52 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # ===========================================================================
-  # Threat Dispatcher (optional; enable with: bash scripts/run_swarm.sh N --threats WAVES)
-  # ===========================================================================
-  threat_dispatcher:
+  # Ship: radar picture, operator dashboard (http://localhost:8080), roster, kill assessment
+  ship:
     build:
       context: .
-      dockerfile: docker/agent.Dockerfile
-    container_name: threat_dispatcher
-    profiles: ["threats"]
+      dockerfile: docker/ship.Dockerfile
+    container_name: ship
     environment:
-      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
-      THREAT_WAVES: ${THREAT_WAVES:-3}
-      THREAT_INTERVAL_S: ${THREAT_INTERVAL_S:-15}
-      THREATS_PER_WAVE: ${THREATS_PER_WAVE:-4}
+      SIM_BUS: tcp/sim_bus:7447
+      RADIO_SUBNET: 172.21.0.0/16
+      RADIO_ROUTING: ${RADIO_ROUTING:-linkstate}
+      SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
+      MAX_THREATS: ${MAX_THREATS:-0}
+      THREAT_INTERVAL_S: ${THREAT_INTERVAL_S:-30}
+      THREAT_FIRST_S: ${THREAT_FIRST_S:-20}
       THREAT_SEED: ${THREAT_SEED:-42}
-      THREAT_MIX: ${THREAT_MIX:-}
-      THREAT_INITIAL_DELAY_S: ${THREAT_INITIAL_DELAY_S:-25}
+      THREAT_TYPES: ${THREAT_TYPES:-}
     command: >
-      sh -c 'python -u threat_dispatcher.py --zenoh-router "$${ZENOH_ROUTER_IP}"'
+      sh -c 'exec python -u ship.py --sim-bus "$${SIM_BUS}"'
     networks:
-      - swarm_network
+      - sim_net
+      - radio_net
+    ports:
+      - "8080:8080"
     depends_on:
-      zenoh_router:
+      sim_bus:
         condition: service_started
       gazebo_simulator:
         condition: service_healthy
-    restart: "no"
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config:ro
+      - swarm_state:/state
     logging: *agent_logging
 
-  # ===========================================================================
-  # Metrics Node
-  # ===========================================================================
   metrics_node:
     build:
       context: .
       dockerfile: docker/metrics.Dockerfile
     container_name: metrics_node
     environment:
-      ZENOH_ROUTER_IP: tcp/zenoh_router:7447
+      ZENOH_ROUTER_IP: tcp/sim_bus:7447
+    command: ["python", "-u", "src/metrics/main.py"]
     networks:
-      - swarm_network
+      - sim_net
     depends_on:
-      zenoh_router:
+      sim_bus:
         condition: service_started
       gazebo_simulator:
         condition: service_healthy
@@ -153,17 +153,18 @@ services:
     logging: *agent_logging
     volumes:
       - swarm_state:/state
-      - /tmp:/tmp
 
-# ===========================================================================
-# Network Configuration
-# ===========================================================================
 networks:
-  swarm_network:
+  sim_net:
     driver: bridge
     ipam:
       config:
         - subnet: 172.20.0.0/16
+  radio_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
 
 volumes:
   swarm_state:

@@ -1,72 +1,91 @@
-import random
-import sys
+import math
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "agent"))
-
-from threats import DEFAULT_THREAT_MIX, Threat, admit, parse_mix, priority_order, random_threats
+from threats import (DEFAULT_THREAT_TYPES, Threat, closest_point_of_approach, engagement_point, eta,
+                     parse_threat_types, position_at, priority_order, slot_point, time_to_intercept)
 
 LOC = {"x": 0.0, "y": 30.0, "z": 20.0}
 
 
-def T(tid, level, kind="t"):
-    return Threat(tid, kind, level, level, LOC)
+class TestGeometry(unittest.TestCase):
+    def test_cpa_of_crossing_track(self):
+        # Flies along y = 30 from x = -100 at 5 m/s: CPA is (0, 30) after 20 s.
+        cpa, t = closest_point_of_approach((-100.0, 30.0, 20.0), (5.0, 0.0, 0.0), t0=10.0)
+        self.assertAlmostEqual(t, 30.0)
+        self.assertAlmostEqual(cpa[0], 0.0)
+        self.assertAlmostEqual(cpa[1], 30.0)
+
+    def test_cpa_of_receding_track_is_now(self):
+        cpa, t = closest_point_of_approach((50.0, 0.0, 10.0), (3.0, 0.0, 0.0), t0=5.0)
+        self.assertEqual(t, 5.0)
+        self.assertEqual(cpa, (50.0, 0.0, 10.0))
+
+    def test_engagement_at_cpa_when_outside_defended_radius(self):
+        p, t = engagement_point((-100.0, 60.0, 20.0), (5.0, 0.0, 0.0), 0.0, defended_radius=45.0)
+        self.assertAlmostEqual(t, 20.0)
+        self.assertAlmostEqual(math.hypot(p[0], p[1]), 60.0)
+
+    def test_engagement_at_defended_radius_for_inbound_threat(self):
+        # Aimed straight at the ship: CPA is the ship itself, so engage at 45 m.
+        p, t = engagement_point((-150.0, 0.0, 15.0), (3.0, 0.0, 0.0), 0.0, defended_radius=45.0)
+        self.assertAlmostEqual(math.hypot(p[0], p[1]), 45.0)
+        self.assertAlmostEqual(t, 35.0)
+        self.assertAlmostEqual(p[2], 15.0)
+
+    def test_engagement_point_lies_on_track(self):
+        p0, v = (120.0, -90.0, 18.0), (-3.0, 2.0, 0.0)
+        p, t = engagement_point(p0, v, 2.0, defended_radius=45.0)
+        on_track = position_at(p0, v, 2.0, t)
+        self.assertTrue(all(abs(a - b) < 1e-9 for a, b in zip(p, on_track)))
+
+    def test_already_inside_defended_radius_engages_now(self):
+        p, t = engagement_point((10.0, 0.0, 15.0), (-1.0, 0.0, 0.0), 7.0, defended_radius=45.0)
+        self.assertEqual(t, 7.0)
+
+    def test_slots_spread_around_point(self):
+        pts = [slot_point((0.0, 0.0, 10.0), k, 3, 4.0) for k in range(3)]
+        for p in pts:
+            self.assertAlmostEqual(math.hypot(p[0], p[1]), 4.0)
+        self.assertEqual(slot_point((1.0, 2.0, 3.0), 0, 1, 4.0), (1.0, 2.0, 3.0))
 
 
-class TestAdmit(unittest.TestCase):
-    def test_sum_of_levels_never_exceeds_free_drones(self):
-        rng = random.Random(0)
-        for _ in range(500):
-            cands = random_threats(rng, DEFAULT_THREAT_MIX, rng.randint(1, 8), 1, 25, 45, 14, 26)
-            free = rng.randint(0, 10)
-            admitted, unengaged = admit(cands, free)
-            self.assertLessEqual(sum(t.level for t in admitted), free)
-            self.assertEqual(len(admitted) + len(unengaged), len(cands))
+class TestEta(unittest.TestCase):
+    def test_trapezoid_and_triangle_profiles(self):
+        self.assertAlmostEqual(eta(40.0, 4.0, 1.0), 40.0 / 4.0 + 4.0)   # reaches v_max
+        self.assertAlmostEqual(eta(4.0, 4.0, 1.0), 4.0)                  # 2*sqrt(4/1)
+        self.assertEqual(eta(0.0, 4.0, 1.0), 0.0)
 
-    def test_highest_priority_admitted_first(self):
-        admitted, unengaged = admit([T("uav", 1), T("cm", 3), T("msl", 2)], free_drones=3)
-        self.assertEqual([t.threat_id for t in admitted], ["cm"])
-        self.assertEqual({t.threat_id for t in unengaged}, {"uav", "msl"})
+    def test_eta_continuous_at_profile_switch(self):
+        d = 4.0 * 4.0 / 1.0
+        self.assertAlmostEqual(eta(d - 1e-9, 4.0, 1.0), eta(d, 4.0, 1.0), places=4)
 
-    def test_smaller_threat_fills_leftover_budget(self):
-        admitted, _ = admit([T("cm", 3), T("msl", 2), T("uav", 1)], free_drones=4)
-        self.assertEqual([t.threat_id for t in admitted], ["cm", "uav"])
-
-    def test_no_drones_admits_nothing(self):
-        admitted, unengaged = admit([T("uav", 1)], free_drones=0)
-        self.assertEqual(admitted, [])
-        self.assertEqual(len(unengaged), 1)
-
-    def test_negative_budget_treated_as_zero(self):
-        self.assertEqual(admit([T("uav", 1)], free_drones=-3)[0], [])
+    def test_time_to_intercept_is_level_th_fastest(self):
+        self.assertEqual(time_to_intercept([9.0, 3.0, 5.0, 7.0], 2), 5.0)
+        self.assertEqual(time_to_intercept([9.0, 3.0], 1), 3.0)
+        self.assertIsNone(time_to_intercept([9.0, 3.0], 3))
 
 
 class TestThreatModel(unittest.TestCase):
     def test_priority_order(self):
-        order = priority_order([T("b", 1), T("a", 1), T("z", 3)])
-        self.assertEqual([t.threat_id for t in order], ["z", "a", "b"])
+        ts = [Threat("b", "t", 1, 1, LOC), Threat("a", "t", 1, 1, LOC), Threat("z", "t", 3, 3, LOC)]
+        self.assertEqual([t.threat_id for t in priority_order(ts)], ["z", "a", "b"])
 
     def test_dict_roundtrip(self):
-        t = Threat("T1", "missile", 2, 1, LOC)
+        t = Threat("T1", "missile", 2, 1, LOC, t_engage=42.5)
         self.assertEqual(Threat.from_dict(t.to_dict()), t)
 
     def test_required_defaults_to_level(self):
-        d = T("T1", 3).to_dict()
+        d = Threat("T1", "t", 3, 3, LOC).to_dict()
         del d["required"]
         self.assertEqual(Threat.from_dict(d).required, 3)
 
-    def test_parse_mix(self):
-        self.assertEqual(parse_mix("uav:1:0.7, missile:2:0.3"), {"uav": (1, 0.7), "missile": (2, 0.3)})
+    def test_parse_threat_types(self):
+        types = parse_threat_types("uav:1:2.5:0.7, missile:2:3.5:0.3")
+        self.assertEqual(types["uav"].level, 1)
+        self.assertEqual(types["missile"].speed, 3.5)
+        self.assertEqual(types["uav"].min_z, DEFAULT_THREAT_TYPES["uav"].min_z)
         with self.assertRaises(ValueError):
-            parse_mix("uav:0:1")
-
-    def test_random_threats_use_mix_levels_and_unique_ids(self):
-        ts = random_threats(random.Random(1), DEFAULT_THREAT_MIX, 20, 5, 25, 45, 14, 26)
-        self.assertEqual(len({t.threat_id for t in ts}), 20)
-        for t in ts:
-            self.assertEqual(t.level, DEFAULT_THREAT_MIX[t.type][0])
-            self.assertEqual(t.required, t.level)
+            parse_threat_types("uav:0:1:1")
 
 
 if __name__ == "__main__":

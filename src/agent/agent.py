@@ -1,4 +1,3 @@
-import zenoh
 import json
 import time
 import threading
@@ -9,22 +8,27 @@ from voxel_map import VoxelMap
 from path_planning import APFStrategy, ORCAStrategy
 from timing import TimingManager, TimingState
 from auction import AuctionManager
-from threats import Threat
+from telemetry import Telemetry
+from threats import ETA_MARGIN, ORDER_SLACK_S, Threat, eta, slot_point
+from links import open_onboard, open_radio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
 
 class DenddronAgent:
-    def __init__(self, agent_id: str, router_locator: str = None):
+    HEARTBEAT_HZ = 2.0
+    TELEMETRY_HZ = 1.0
+    LINK_TIMEOUT_S = 3.0       # no radio traffic for this long = disconnected from the swarm
+    SLOT_RADIUS = 4.0          # m, spacing of drones around an engagement point
+    DETONATE_RADIUS = 5.0      # m, must be this close to the slot at t_engage to detonate
+
+    def __init__(self, agent_id: str, sim_bus_locator: str = None):
         self.agent_id = agent_id
-        
-        # Zenoh Configuration
-        conf = zenoh.Config()
-        if router_locator:
-            conf.insert_json5("connect/endpoints", f'["{router_locator}"]')
-            
-        logger.info(f"[{self.agent_id}] Connecting to Zenoh session...")
-        self.session = zenoh.open(conf)
+
+        # Onboard bus: this drone's sensors/actuators (simulator).  Radio: the swarm and the ship.
+        logger.info(f"[{self.agent_id}] Opening onboard bus ({sim_bus_locator}) and radio (peer-to-peer)...")
+        self.onboard = open_onboard(sim_bus_locator)
+        self.radio = open_radio()
         
         # --- Internal State ---
         self.running = True
@@ -176,42 +180,53 @@ class DenddronAgent:
         self._auction_lock = threading.Lock()
         self._pending_wave_id = None   # wave we bid in and whose result we await
         self.engaged_threat = None     # Threat we are flying to intercept
+        self.engagement = None         # {"threat", "slot_point", "t_engage"} once assigned
         # Drones are expendable: once destroyed the agent stays down for good.
         self.destroyed = False
 
-        # --- Publishers ---
-        self.pub_cmd_vel    = self.session.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
-        self.pub_bids       = self.session.declare_publisher("swarm/bids")
-        self.pub_awards     = self.session.declare_publisher("swarm/awards")
-        self.pub_intercepts = self.session.declare_publisher("swarm/intercepts")
+        # --- Radio link and membership ---
+        self.telemetry = Telemetry(1.0 / self.control_rate_hz)
+        self._last_radio_rx = None     # monotonic time of the last message from the ship or a peer
+        self.peers = {}                # peer drone id -> monotonic time last heard
+        self.roster = []               # drone ids the ship last reported hearing
+        self._missing_from_roster = 0
+        self._link_was_up = False
 
-        # --- Subscribers ---
-        self.sub_sensors = self.session.declare_subscriber(
+        # --- Onboard bus (simulator) ---
+        self.pub_cmd_vel    = self.onboard.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
+        self.pub_detonation = self.onboard.declare_publisher("sim/detonation")
+        self.sub_sensors = self.onboard.declare_subscriber(
             f"drone/{self.agent_id}/sensors",
             self._on_sensor_data
         )
-        self.sub_threats = self.session.declare_subscriber(
-            "swarm/threats",
-            self._on_threat_wave
-        )
-        self.sub_bids = self.session.declare_subscriber(
-            "swarm/bids",
-            self._on_bid_received
-        )
-        self.sub_awards = self.session.declare_subscriber(
-            "swarm/awards",
-            self._on_award_received
-        )
+
+        # --- Radio (peer-to-peer) ---
+        self.pub_bids      = self.radio.declare_publisher("swarm/bids")
+        self.pub_awards    = self.radio.declare_publisher("swarm/awards")
+        self.pub_heartbeat = self.radio.declare_publisher(f"swarm/heartbeat/{self.agent_id}")
+        self.pub_telemetry = self.radio.declare_publisher(f"swarm/telemetry/{self.agent_id}")
+        self.sub_threats   = self.radio.declare_subscriber("swarm/threats", self._on_threat_wave)
+        self.sub_bids      = self.radio.declare_subscriber("swarm/bids", self._on_bid_received)
+        self.sub_awards    = self.radio.declare_subscriber("swarm/awards", self._on_award_received)
+        self.sub_roster    = self.radio.declare_subscriber("ship/roster", self._on_roster)
+        self.sub_peers     = self.radio.declare_subscriber("swarm/heartbeat/*", self._on_peer_heartbeat)
 
         # Start background threads
         self.control_thread = threading.Thread(target=self._reflex_control_loop)
         self.control_thread.start()
-        
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self.heartbeat_thread.start()
+
         self._announce_join()
+
+    def _radio_put(self, publisher, topic: str, payload: dict):
+        data = json.dumps(payload)
+        publisher.put(data)
+        self.telemetry.tx(topic, len(data))
 
     def _announce_join(self):
         """Tell the simulator to spawn this drone."""
-        pub_join = self.session.declare_publisher("swarm/agents/join")
+        pub_join = self.onboard.declare_publisher("swarm/agents/join")
         payload = {"agent_id": self.agent_id, "type": "quadrotor"}
         pub_join.put(json.dumps(payload))
         logger.info(f"[{self.agent_id}] Joined the swarm.")
@@ -241,7 +256,7 @@ class DenddronAgent:
 
             sim_time = payload.get("sim_time", None)
             pose = payload.get("pose", {})
-            lidar_data = payload.get("lidar", [])
+            lidar_data = payload.get("lidar")   # present on every 5th frame (10 Hz)
 
             current_pose = {
                 "x": pose.get("x", 0.0),
@@ -267,15 +282,26 @@ class DenddronAgent:
                     self._goal_hold_ticks = 0
                     self._prev_to_goal_vec = None
 
-            self.voxel_map.cleanup_stale_data(max_age=0.5, current_time=self.current_time)
-            self._process_lidar(lidar_data, current_pose)
+            if lidar_data:
+                t0 = time.perf_counter()
+                self.voxel_map.cleanup_stale_data(max_age=0.5, current_time=self.current_time)
+                self._process_lidar(lidar_data, current_pose)
+                self.telemetry.perception(time.perf_counter() - t0)
 
         except Exception as e:
             logger.debug(f"[{self.agent_id}] Error processing sensor data: {e}")
 
-    def _process_lidar(self, lidar_rays: list, pose: dict):
-        if not lidar_rays:
+    def _process_lidar(self, scan: dict, pose: dict):
+        """scan: {"angle_step", "ranges": [...], "hits": [0/1, ...]}; ray i points at i * angle_step."""
+        ranges = scan.get("ranges") or []
+        if not ranges:
             return
+        angle_step = float(scan.get("angle_step", 2.0 * np.pi / len(ranges)))
+        hits = scan.get("hits") or [0] * len(ranges)
+        lidar_rays = [
+            {"angle": i * angle_step, "distance": r, "intensity": 0.9 if h else 0.2}
+            for i, (r, h) in enumerate(zip(ranges, hits))
+        ]
 
         agent_x = pose.get("x", 0.0)
         agent_y = pose.get("y", 0.0)
@@ -358,7 +384,10 @@ class DenddronAgent:
         next_tick = time.monotonic()
 
         def _sleep_to_next_tick():
-            nonlocal next_tick
+            nonlocal next_tick, last_tick
+            now = time.monotonic()
+            self.telemetry.loop_tick(now - last_tick, now - tick_start)
+            last_tick = now
             next_tick += sleep_time
             remaining = next_tick - time.monotonic()
             if remaining > 0.0:
@@ -371,9 +400,11 @@ class DenddronAgent:
             "angular": {"x": 0.0, "y": 0.0, "z": 0.0}
         }
 
+        last_tick = time.monotonic()
         while self.running:
+            tick_start = time.monotonic()
             self._service_auctions()
-            self._check_intercept()
+            self._check_engagement()
             if self.destroyed:
                 break
             with self.state_lock:
@@ -386,6 +417,8 @@ class DenddronAgent:
             timing_state = timing.state
             dt = timing.sim_dt
             sensor_age = timing.sensor_wall_age
+            if np.isfinite(sensor_age):
+                self.telemetry.sensor_age(sensor_age)
 
             if timing_state == TimingState.TIME_RESET:
                 with self.state_lock:
@@ -499,11 +532,13 @@ class DenddronAgent:
 
                 # ── ACTIVE NAVIGATION ────────────────────────────────────────
 
+                t_plan = time.perf_counter()
                 cmd = self.path_planner.compute_velocity(
                     current_pose=current_pose,
                     goal_pose=current_goal,
                     voxel_map=self.voxel_map
                 )
+                self.telemetry.planner(time.perf_counter() - t_plan)
 
                 # Hard halt on planner-level arrival detection.
                 if self.path_planner.is_goal_reached():
@@ -636,6 +671,13 @@ class DenddronAgent:
             t = self.current_time
         return float(t) if t is not None else time.monotonic()
 
+    def _link_up(self) -> bool:
+        """Heard the ship or another drone recently."""
+        return self._last_radio_rx is not None and time.monotonic() - self._last_radio_rx <= self.LINK_TIMEOUT_S
+
+    def _radio_heard(self):
+        self._last_radio_rx = time.monotonic()
+
     def _is_free(self) -> bool:
         """Available for tasking: alive, localized, not engaged and not awaiting a wave result."""
         with self.state_lock:
@@ -652,17 +694,20 @@ class DenddronAgent:
         return json.loads(bytes(sample.payload).decode("utf-8"))
 
     def _on_threat_wave(self, sample):
+        self._radio_heard()
+        self.telemetry.rx("swarm/threats")
         try:
             msg = self._parse(sample)
             wave_id = str(msg["wave_id"])
             threats = [Threat.from_dict(t) for t in msg["threats"]]
         except Exception as e:
-            logger.warning(f"[{self.agent_id}] Ignoring malformed threat wave: {e}")
+            logger.warning(f"[{self.agent_id}] Ignoring malformed threat order: {e}")
             return
 
         logger.info(
-            f"[{self.agent_id}] Wave {wave_id}: "
-            + ", ".join(f"{t.threat_id}({t.type}, level {t.level}, need {t.required})" for t in threats)
+            f"[{self.agent_id}] Order {wave_id}: "
+            + ", ".join(f"{t.threat_id}({t.type}, level {t.level}, need {t.required}, "
+                        f"t_engage {t.t_engage:.1f})" for t in threats)
         )
         with self._auction_lock:
             if not self.auction.on_wave(wave_id, threats, self._auction_now()):
@@ -679,29 +724,36 @@ class DenddronAgent:
         self._propose_bid(wave_id, costs)
 
     def _calculate_costs(self, threats):
-        """Straight-line distance from our current pose to each threat."""
+        """Bid our ETA (s) to each engagement point we can reach before its engagement time."""
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
-        if pose is None:
+            now = self.current_time
+        if pose is None or now is None:
             return {}
-        return {
-            t.threat_id: float(np.linalg.norm([
-                t.location["x"] - pose["x"],
-                t.location["y"] - pose["y"],
-                t.location["z"] - pose["z"],
+        v_max = float(self.kinematics["max_velocity"])
+        a_max = float(self.kinematics["max_acceleration"])
+        slack = max(ORDER_SLACK_S, self.auction.bid_window_s + 1.0)
+        costs = {}
+        for t in threats:
+            d = float(np.linalg.norm([
+                t.location["x"] - pose["x"], t.location["y"] - pose["y"], t.location["z"] - pose["z"],
             ]))
-            for t in threats
-        }
+            e = eta(d, v_max, a_max) * ETA_MARGIN
+            if now + slack + e <= t.t_engage:
+                costs[t.threat_id] = round(e, 2)
+        return costs
 
     # ==========================================
     # PILLAR 4: CONSENSUS MECHANISM
     # ==========================================
     def _propose_bid(self, wave_id, costs):
-        self.pub_bids.put(json.dumps({"agent_id": self.agent_id, "wave_id": wave_id, "costs": costs}))
-        logger.info(f"[{self.agent_id}] Bid in wave {wave_id}: "
+        self._radio_put(self.pub_bids, "swarm/bids", {"agent_id": self.agent_id, "wave_id": wave_id, "costs": costs})
+        logger.info(f"[{self.agent_id}] Bid in {wave_id} (ETA s): "
                     + ", ".join(f"{k}={v:.1f}" for k, v in costs.items()))
 
     def _on_bid_received(self, sample):
+        self._radio_heard()
+        self.telemetry.rx("swarm/bids")
         try:
             bid = self._parse(sample)
             if bid["agent_id"] == self.agent_id:
@@ -722,18 +774,36 @@ class DenddronAgent:
                     self._pending_wave_id = None
         for r in results:
             summary = ", ".join(f"{tid}->{ws}" for tid, ws in r.assignment.items())
-            logger.info(f"[{self.agent_id}] Wave {r.wave_id} assignment: {summary}")
+            logger.info(f"[{self.agent_id}] Order {r.wave_id} assignment: {summary}")
             if r.my_threat is None or self.destroyed:
                 continue
             t = r.my_threat
-            logger.info(f"[{self.agent_id}] ENGAGING {t.threat_id} ({t.type}, level {t.level}), cost {r.my_cost:.2f}")
+            if not self._link_up():
+                # Computed from whatever bids reached us while cut off: likely a
+                # divergent view, and no one would hear our award. Don't act on it.
+                logger.warning(f"[{self.agent_id}] Radio down at auction close; not engaging {t.threat_id}")
+                with self._auction_lock:
+                    self.auction.release()
+                continue
+            winners = sorted(r.assignment[t.threat_id])
+            slot = winners.index(self.agent_id)
+            loc = t.location
+            sp = slot_point((loc["x"], loc["y"], loc["z"]), slot, len(winners), self.SLOT_RADIUS)
+            goal = {"x": sp[0], "y": sp[1], "z": sp[2]}
+            logger.info(f"[{self.agent_id}] ENGAGING {t.threat_id} ({t.type}, level {t.level}): "
+                        f"slot {slot + 1}/{len(winners)} at ({sp[0]:.1f}, {sp[1]:.1f}, {sp[2]:.1f}), "
+                        f"ETA {r.my_cost:.1f}s, detonate at t={t.t_engage:.1f}")
             self.engaged_threat = t
-            self.set_goal(t.location)
-            self.pub_awards.put(json.dumps({
-                "threat_id": t.threat_id, "agent_id": self.agent_id, "cost": r.my_cost, "status": "engaged",
-            }))
+            self.engagement = {"threat": t, "slot_point": goal, "t_engage": t.t_engage}
+            self.set_goal(goal)
+            self._radio_put(self.pub_awards, "swarm/awards", {
+                "threat_id": t.threat_id, "agent_id": self.agent_id, "cost": r.my_cost,
+                "status": "engaged", "slot": slot, "t_engage": t.t_engage,
+            })
 
     def _on_award_received(self, sample):
+        self._radio_heard()
+        self.telemetry.rx("swarm/awards")
         try:
             award = self._parse(sample)
             threat_id, agent_id = str(award["threat_id"]), str(award["agent_id"])
@@ -754,42 +824,149 @@ class DenddronAgent:
                 self.auction.release()
         if must_yield and self.engaged_threat is not None and self.engaged_threat.threat_id == threat_id:
             logger.warning(f"[{self.agent_id}] Yielding {threat_id}: enough drones with better bids engaged")
-            self.engaged_threat = None
-            self.set_goal(None)
-            self.pub_awards.put(json.dumps({
-                "threat_id": threat_id, "agent_id": self.agent_id, "status": "withdrawn",
-            }))
+            self._disengage(threat_id, "withdrawn")
 
-    def _check_intercept(self):
-        """Reaching the engaged threat intercepts it and expends this drone."""
-        threat = self.engaged_threat
-        if threat is None or self.destroyed:
+    def _disengage(self, threat_id: str, status: str):
+        self.engaged_threat = None
+        self.engagement = None
+        self.set_goal(None)   # hold position
+        self._radio_put(self.pub_awards, "swarm/awards", {
+            "threat_id": threat_id, "agent_id": self.agent_id, "status": status,
+        })
+
+    def _check_engagement(self):
+        """At the allocated time: detonate if on station, otherwise abort and hold.
+
+        Runs on local state only, so an engaged drone completes its engagement
+        even with the radio down.
+        """
+        eng = self.engagement
+        if eng is None or self.destroyed:
             return
         with self.state_lock:
-            reached = self._goal_reached
-        if not reached:
+            now = self.current_time
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+        if now is None or pose is None or now < eng["t_engage"]:
             return
-        self.pub_intercepts.put(json.dumps({
-            "threat_id": threat.threat_id, "agent_id": self.agent_id, "sim_time": self._auction_now(),
+        threat = eng["threat"]
+        sp = eng["slot_point"]
+        miss = float(np.linalg.norm([pose["x"] - sp["x"], pose["y"] - sp["y"], pose["z"] - sp["z"]]))
+        if miss > self.DETONATE_RADIUS:
+            logger.warning(f"[{self.agent_id}] MISSED {threat.threat_id}: {miss:.1f} m from slot at "
+                           f"t_engage; aborting and holding position")
+            with self._auction_lock:
+                self.auction.release()
+            self._disengage(threat.threat_id, "missed")
+            return
+
+        # Physical event: goes on the onboard bus (the ship's radar observes it there).
+        self.pub_detonation.put(json.dumps({
+            "agent_id": self.agent_id, "threat_id": threat.threat_id, "sim_time": now,
+            "x": pose["x"], "y": pose["y"], "z": pose["z"],
         }))
         self.pub_cmd_vel.put(json.dumps({
             "linear": {"x": 0.0, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
         }))
-        pub_leave = self.session.declare_publisher("swarm/agents/despawn")
-        pub_leave.put(json.dumps({"agent_id": self.agent_id, "reason": "expended", "threat_id": threat.threat_id}))
+        pub_leave = self.onboard.declare_publisher("swarm/agents/despawn")
+        pub_leave.put(json.dumps({"agent_id": self.agent_id, "reason": "detonated", "threat_id": threat.threat_id}))
         pub_leave.undeclare()
         with self._auction_lock:
             self.auction.release()
         self.engaged_threat = None
+        self.engagement = None
         self.destroyed = True
-        logger.info(f"[{self.agent_id}] INTERCEPTED {threat.threat_id} ({threat.type}); drone expended")
+        self._send_heartbeat()   # final "expended" heartbeat
+        logger.info(f"[{self.agent_id}] DETONATED on {threat.threat_id} ({threat.type}) at t={now:.2f}, "
+                    f"{miss:.1f} m from slot; drone expended")
+
+    # ==========================================
+    # MEMBERSHIP: heartbeat, roster, link state
+    # ==========================================
+    def _state_name(self) -> str:
+        if self.destroyed:
+            return "expended"
+        if self.engagement is not None:
+            with self.state_lock:
+                return "on_station" if self._goal_reached else "engaging"
+        if self._pending_wave_id is not None:
+            return "bidding"
+        return "idle"
+
+    def _send_heartbeat(self):
+        with self.state_lock:
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+            now = self.current_time
+        eng = self.engagement
+        self._radio_put(self.pub_heartbeat, "swarm/heartbeat", {
+            "agent_id": self.agent_id,
+            "sim_time": now,
+            "state": self._state_name(),
+            "link": self._link_up(),
+            "pose": None if pose is None else {k: round(pose[k], 2) for k in ("x", "y", "z")},
+            "threat_id": eng["threat"].threat_id if eng else None,
+            "t_engage": eng["t_engage"] if eng else None,
+        })
+
+    def _heartbeat_loop(self):
+        period = 1.0 / self.HEARTBEAT_HZ
+        ticks_per_telemetry = max(1, int(round(self.HEARTBEAT_HZ / self.TELEMETRY_HZ)))
+        tick = 0
+        while self.running and not self.destroyed:
+            try:
+                self._send_heartbeat()
+                tick += 1
+                if tick % ticks_per_telemetry == 0:
+                    snap = self.telemetry.snapshot()
+                    snap.update({"agent_id": self.agent_id, "peers_heard": len(self._fresh_peers()),
+                                 "voxels": self.voxel_map.get_stats().get("total_voxels", 0)})
+                    self._radio_put(self.pub_telemetry, "swarm/telemetry", snap)
+                link = self._link_up()
+                if link != self._link_was_up:
+                    logger.warning(f"[{self.agent_id}] Radio link {'UP' if link else 'LOST'}"
+                                   + ("" if link else (" - continuing engagement autonomously"
+                                                      if self.engagement else " - holding position")))
+                    self._link_was_up = link
+            except Exception as e:
+                logger.warning(f"[{self.agent_id}] heartbeat error: {e}")
+            time.sleep(period)
+
+    def _fresh_peers(self):
+        now = time.monotonic()
+        return [p for p, t in self.peers.items() if now - t <= self.LINK_TIMEOUT_S]
+
+    def _on_peer_heartbeat(self, sample):
+        peer = str(sample.key_expr).rsplit("/", 1)[-1]
+        if peer == self.agent_id:
+            return
+        self.telemetry.rx("swarm/heartbeat")
+        self.peers[peer] = time.monotonic()
+        self._radio_heard()
+
+    def _on_roster(self, sample):
+        self._radio_heard()
+        self.telemetry.rx("ship/roster")
+        try:
+            self.roster = list(self._parse(sample).get("members", []))
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] Ignoring malformed roster: {e}")
+            return
+        if self.agent_id in self.roster or self.destroyed:
+            self._missing_from_roster = 0
+            return
+        # The ship cannot hear us although we hear it.  Heartbeats keep going out;
+        # with RADIO_ROUTING=linkstate peers relay them to the ship.
+        self._missing_from_roster += 1
+        if self._missing_from_roster in (3, 30) or self._missing_from_roster % 300 == 0:
+            logger.warning(f"[{self.agent_id}] Not in the ship's roster for {self._missing_from_roster} "
+                           f"rosters; still heartbeating")
 
     def shutdown(self):
         self.running = False
         if self.control_thread.is_alive():
             self.control_thread.join()
-        
-        pub_leave = self.session.declare_publisher("swarm/agents/despawn")
-        pub_leave.put(json.dumps({"agent_id": self.agent_id, "reason": "shutdown"}))
-        pub_leave.undeclare()
-        self.session.close()
+        if not self.destroyed:
+            pub_leave = self.onboard.declare_publisher("swarm/agents/despawn")
+            pub_leave.put(json.dumps({"agent_id": self.agent_id, "reason": "shutdown"}))
+            pub_leave.undeclare()
+        self.radio.close()
+        self.onboard.close()

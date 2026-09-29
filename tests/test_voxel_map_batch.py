@@ -121,6 +121,45 @@ class TestVoxelMapBatch(unittest.TestCase):
         print(f"  Batch raytrace time:     {t_batch*1000.0:.2f} ms")
         print(f"  Speedup ratio:           {t_single / max(t_batch, 1e-9):.2f}x")
 
+    def test_nearby_obstacles_matches_brute_force(self):
+        import numpy as np
+        rng = np.random.default_rng(3)
+        vmap = VoxelMap()
+        for _ in range(400):
+            x, y, z = rng.uniform(-20, 20), rng.uniform(-20, 20), rng.uniform(5, 30)
+            if rng.random() < 0.5:
+                vmap.mark_occupied(x, y, z, current_time=1.0)
+            else:
+                vmap.mark_free(x, y, z, current_time=1.0)
+        for _ in range(20):
+            q = rng.uniform(-15, 15, 3) + np.array([0, 0, 17])
+            r = rng.uniform(1, 15)
+            got = sorted((o["x"], o["y"], o["z"]) for o in vmap.get_nearby_obstacles(*q, r))
+            want = sorted(
+                vmap._voxel_to_world(*k) for k, occ in vmap.voxels.items()
+                if occ >= 0.5 and np.linalg.norm(np.array(vmap._voxel_to_world(*k)) - q) <= r
+            )
+            self.assertEqual(got, want)
+
+    def test_refreshed_voxel_survives_cleanup_of_older_batch(self):
+        vmap = VoxelMap()
+        vmap.mark_occupied(1.0, 1.0, 1.0, current_time=10.0)
+        vmap.mark_occupied(1.0, 1.0, 1.0, current_time=10.4)   # same voxel, refreshed
+        vmap.cleanup_stale_data(max_age=0.5, current_time=10.6)
+        self.assertGreaterEqual(vmap.get_occupancy(1.0, 1.0, 1.0), 0.5)
+        vmap.cleanup_stale_data(max_age=0.5, current_time=11.0)
+        self.assertLess(vmap.get_occupancy(1.0, 1.0, 1.0), 0.5)
+        self.assertEqual(vmap.get_stats()["total_voxels"], 0)
+
+    def test_clock_reset_expires_future_stamped_voxels(self):
+        vmap = VoxelMap()
+        vmap.mark_occupied(1.0, 1.0, 1.0, current_time=500.0)  # before a simulator reset
+        vmap.mark_occupied(3.0, 3.0, 3.0, current_time=0.1)    # after it
+        vmap.cleanup_stale_data(max_age=0.5, current_time=0.2)
+        self.assertLess(vmap.get_occupancy(1.0, 1.0, 1.0), 0.5)
+        self.assertGreaterEqual(vmap.get_occupancy(3.0, 3.0, 3.0), 0.5)
+        self.assertEqual(len(vmap.get_nearby_obstacles(3.0, 3.0, 3.0, 1.0)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

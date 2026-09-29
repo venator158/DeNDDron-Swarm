@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeNDDron C2</title>
+<style>
+  :root {
+    --bg: #0b1117; --panel: #111a22; --line: #1f2c38; --text: #d6e2ec; --muted: #7d91a3;
+    --accent: #4fb3ff; --ok: #3ecf8e; --warn: #f5b942; --bad: #ff5c5c;
+    --uav: #f5d442; --missile: #ff9d3c; --cruise_missile: #ff4d4d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; letter-spacing: .08em; }
+  .kpi { color: var(--muted); } .kpi b { color: var(--text); font-size: 15px; }
+  #conn { margin-left: auto; } .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background: var(--bad); }
+  .dot.on { background: var(--ok); }
+  main { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(420px, 1.15fr); gap: 12px; padding: 12px 16px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; min-width: 0; }
+  section h2 { font-size: 12px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; font-weight: 600; }
+  .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  canvas { width: 100%; aspect-ratio: 1; display: block; background: #081018; border-radius: 4px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.sel { background: #16283a; } tbody tr { cursor: default; } #threats tbody tr { cursor: pointer; }
+  .scroll { overflow: auto; max-height: 300px; }
+  .tag { padding: 1px 6px; border-radius: 3px; font-size: 11px; background: #1b2733; }
+  .s-tracking { color: var(--accent); } .s-approved { color: var(--warn); } .s-destroyed { color: var(--ok); }
+  .s-leaked, .s-impact, .s-failed { color: var(--bad); }
+  .st-idle { color: var(--muted); } .st-bidding { color: var(--accent); } .st-engaging { color: var(--warn); }
+  .st-on_station { color: #ffcf6e; } .st-expended { color: #55606b; }
+  button { font: inherit; background: #1d4f7a; color: #fff; border: 0; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+  button:disabled { background: #25313c; color: #66788a; cursor: not-allowed; }
+  button.big { padding: 8px 16px; font-size: 14px; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); } .muted { color: var(--muted); }
+  #detail { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; }
+  #detail .k { color: var(--muted); }
+  #events { max-height: 180px; overflow: auto; font-size: 12px; }
+  #events div { padding: 2px 0; border-bottom: 1px dashed var(--line); }
+  #toast { position: fixed; bottom: 16px; right: 16px; padding: 10px 14px; border-radius: 5px; background: #1b2733; border: 1px solid var(--line); display: none; }
+  .legend span { margin-right: 12px; } .sw { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; vertical-align:-1px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>DeNDDRON C2</h1>
+  <span class="kpi">sim t <b id="simt">–</b></span>
+  <span class="kpi">drones <b id="members">–</b></span>
+  <span class="kpi">free <b id="free">–</b></span>
+  <span class="kpi">expended <b id="expended">–</b></span>
+  <span class="kpi">threats <b id="tcount">–</b></span>
+  <span id="conn"><span class="dot" id="conndot"></span><span id="conntext">connecting</span></span>
+</header>
+<main>
+  <div class="col">
+    <section>
+      <h2>Tactical picture</h2>
+      <canvas id="map" width="900" height="900"></canvas>
+      <div class="legend muted" style="margin-top:6px">
+        <span><i class="sw" style="background:var(--uav)"></i>uav L1</span>
+        <span><i class="sw" style="background:var(--missile)"></i>missile L2</span>
+        <span><i class="sw" style="background:var(--cruise_missile)"></i>cruise L3</span>
+        <span><i class="sw" style="background:#7d91a3"></i>idle drone</span>
+        <span><i class="sw" style="background:#f5b942"></i>engaging</span>
+        <span>+ engagement point · ○ CPA</span>
+      </div>
+    </section>
+    <section>
+      <h2>Events</h2>
+      <div id="events"></div>
+    </section>
+  </div>
+  <div class="col">
+    <section>
+      <h2>Threat queue — min-heap by time to CPA</h2>
+      <div class="scroll">
+        <table id="threats">
+          <thead><tr><th>#</th><th>id</th><th>type</th><th class="num">L</th><th class="num">TCPA s</th><th class="num">CPA m</th>
+            <th class="num">t eng s</th><th class="num">TTI(L) s</th><th>status</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <section>
+      <h2>Selected threat</h2>
+      <div id="detail" class="muted">Select a threat in the queue.</div>
+      <div style="margin-top:10px"><button class="big" id="approveBig" disabled>Approve interception</button>
+        <span id="approveNote" class="muted" style="margin-left:10px"></span></div>
+    </section>
+    <section>
+      <h2>Swarm instrumentation</h2>
+      <div class="scroll">
+        <table id="drones">
+          <thead><tr><th>drone</th><th>state</th><th>link</th><th class="num">hb age</th><th>threat</th>
+            <th class="num">cpu %</th><th class="num">loop Hz</th><th class="num">loop p99</th><th class="num">overruns</th>
+            <th class="num">sensor age p50/max</th><th class="num">percep p99</th><th class="num">plan p99</th>
+            <th class="num">tx B/s</th><th class="num">peers</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <section>
+      <h2>Radio traffic received at ship</h2>
+      <table id="radio"><thead><tr><th>topic</th><th class="num">msgs/s</th><th class="num">bytes/s</th></tr></thead><tbody></tbody></table>
+      <div class="muted" id="swarmtx" style="margin-top:6px"></div>
+    </section>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null, selected = null;
+const fmt = (v, d = 1) => (v === null || v === undefined) ? "–" : Number(v).toFixed(d);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const TYPE_COLOR = {uav: "#f5d442", missile: "#ff9d3c", cruise_missile: "#ff4d4d"};
+const STATE_COLOR = {idle: "#7d91a3", bidding: "#4fb3ff", engaging: "#f5b942", on_station: "#ffcf6e"};
+
+function toast(msg, good) {
+  const t = $("toast"); t.textContent = msg; t.style.display = "block";
+  t.style.borderColor = good ? "var(--ok)" : "var(--bad)";
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display = "none", 3500);
+}
+
+async function approve(id) {
+  try {
+    const r = await fetch("/api/approve", {method: "POST", headers: {"Content-Type": "application/json"},
+                                            body: JSON.stringify({threat_id: id})});
+    const j = await r.json();
+    toast(`${id}: ${j.message}`, j.ok);
+  } catch (e) { toast(`${id}: ${e}`, false); }
+}
+
+function drawMap(s) {
+  const cv = $("map"), g = cv.getContext("2d"), W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  const R = 200, sc = (W / 2 - 20) / R, cx = W / 2, cy = H / 2;
+  const P = (p) => [cx + p.x * sc, cy - p.y * sc];
+  g.lineWidth = 1; g.font = "20px monospace";
+  for (const [r, col, lbl] of [[200, "#152230", "200 m"], [100, "#152230", "100 m"],
+                               [s.params.defended_radius, "#1f4a3a", "defended"]]) {
+    g.strokeStyle = col; g.beginPath(); g.arc(cx, cy, r * sc, 0, 2 * Math.PI); g.stroke();
+    g.fillStyle = "#3a5266"; g.fillText(lbl, cx + 6, cy - r * sc + 22);
+  }
+  g.fillStyle = "#2b4c66"; g.beginPath(); g.arc(cx, cy, s.params.ship_radius * sc, 0, 2 * Math.PI); g.fill();
+  g.fillStyle = "#9cc3e0"; g.fillText("SHIP", cx - 22, cy + 7);
+
+  const byId = Object.fromEntries(s.threats.map((t) => [t.threat_id, t]));
+  for (const t of s.threats) {
+    if (!["tracking", "approved"].includes(t.status)) continue;
+    const col = TYPE_COLOR[t.type] || "#fff", [x, y] = P(t.pos), [qx, qy] = P(t.cpa), [ex, ey] = P(t.point);
+    g.strokeStyle = col; g.globalAlpha = 0.45; g.setLineDash([8, 8]);
+    g.beginPath(); g.moveTo(x, y); g.lineTo(qx, qy); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    g.beginPath(); g.arc(qx, qy, 7, 0, 2 * Math.PI); g.stroke();
+    g.lineWidth = 3; g.beginPath(); g.moveTo(ex - 9, ey); g.lineTo(ex + 9, ey); g.moveTo(ex, ey - 9); g.lineTo(ex, ey + 9); g.stroke(); g.lineWidth = 1;
+    g.fillStyle = col; g.beginPath(); g.arc(x, y, 5 + 3 * t.level, 0, 2 * Math.PI); g.fill();
+    if (t.threat_id === selected) { g.strokeStyle = "#fff"; g.lineWidth = 2; g.beginPath(); g.arc(x, y, 12 + 3 * t.level, 0, 2 * Math.PI); g.stroke(); g.lineWidth = 1; }
+    g.fillStyle = "#e6eef5"; g.fillText(`${t.threat_id} ${fmt(t.tcpa_s, 0)}s`, x + 12, y - 10);
+  }
+  for (const d of s.drones) {
+    if (!d.pose || d.state === "expended") continue;
+    const [x, y] = P(d.pose), col = STATE_COLOR[d.state] || "#7d91a3";
+    if (d.threat_id && byId[d.threat_id]) {
+      const [ex, ey] = P(byId[d.threat_id].point);
+      g.strokeStyle = col; g.globalAlpha = 0.5; g.beginPath(); g.moveTo(x, y); g.lineTo(ex, ey); g.stroke(); g.globalAlpha = 1;
+    }
+    g.fillStyle = col; g.beginPath(); g.arc(x, y, 6, 0, 2 * Math.PI); g.fill();
+    if (d.link === false) { g.strokeStyle = "#ff5c5c"; g.lineWidth = 2; g.beginPath(); g.arc(x, y, 10, 0, 2 * Math.PI); g.stroke(); g.lineWidth = 1; }
+    g.fillStyle = "#8aa0b3"; g.font = "16px monospace"; g.fillText(d.id.replace("drone_", "d"), x + 8, y + 16); g.font = "20px monospace";
+  }
+}
+
+function renderThreats(s) {
+  const tb = $("threats").querySelector("tbody");
+  let rank = 0;
+  tb.innerHTML = s.threats.map((t) => {
+    const active = t.status === "tracking" || t.status === "approved";
+    const f = t.feasibility;
+    const tti = f ? `${fmt(f.tti_s)} / ${fmt(f.available_s)}` : "–";
+    const can = t.status === "tracking" && f && f.feasible;
+    return `<tr data-id="${esc(t.threat_id)}" class="${t.threat_id === selected ? "sel" : ""}">
+      <td class="muted">${active ? ++rank : ""}</td><td>${esc(t.threat_id)}</td>
+      <td><span class="sw" style="background:${TYPE_COLOR[t.type] || "#fff"}"></span>${esc(t.type)}</td>
+      <td class="num">${t.level}</td><td class="num">${active ? fmt(t.tcpa_s) : "–"}</td><td class="num">${fmt(t.cpa_dist)}</td>
+      <td class="num">${active ? fmt(t.t_to_engage_s) : "–"}</td>
+      <td class="num ${f ? (f.feasible ? "ok" : "bad") : ""}">${tti}</td>
+      <td class="s-${esc(t.status)}">${esc(t.status)}${t.status === "approved" ? ` ${t.holders.length}/${t.level}` : ""}</td>
+      <td>${t.status === "tracking" ? `<button data-approve="${esc(t.threat_id)}" ${can ? "" : "disabled"}>Approve</button>` : ""}</td></tr>`;
+  }).join("");
+}
+
+function renderDetail(s) {
+  const t = s.threats.find((x) => x.threat_id === selected);
+  const btn = $("approveBig");
+  if (!t) { $("detail").innerHTML = "Select a threat in the queue."; btn.disabled = true; $("approveNote").textContent = ""; return; }
+  const f = t.feasibility;
+  const rows = [
+    ["threat", `${t.threat_id} — ${t.type}, level ${t.level} (${t.level} drone${t.level > 1 ? "s" : ""})`],
+    ["status", `<span class="s-${esc(t.status)}">${esc(t.status)}</span>`],
+    ["position", `${fmt(t.pos.x)}, ${fmt(t.pos.y)}, ${fmt(t.pos.z)} m`],
+    ["CPA", `${fmt(t.cpa_dist)} m from ship, TCPA ${fmt(t.tcpa_s)} s`],
+    ["engagement point", `${fmt(t.point.x)}, ${fmt(t.point.y)}, ${fmt(t.point.z)} m in ${fmt(t.t_to_engage_s)} s`],
+  ];
+  if (f) rows.push(["TTI(" + t.level + ")", `${fmt(f.tti_s)} s with ${f.free} free drones — <span class="${f.feasible ? "ok" : "bad"}">${esc(f.reason)}</span>`]);
+  if (t.holders.length) rows.push(["engaged drones", t.holders.join(", ")]);
+  if (Object.keys(t.detonated).length) rows.push(["detonations (miss m)", Object.entries(t.detonated).map(([d, m]) => `${d}: ${m}`).join(", ")]);
+  if (t.full_award_ms !== null) rows.push(["decision latency", `first award ${t.first_award_ms} ms, all ${t.full_award_ms} ms after approval`]);
+  $("detail").innerHTML = rows.map(([k, v]) => `<div class="k">${k}</div><div>${v}</div>`).join("");
+  const can = t.status === "tracking" && f && f.feasible;
+  btn.disabled = !can;
+  $("approveNote").textContent = t.status !== "tracking" ? "" : (can ? "TCPA > TTI: interception possible" : f ? f.reason : "");
+}
+
+function renderDrones(s) {
+  $("drones").querySelector("tbody").innerHTML = s.drones.map((d) => {
+    const m = d.telemetry || {};
+    return `<tr><td>${esc(d.id)}</td><td class="st-${esc(d.state)}">${esc(d.state)}</td>
+      <td class="${d.link ? "ok" : "bad"}">${d.state === "expended" ? "" : (d.link ? "up" : "down")}</td>
+      <td class="num">${fmt(d.hb_age_s)}</td><td>${esc(d.threat_id || "")}</td>
+      <td class="num">${fmt(m.cpu_pct)}</td><td class="num">${fmt(m.loop_hz)}</td><td class="num">${fmt(m.loop_p99_ms)}</td>
+      <td class="num ${m.overruns > 5 ? "warn" : ""}">${m.overruns ?? "–"}</td>
+      <td class="num">${fmt(m.sensor_age_p50_ms, 0)} / ${fmt(m.sensor_age_max_ms, 0)}</td>
+      <td class="num">${fmt(m.perception_p99_ms, 2)}</td><td class="num">${fmt(m.planner_p99_ms, 2)}</td>
+      <td class="num">${m.tx_bytes_per_s ?? "–"}</td><td class="num">${m.peers_heard ?? "–"}</td></tr>`;
+  }).join("");
+}
+
+function renderRadio(s) {
+  const rows = Object.entries(s.radio_rx_at_ship || {}).sort();
+  $("radio").querySelector("tbody").innerHTML = rows.map(([k, v]) =>
+    `<tr><td>${esc(k)}</td><td class="num">${fmt(v.msgs_per_s)}</td><td class="num">${v.bytes_per_s}</td></tr>`).join("");
+  const live = s.drones.filter((d) => d.state !== "expended" && d.telemetry && d.telemetry.tx_bytes_per_s !== undefined);
+  const tx = live.reduce((a, d) => a + d.telemetry.tx_bytes_per_s, 0);
+  $("swarmtx").textContent = `swarm radio tx (sum of drone telemetry): ${tx} B/s from ${live.length} drones`;
+}
+
+function renderEvents(s) {
+  $("events").innerHTML = s.events.slice().reverse().map((e) => {
+    const { wall, sim_time, kind, ...rest } = e;
+    const cls = ["destroyed", "approved", "engaged"].includes(kind) ? "ok"
+              : ["leaked", "impact", "failed", "missed", "approval_rejected"].includes(kind) ? "bad" : "";
+    return `<div><span class="muted">${esc(wall)} t=${fmt(sim_time)}</span> <b class="${cls}">${esc(kind)}</b> ${
+      esc(Object.entries(rest).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))}</div>`;
+  }).join("");
+}
+
+function render(s) {
+  state = s;
+  $("simt").textContent = fmt(s.sim_time);
+  $("members").textContent = s.roster.count;
+  $("free").textContent = s.roster.free;
+  $("expended").textContent = s.roster.expended;
+  $("tcount").textContent = Object.entries(s.threat_counts).map(([k, v]) => `${k} ${v}`).join(" · ") || "0";
+  drawMap(s); renderThreats(s); renderDetail(s); renderDrones(s); renderRadio(s); renderEvents(s);
+}
+
+$("threats").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-approve]");
+  if (b) { approve(b.dataset.approve); return; }
+  const tr = e.target.closest("tr[data-id]");
+  if (tr) { selected = tr.dataset.id; if (state) render(state); }
+});
+$("approveBig").addEventListener("click", () => selected && approve(selected));
+
+function connect() {
+  const es = new EventSource("/api/stream");
+  es.onopen = () => { $("conndot").classList.add("on"); $("conntext").textContent = "live"; };
+  es.onmessage = (m) => render(JSON.parse(m.data));
+  es.onerror = () => { $("conndot").classList.remove("on"); $("conntext").textContent = "reconnecting"; };
+}
+connect();
+</script>
+</body>
+</html>

@@ -6,8 +6,8 @@ WORKDIR /app
 COPY src/agent/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the python agent code
+# Agent code plus the modules shared with the ship
 COPY src/agent/ ./
+COPY src/common/ ./
 
-# Run the agent directly
 CMD ["python", "-u", "main.py"]

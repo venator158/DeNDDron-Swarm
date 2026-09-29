@@ -10,9 +10,9 @@ SEED=42
 ALGORITHM="orca"
 COMPOSE_ARGS=()
 BUILD_FLAG=""
-THREAT_WAVES=0
-THREAT_INTERVAL_S=15
-THREATS_PER_WAVE=4
+MAX_THREATS=0
+THREAT_INTERVAL_S=30
+THREAT_FIRST_S=20
 
 # Parse positional argument for AGENT_COUNT if provided as the very first argument (legacy support)
 if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
@@ -31,15 +31,19 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --threats)
-      THREAT_WAVES="$2"
+      MAX_THREATS="$2"
       shift 2
       ;;
     --threat-interval)
       THREAT_INTERVAL_S="$2"
       shift 2
       ;;
-    --threats-per-wave)
-      THREATS_PER_WAVE="$2"
+    --first-threat)
+      THREAT_FIRST_S="$2"
+      shift 2
+      ;;
+    --radio-routing)
+      export RADIO_ROUTING="$2"
       shift 2
       ;;
     --build)
@@ -56,7 +60,7 @@ done
 
 GEN_ARGS=(--agents "$AGENT_COUNT" --seed "$SEED" --algorithm "$ALGORITHM")
 # In the defence scenario drones hold station until tasked, so no static goals.
-if [[ "$THREAT_WAVES" -gt 0 ]]; then
+if [[ "$MAX_THREATS" -gt 0 ]]; then
   GEN_ARGS+=(--no-goals)
 fi
 python3 scripts/generate_swarm_config.py "${GEN_ARGS[@]}"
@@ -79,10 +83,11 @@ if [[ -n "$BUILD_FLAG" ]]; then
   docker compose build denddron_base
 fi
 
-if [[ "$THREAT_WAVES" -gt 0 ]]; then
-  export COMPOSE_PROFILES=threats THREAT_WAVES THREAT_INTERVAL_S THREATS_PER_WAVE THREAT_SEED="$SEED"
-  echo "Threat dispatcher enabled: ${THREAT_WAVES} waves of up to ${THREATS_PER_WAVE} threats every ${THREAT_INTERVAL_S}s"
+export MAX_THREATS THREAT_INTERVAL_S THREAT_FIRST_S THREAT_SEED="$SEED"
+if [[ "$MAX_THREATS" -gt 0 ]]; then
+  echo "Ship radar: ${MAX_THREATS} threats, first after ${THREAT_FIRST_S}s, then every ~${THREAT_INTERVAL_S}s (sim time)"
 fi
+echo "Operator dashboard: http://localhost:8080"
 
 compose_cmd=(docker compose --env-file .swarm.env up --scale agent="${AGENT_COUNT}")
 compose_cmd+=("${COMPOSE_ARGS[@]}")

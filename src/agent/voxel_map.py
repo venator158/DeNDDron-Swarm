@@ -3,12 +3,20 @@ VoxelMap: 3D probabilistic occupancy grid for obstacle perception.
 - World-absolute coordinates
 - Sparse representation for memory efficiency
 - Probabilistic occupancy: 0.0 (free) to 1.0 (occupied)
+
+Per-frame cost is kept bounded for the 50 Hz control loop:
+- occupied voxels are indexed separately, so obstacle queries scan only them
+  instead of every cell of a cube around the drone;
+- ray traversal is vectorized with numpy;
+- stale-data expiry walks update batches oldest-first instead of every voxel.
 """
 
-import numpy as np
+from collections import deque
 import logging
-import time
 import threading
+import time
+
+import numpy as np
 
 logger = logging.getLogger("VoxelMap")
 
@@ -33,20 +41,32 @@ class VoxelMap:
     # Voxel resolution in meters
     RESOLUTION = 0.5
 
+    OCCUPIED_THRESHOLD = 0.5
+
     def __init__(self):
         """Initialize empty voxel map."""
         # Sparse storage: key = (vx, vy, vz), value = occupancy probability [0.0, 1.0]
         self.voxels = {}
-
-        # For fast spatial queries, maintain a timestamp per voxel for future decay
+        # Last update time per voxel (None = never expires)
         self.voxel_timestamps = {}
-        
+        # Keys whose occupancy >= OCCUPIED_THRESHOLD
+        self._occupied = set()
+        # (timestamp, keys) per update, oldest first, for incremental expiry
+        self._batches = deque()
+
         # Thread safety between Zenoh callback and Reflex loops
         self.lock = threading.RLock()
 
+        self._max_index = np.array([
+            int((self.MAX_X - self.MIN_X) / self.RESOLUTION) + 1,
+            int((self.MAX_Y - self.MIN_Y) / self.RESOLUTION) + 1,
+            int((self.MAX_Z - self.MIN_Z) / self.RESOLUTION) + 1,
+        ])
+        self._origin = np.array([self.MIN_X, self.MIN_Y, self.MIN_Z])
+
         logger.info(f"VoxelMap initialized. Bounds: X[{self.MIN_X}, {self.MAX_X}], "
-                   f"Y[{self.MIN_Y}, {self.MAX_Y}], Z[{self.MIN_Z}, {self.MAX_Z}], "
-                   f"Resolution: {self.RESOLUTION}m")
+                    f"Y[{self.MIN_Y}, {self.MAX_Y}], Z[{self.MIN_Z}, {self.MAX_Z}], "
+                    f"Resolution: {self.RESOLUTION}m")
 
     def _world_to_voxel(self, x: float, y: float, z: float) -> tuple:
         """Convert world coordinates to voxel indices."""
@@ -64,10 +84,23 @@ class VoxelMap:
 
     def _in_bounds(self, vx: int, vy: int, vz: int) -> bool:
         """Check if voxel indices are within map bounds."""
-        max_vx = int((self.MAX_X - self.MIN_X) / self.RESOLUTION) + 1
-        max_vy = int((self.MAX_Y - self.MIN_Y) / self.RESOLUTION) + 1
-        max_vz = int((self.MAX_Z - self.MIN_Z) / self.RESOLUTION) + 1
-        return 0 <= vx < max_vx and 0 <= vy < max_vy and 0 <= vz < max_vz
+        return 0 <= vx < self._max_index[0] and 0 <= vy < self._max_index[1] and 0 <= vz < self._max_index[2]
+
+    # ------------------------------------------------------------------
+    # Writes (all callers hold self.lock)
+    # ------------------------------------------------------------------
+    def _set(self, key, occupancy: float, ts):
+        self.voxels[key] = occupancy
+        self.voxel_timestamps[key] = ts
+        if occupancy >= self.OCCUPIED_THRESHOLD:
+            self._occupied.add(key)
+        else:
+            self._occupied.discard(key)
+
+    def _delete(self, key):
+        self.voxels.pop(key, None)
+        self.voxel_timestamps.pop(key, None)
+        self._occupied.discard(key)
 
     def mark_occupied(self, x: float, y: float, z: float, confidence: float = 1.0, current_time: float = None):
         """
@@ -77,16 +110,14 @@ class VoxelMap:
             x, y, z: World coordinates
             confidence: Occupancy probability [0.0, 1.0]. Default 1.0 for LiDAR detections.
         """
-        vx, vy, vz = self._world_to_voxel(x, y, z)
-        if not self._in_bounds(vx, vy, vz):
+        key = self._world_to_voxel(x, y, z)
+        if not self._in_bounds(*key):
             return
-
-        key = (vx, vy, vz)
+        ts = current_time if current_time is not None else time.time()
         with self.lock:
-            # Update with new confidence (taking max to accumulate evidence)
-            current = self.voxels.get(key, 0.0)
-            self.voxels[key] = max(current, confidence)
-            self.voxel_timestamps[key] = current_time if current_time is not None else time.time()
+            # Take the max to accumulate evidence
+            self._set(key, max(self.voxels.get(key, 0.0), confidence), ts)
+            self._batches.append((ts, [key]))
 
     def mark_free(self, x: float, y: float, z: float, current_time: float = None):
         """
@@ -95,17 +126,19 @@ class VoxelMap:
         Args:
             x, y, z: World coordinates
         """
-        vx, vy, vz = self._world_to_voxel(x, y, z)
-        if not self._in_bounds(vx, vy, vz):
+        key = self._world_to_voxel(x, y, z)
+        if not self._in_bounds(*key):
             return
-
-        key = (vx, vy, vz)
+        ts = current_time if current_time is not None else time.time()
         with self.lock:
             # Only mark as free if not already occupied
-            if key not in self.voxels or self.voxels[key] < 0.5:
-                self.voxels[key] = 0.0
-                self.voxel_timestamps[key] = current_time if current_time is not None else time.time()
+            if self.voxels.get(key, 0.0) < self.OCCUPIED_THRESHOLD:
+                self._set(key, 0.0, ts)
+                self._batches.append((ts, [key]))
 
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
     def is_free(self, x: float, y: float, z: float, threshold: float = 0.5) -> bool:
         """
         Query if a world coordinate is free.
@@ -117,13 +150,10 @@ class VoxelMap:
         Returns:
             True if voxel is free (occupancy < threshold), False otherwise.
         """
-        vx, vy, vz = self._world_to_voxel(x, y, z)
-        if not self._in_bounds(vx, vy, vz):
+        key = self._world_to_voxel(x, y, z)
+        if not self._in_bounds(*key):
             return False  # Out of bounds is treated as occupied for safety
-
-        key = (vx, vy, vz)
-        occupancy = self.voxels.get(key, 0.0)
-        return occupancy < threshold
+        return self.voxels.get(key, 0.0) < threshold
 
     def get_occupancy(self, x: float, y: float, z: float) -> float:
         """
@@ -135,13 +165,14 @@ class VoxelMap:
         Returns:
             Occupancy probability [0.0, 1.0]. Unknown voxels default to 0.0 (free).
         """
-        vx, vy, vz = self._world_to_voxel(x, y, z)
-        if not self._in_bounds(vx, vy, vz):
+        key = self._world_to_voxel(x, y, z)
+        if not self._in_bounds(*key):
             return 1.0  # Out of bounds is occupied
-
-        key = (vx, vy, vz)
         return self.voxels.get(key, 0.0)
 
+    # ------------------------------------------------------------------
+    # Ray tracing
+    # ------------------------------------------------------------------
     def compute_ray_voxels(self, x_start: float, y_start: float, z_start: float,
                            x_end: float, y_end: float, z_end: float,
                            mark_endpoint_occupied: bool = True) -> tuple:
@@ -151,34 +182,24 @@ class VoxelMap:
         """
         v_start = np.array(self._world_to_voxel(x_start, y_start, z_start))
         v_end = np.array(self._world_to_voxel(x_end, y_end, z_end))
-
         diff = v_end - v_start
         steps = int(np.max(np.abs(diff))) + 1
 
-        free_keys = []
-        occupied_keys = []
-
         if steps <= 1:
-            if mark_endpoint_occupied:
-                vx, vy, vz = tuple(v_end)
-                if self._in_bounds(vx, vy, vz):
-                    occupied_keys.append((vx, vy, vz))
-            return free_keys, occupied_keys
+            end = tuple(int(c) for c in v_end)
+            if mark_endpoint_occupied and self._in_bounds(*end):
+                return [], [end]
+            return [], []
 
-        for i in range(steps):
-            t = i / (steps - 1)
-            v_curr = v_start + t * diff
-            vx, vy, vz = tuple(int(np.round(c)) for c in v_curr)
+        t = np.arange(steps) / (steps - 1)
+        cells = np.round(v_start + t[:, None] * diff).astype(np.int64)
+        in_bounds = np.all((cells >= 0) & (cells < self._max_index), axis=1)
 
-            if not self._in_bounds(vx, vy, vz):
-                continue
-
-            if i == steps - 1:
-                if mark_endpoint_occupied:
-                    occupied_keys.append((vx, vy, vz))
-            else:
-                free_keys.append((vx, vy, vz))
-
+        free_cells = cells[:-1][in_bounds[:-1]]
+        free_keys = list(map(tuple, free_cells.tolist()))
+        occupied_keys = []
+        if mark_endpoint_occupied and in_bounds[-1]:
+            occupied_keys.append(tuple(cells[-1].tolist()))
         return free_keys, occupied_keys
 
     def update_batch(self, free_voxel_keys: list, occupied_voxel_keys: list,
@@ -193,15 +214,16 @@ class VoxelMap:
         free_set = set(free_voxel_keys) - occ_set
 
         with self.lock:
+            touched = []
             for key in free_set:
-                if key not in self.voxels or self.voxels[key] < 0.5:
-                    self.voxels[key] = 0.0
-                    self.voxel_timestamps[key] = ts
-
+                if self.voxels.get(key, 0.0) < self.OCCUPIED_THRESHOLD:
+                    self._set(key, 0.0, ts)
+                    touched.append(key)
             for key in occ_set:
-                current = self.voxels.get(key, 0.0)
-                self.voxels[key] = max(current, confidence)
-                self.voxel_timestamps[key] = ts
+                self._set(key, max(self.voxels.get(key, 0.0), confidence), ts)
+                touched.append(key)
+            if touched:
+                self._batches.append((ts, touched))
 
     def raytrace(self, x_start: float, y_start: float, z_start: float,
                  x_end: float, y_end: float, z_end: float,
@@ -234,74 +256,71 @@ class VoxelMap:
 
         self.update_batch(all_free, all_occ, confidence=1.0, current_time=current_time)
 
+    # ------------------------------------------------------------------
+    # Maintenance and queries
+    # ------------------------------------------------------------------
     def cleanup_stale_data(self, max_age: float = 0.5, current_time: float = None):
         """
-        Removes or decays voxels that have not been updated recently.
-        This prevents moving obstacles from leaving trails and ensures APF uses fresh data.
-        
-        Args:
-            max_age: Maximum age in seconds before a voxel is cleared.
+        Removes voxels that have not been updated for more than max_age seconds.
+        This prevents moving obstacles from leaving trails and ensures the planners use fresh data.
+
+        Walks update batches oldest-first and stops at the first fresh one, so the
+        cost is proportional to what expires, not to the map size.  A batch stamped
+        more than max_age in the *future* means the clock was reset, so it is expired too.
         """
         if current_time is None:
             current_time = time.time()
-        stale_keys = []
-        
+
         with self.lock:
-            for key, ts in list(self.voxel_timestamps.items()):
+            while self._batches:
+                ts, keys = self._batches[0]
+                if ts is not None and abs(current_time - ts) <= max_age:
+                    break
+                self._batches.popleft()
                 if ts is None:
                     continue
-                if current_time - ts > max_age:
-                    stale_keys.append(key)
-                    
-            for key in stale_keys:
-                if key in self.voxels:
-                    del self.voxels[key]
-                if key in self.voxel_timestamps:
-                    del self.voxel_timestamps[key]
+                for key in keys:
+                    # Skip voxels refreshed by a later batch.
+                    if self.voxel_timestamps.get(key) == ts:
+                        self._delete(key)
 
     def get_nearby_obstacles(self, x: float, y: float, z: float, radius: float) -> list:
         """
         Finds all occupied voxels within a spherical radius of the given coordinate.
         Returns a list of their central world coordinates.
         """
-        obstacles = []
-        cx, cy, cz = self._world_to_voxel(x, y, z)
-        v_radius = int(np.ceil(radius / self.RESOLUTION))
-        
-        # Fast local bounding box check over the voxel sparse grid
         with self.lock:
-            for vx in range(cx - v_radius, cx + v_radius + 1):
-                for vy in range(cy - v_radius, cy + v_radius + 1):
-                    for vz in range(cz - v_radius, cz + v_radius + 1):
-                        key = (vx, vy, vz)
-                        occupancy = self.voxels.get(key, 0.0)
-                        if occupancy >= 0.5:
-                            wx, wy, wz = self._voxel_to_world(vx, vy, vz)
-                            # Confirm spherical bounds (Euclidean distance)
-                            dist = np.sqrt((wx - x)**2 + (wy - y)**2 + (wz - z)**2)
-                            if dist <= radius:
-                                obstacles.append({"x": wx, "y": wy, "z": wz, "occupancy": occupancy})
-                            
-        return obstacles
+            if not self._occupied:
+                return []
+            keys = np.fromiter(
+                (c for key in self._occupied for c in key), dtype=np.int64, count=3 * len(self._occupied)
+            ).reshape(-1, 3)
+            occupancy = [self.voxels[tuple(k)] for k in keys.tolist()]
+
+        centers = self._origin + keys * self.RESOLUTION
+        dist = np.linalg.norm(centers - np.array([x, y, z]), axis=1)
+        return [
+            {"x": float(c[0]), "y": float(c[1]), "z": float(c[2]), "occupancy": occupancy[i]}
+            for i, c in enumerate(centers.tolist()) if dist[i] <= radius
+        ]
 
     def clear(self):
         """Clear all voxels."""
         with self.lock:
             self.voxels.clear()
             self.voxel_timestamps.clear()
+            self._occupied.clear()
+            self._batches.clear()
 
     def get_stats(self) -> dict:
         """Get map statistics."""
         with self.lock:
             if not self.voxels:
                 return {"total_voxels": 0, "occupied": 0, "free": 0}
-
-            occupied = sum(1 for v in self.voxels.values() if v >= 0.5)
-            free = sum(1 for v in self.voxels.values() if v < 0.5)
-
+            occupied = len(self._occupied)
             return {
                 "total_voxels": len(self.voxels),
                 "occupied": occupied,
-                "free": free,
+                "free": len(self.voxels) - occupied,
                 "memory_mb": len(self.voxels) * 32 / (1024 * 1024)  # Rough estimate
             }
