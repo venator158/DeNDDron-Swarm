@@ -1,5 +1,7 @@
+import hashlib
 import json
 import time
+from collections import OrderedDict
 import threading
 import numpy as np
 import logging
@@ -192,6 +194,7 @@ class DenddronAgent:
         self.peers = {}                # peer drone id -> monotonic time last heard
         self._peer_heartbeats = {}     # peer drone id -> last heartbeat payload (for relaying)
         self._roster_time = None       # monotonic time of the last roster
+        self._assign_hashes = OrderedDict()   # order id -> short hash of the assignment we computed
         self.roster = []               # drone ids the ship last reported hearing
         self._missing_from_roster = 0
         self._link_was_up = False
@@ -779,6 +782,12 @@ class DenddronAgent:
                     self._pending_wave_id = None
         for r in results:
             summary = ", ".join(f"{tid}->{ws}" for tid, ws in r.assignment.items())
+            # Short fingerprint of what we concluded, reported in telemetry: the ship compares
+            # fingerprints across drones to measure whether they agreed on the assignment.
+            digest = hashlib.sha1(json.dumps(r.assignment, sort_keys=True).encode()).hexdigest()[:8]
+            self._assign_hashes[r.wave_id] = digest
+            while len(self._assign_hashes) > 10:
+                self._assign_hashes.popitem(last=False)
             logger.info(f"[{self.agent_id}] Order {r.wave_id} assignment: {summary}")
             if r.my_threat is None or self.destroyed:
                 continue
@@ -924,6 +933,7 @@ class DenddronAgent:
                     self._relay_unheard_peers()
                     snap = self.telemetry.snapshot()
                     snap.update({"agent_id": self.agent_id, "peers_heard": len(self._fresh_peers()),
+                                 "assignments": dict(self._assign_hashes),
                                  "voxels": self.voxel_map.get_stats().get("total_voxels", 0)})
                     self._radio_put(self.pub_telemetry, "swarm/telemetry", snap)
                 link = self._link_up()

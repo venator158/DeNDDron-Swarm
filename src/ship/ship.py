@@ -70,6 +70,8 @@ class Track:
         self.hits = set()               # detonations within kill radius
         self.missed = set()             # drones that aborted
         self.announces = 0
+        self.orders = []                # order (wave) ids sent for this threat
+        self.over_assigned = False      # more drones engaged/detonated than the level, at any time
         self.last_announce = None
         self.approved_wall = None
         self.first_award_ms = None
@@ -193,6 +195,8 @@ class Ship:
             agent, status = a["agent_id"], a.get("status", "engaged")
             if status == "engaged":
                 tr.holders.add(agent)
+                if len(tr.holders | set(tr.detonated)) > tr.level:
+                    tr.over_assigned = True
                 if tr.approved_wall is not None:
                     ms = round((time.monotonic() - tr.approved_wall) * 1000)
                     tr.first_award_ms = tr.first_award_ms or ms
@@ -324,6 +328,7 @@ class Ship:
 
     def _announce(self, tr, required):
         self.order_seq += 1
+        tr.orders.append(f"O{self.order_seq}")
         order = Threat(tr.threat_id, tr.type, tr.level, required, _xyz(tr.point), tr.t_engage)
         self.pub_orders.put(json.dumps({"wave_id": f"O{self.order_seq}", "threats": [order.to_dict()]}))
         tr.announces += 1
@@ -368,6 +373,47 @@ class Ship:
             time.sleep(0.1)
 
     # ------------------------------------------------------------ snapshot
+    def _agreement(self, tr):
+        """Share of drones that computed the same assignment, over this threat's orders (None if unknown)."""
+        agreeing = total = 0
+        for order in tr.orders:
+            counts = defaultdict(int)
+            for d in self.drones.values():
+                h = d.get("telemetry", {}).get("assignments", {}).get(order)
+                if h:
+                    counts[h] += 1
+            if counts:
+                agreeing += max(counts.values())
+                total += sum(counts.values())
+        return None if total == 0 else round(agreeing / total, 3)
+
+    def summary(self):
+        """Run-level outcome figures for experiments (GET /api/summary)."""
+        s = self.snapshot()
+        engaged = [t for t in s["threats"] if t["announces"] > 0]
+        lat = [t["full_award_ms"] for t in engaged if t["full_award_ms"] is not None]
+        agree = [t["agreement"] for t in engaged if t["agreement"] is not None]
+        counts = s["threat_counts"]
+        return {
+            "sim_time": s["sim_time"],
+            "threats_detected": len(self.tracks),
+            "approved": len(engaged),
+            "destroyed": counts.get("destroyed", 0),
+            "failed": counts.get("failed", 0),
+            "leaked_or_impact": counts.get("leaked", 0) + counts.get("impact", 0),
+            "still_active": counts.get("tracking", 0) + counts.get("approved", 0),
+            "kill_ratio": round(counts.get("destroyed", 0) / len(engaged), 3) if engaged else None,
+            "award_latency_ms_mean": round(sum(lat) / len(lat)) if lat else None,
+            "award_latency_ms_max": max(lat) if lat else None,
+            "never_fully_assigned": sum(1 for t in engaged if t["full_award_ms"] is None),
+            "reannounces": sum(max(0, t["announces"] - 1) for t in engaged),
+            "over_assigned": sum(1 for t in engaged if t["over_assigned"]),
+            "missed_slots": sum(len(t["missed"]) for t in engaged),
+            "agreement_mean": round(sum(agree) / len(agree), 3) if agree else None,
+            "drones_expended": s["roster"]["expended"],
+            "radio_rx_at_ship": s["radio_rx_at_ship"],
+        }
+
     def snapshot(self):
         with self.lock:
             now = self.sim_time
@@ -386,6 +432,7 @@ class Ship:
                     "t_to_engage_s": None if now is None else round(tr.t_engage - now, 1),
                     "holders": sorted(tr.holders), "hits": sorted(tr.hits), "detonated": tr.detonated,
                     "missed": sorted(tr.missed), "announces": tr.announces,
+                    "over_assigned": tr.over_assigned, "agreement": self._agreement(tr),
                     "first_award_ms": tr.first_award_ms, "full_award_ms": tr.full_award_ms,
                 }
                 if tr.status == "tracking" and now is not None:
@@ -440,6 +487,8 @@ def make_handler(ship):
                 self.send_header("Content-Length", str(len(page)))
                 self.end_headers()
                 self.wfile.write(page)
+            elif self.path == "/api/summary":
+                self._json(200, ship.summary())
             elif self.path == "/api/state":
                 self._json(200, ship.snapshot())
             elif self.path == "/api/stream":

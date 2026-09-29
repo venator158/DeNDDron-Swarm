@@ -56,3 +56,4 @@ build_test/
 config/swarm_runtime.json
 config/agent_registry.json
 config/agent_registry.json.lock
+results/

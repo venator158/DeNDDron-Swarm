@@ -44,6 +44,27 @@ def find_interface(subnet: str):
     raise RuntimeError(f"no interface in radio subnet {subnet}")
 
 
+# Per-topic Zenoh QoS for the radio (RADIO_QOS). Priorities give each class its own send queue,
+# so command-and-control traffic is not stuck behind telemetry when the radio is congested.
+# Over UDP every message is best-effort on the wire; "block" only means the sender waits for
+# queue space instead of dropping locally.
+QOS_PROFILES = {
+    "default": [],   # Zenoh defaults for everything
+    "tuned": [
+        {"key_exprs": ["swarm/threats", "swarm/awards", "ship/threat_status"],     # orders and awards
+         "config": {"priority": "real_time", "express": True, "congestion_control": "block"}},
+        {"key_exprs": ["swarm/bids"],
+         "config": {"priority": "interactive_high", "express": True, "congestion_control": "block"}},
+        {"key_exprs": ["ship/roster"],
+         "config": {"priority": "data_high", "express": True, "congestion_control": "drop"}},
+        {"key_exprs": ["swarm/heartbeat/**", "swarm/heartbeat_relay/**"],
+         "config": {"priority": "data_low", "congestion_control": "drop", "reliability": "best_effort"}},
+        {"key_exprs": ["swarm/telemetry/**"],
+         "config": {"priority": "background", "congestion_control": "drop", "reliability": "best_effort"}},
+    ],
+}
+
+
 def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = None) -> zenoh.Session:
     """Peer-mode session bound to the radio network only.
 
@@ -51,6 +72,7 @@ def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = Non
     no radio problem can freeze their onboard link.
 
     - protocol (RADIO_PROTO, udp): see the comment below.
+    - QoS profile (RADIO_QOS, default): per-topic priority/congestion rules, QOS_PROFILES.
     - lease (RADIO_LEASE_MS, 2 s): how soon a lost peer is noticed.
     - open/accept timeout (RADIO_OPEN_TIMEOUT_MS, 1 s): bounds connection attempts.
     - routing_mode (RADIO_ROUTING) only exists before Zenoh 1.1; newer versions
@@ -82,6 +104,9 @@ def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = Non
             conf.insert_json5(key, value)
         except zenoh.ZError:
             pass   # key not supported by this Zenoh version
+    qos = os.environ.get("RADIO_QOS") or "default"
+    if QOS_PROFILES[qos]:
+        conf.insert_json5("qos/publication", json.dumps(QOS_PROFILES[qos]))
     # Extra Zenoh settings for experiments, e.g. RADIO_ZENOH_CONFIG='{"routing/interests/timeout": 1000}'.
     # Unknown keys fail loudly here, so a typo cannot silently change nothing.
     for key, value in json.loads(os.environ.get("RADIO_ZENOH_CONFIG") or "{}").items():

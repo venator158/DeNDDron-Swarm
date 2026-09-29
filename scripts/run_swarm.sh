@@ -42,6 +42,10 @@ while [[ $# -gt 0 ]]; do
       THREAT_FIRST_S="$2"
       shift 2
       ;;
+    --radio-qos)
+      export RADIO_QOS="$2"
+      shift 2
+      ;;
     --build)
       BUILD_FLAG="--build"
       COMPOSE_ARGS+=("$1")
