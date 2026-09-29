@@ -244,7 +244,7 @@ function renderEvents(s) {
   $("events").innerHTML = s.events.slice().reverse().map((e) => {
     const { wall, sim_time, kind, ...rest } = e;
     const cls = ["destroyed", "approved", "confirmed"].includes(kind) ? "ok"
-              : ["leaked", "impact", "failed", "missed", "approval_rejected"].includes(kind) ? "bad" : "";
+              : ["leaked", "impact", "failed", "missed", "approval_rejected", "friendly_fire", "detonation_risk"].includes(kind) ? "bad" : "";
     return `<div><span class="muted">${esc(wall)} t=${fmt(sim_time)}</span> <b class="${cls}">${esc(kind)}</b> ${
       esc(Object.entries(rest).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))}</div>`;
   }).join("");

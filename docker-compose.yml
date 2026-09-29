@@ -79,6 +79,7 @@ services:
       RADIO_SUBNET: ${RADIO_SUBNET:-172.21.0.0/16}
       RADIO_QOS: ${RADIO_QOS:-default}
       SIM_RTF: ${SIM_RTF:-1}
+      ZONE_KEEPOUT: ${ZONE_KEEPOUT:-1}
       SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
       AGENT_ID_REGISTRY: /app/config/agent_registry.json
     # exec so SIGTERM reaches python and the agent shuts down cleanly

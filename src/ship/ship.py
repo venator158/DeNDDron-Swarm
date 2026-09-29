@@ -52,6 +52,8 @@ ACK_WINDOW_S = 0.3         # collect competing awards for a threat this long bef
 JOB_HZ = 2.0               # job topic updates per (sim) second
 JOB_CLOSE_REPEATS = 3      # "closed" job updates sent after a threat is resolved (lossy radio)
 HB_MISMATCH_S = 2.0        # a confirmed drone whose heartbeat shows another job this long is dropped
+CLEARANCE_M = 12.0         # non-job drones are kept this far from a detonation (kill radius 8 m + margin)
+SLOT_RADIUS_M = 4.0        # drones' slot circle around the engagement point (multi-drone jobs)
 
 
 def _env(name, default, cast):
@@ -80,6 +82,8 @@ class Track:
         self.maneuver_at = None         # sim time of the planned heading change, if any
         self.maneuvers = 0
         self.detonated = {}             # drone -> miss distance (m)
+        self.friendly_fire = []         # drones destroyed by this threat's detonations
+        self.intruded = 0               # detonations with non-job drones within CLEARANCE_M
         self.hits = set()               # detonations within kill radius
         self.missed = set()             # drones that aborted
         self.announces = 0
@@ -144,9 +148,11 @@ class Ship:
         self.pub_orders = self.radio.declare_publisher("swarm/threats")
         self.pub_roster = self.radio.declare_publisher("ship/roster")
         self.pub_status = self.radio.declare_publisher("ship/threat_status")
+        self.pub_zones = self.radio.declare_publisher("ship/zones")
         self.subs = [
             self.onboard.declare_subscriber("sim/clock", self._on_clock),
             self.onboard.declare_subscriber("sim/detonation", self._on_detonation),
+            self.onboard.declare_subscriber("sim/damage", self._on_damage),
             self.radio.declare_subscriber("swarm/heartbeat/*", self._on_heartbeat),
             self.radio.declare_subscriber("swarm/heartbeat_relay/*", self._on_relayed_heartbeat),
             self.radio.declare_subscriber("swarm/telemetry/*", self._on_telemetry),
@@ -258,7 +264,29 @@ class Ship:
         return {"threat_id": tr.threat_id, "status": "active" if tr.active else tr.status, "seq": tr.job_seq,
                 "type": tr.type, "level": tr.level, "point": _xyz(tr.point), "t_engage": tr.t_engage,
                 "cpa": _xyz(tr.cpa), "t_cpa": tr.t_cpa, "track": tr.track_msg(),
-                "holders": dict(tr.confirmed), "n_slots": tr.level}
+                "holders": dict(tr.confirmed), "n_slots": tr.level, "intruders": self._intruders(tr)}
+
+    @staticmethod
+    def zone_radius(tr):
+        """Keep-out radius around a job's engagement point: clearance from every slot."""
+        return CLEARANCE_M + (SLOT_RADIUS_M if tr.level > 1 else 0.0)
+
+    def _intruders(self, tr):
+        """Drones not on this job inside its zone (heartbeat positions, up to 0.5 s old)."""
+        on_job = set(tr.confirmed) | set(tr.pending) | set(tr.detonated)
+        out = []
+        for d in self.members():
+            p = self.drones[d]["hb"].get("pose")
+            if d in on_job or not p:
+                continue
+            if math.dist((p["x"], p["y"], p["z"]), tr.point) < self.zone_radius(tr):
+                out.append({"id": d, "pose": p})
+        return out
+
+    def _publish_zones(self):
+        zones = [{"threat_id": tr.threat_id, "point": _xyz(tr.point), "radius": self.zone_radius(tr),
+                  "t_engage": tr.t_engage} for tr in self.tracks.values() if tr.status == "approved"]
+        self.pub_zones.put(json.dumps({"zones": zones}))
 
     def _publish_job(self, tr):
         tr.job_seq += 1
@@ -333,6 +361,21 @@ class Ship:
             if tr.status == "approved":
                 self._publish_job(tr)
 
+    def _on_damage(self, sample):
+        """A drone destroyed by a detonation of another job (physics, observed like detonations)."""
+        d = self._parse(sample)
+        with self.lock:
+            victim = d["agent_id"]
+            self.expended.add(victim)
+            by = self.tracks.get(d.get("by_threat"))
+            if by is not None:
+                by.friendly_fire.append(victim)
+            for tr in self.tracks.values():            # its own job, if any, loses it
+                tr.confirmed.pop(victim, None)
+                tr.pending.pop(victim, None)
+            self.event("friendly_fire", drone=victim, by=d.get("by"), threat=d.get("by_threat"),
+                       job=d.get("job"), distance_m=d.get("distance"))
+
     def _on_detonation(self, sample):
         d = self._parse(sample)
         with self.lock:
@@ -344,6 +387,9 @@ class Ship:
             miss = math.dist(tp, (d["x"], d["y"], d["z"]))
             tr.detonated[d["agent_id"]] = round(miss, 2)
             tr.confirmed.pop(d["agent_id"], None)
+            if d.get("intruders"):
+                tr.intruded += 1
+                self.event("detonation_risk", threat=tr.threat_id, drone=d["agent_id"], intruders=d["intruders"])
             if miss <= self.args.kill_radius:
                 tr.hits.add(d["agent_id"])
             self.event("detonation", threat=tr.threat_id, drone=d["agent_id"], miss_m=round(miss, 2),
@@ -452,6 +498,7 @@ class Ship:
             tr.status = "approved"
             tr.approved_wall = simclock.now()
             self._announce(tr, tr.level)
+            self._publish_zones()             # idle drones start clearing the zone right away
             self.event("approved", threat=threat_id, tti_s=f["tti_s"], available_s=f["available_s"])
             return True, "approved"
 
@@ -510,6 +557,7 @@ class Ship:
                     relayed = [d for d in members if self.drones[d].get("relayed")]
                     self.pub_roster.put(json.dumps({"sim_time": now, "count": len(members), "members": members,
                                                     "relayed": relayed}))
+                    self._publish_zones()
                     span = wall - self._rx_window_start
                     if span >= 1.0:
                         self.rx_rates = {k: {"msgs_per_s": round(self.rx_counts[k] / span, 1),
@@ -556,6 +604,8 @@ class Ship:
             "reannounces": sum(max(0, t["announces"] - 1) for t in engaged),
             "over_assigned": sum(1 for t in engaged if len(t["detonated"]) > t["level"]),
             "rejected_awards": sum(t["rejected"] for t in engaged),
+            "friendly_fire": sum(len(t["friendly_fire"]) for t in s["threats"]),
+            "detonations_with_intruders": sum(t["intruded"] for t in s["threats"]),
             "maneuvers": sum(t["maneuvers"] for t in s["threats"]),
             "missed_slots": sum(len(t["missed"]) for t in engaged),
             "agreement_mean": round(sum(agree) / len(agree), 3) if agree else None,
@@ -583,6 +633,7 @@ class Ship:
                     "holders": sorted(tr.holders), "hits": sorted(tr.hits), "detonated": tr.detonated,
                     "missed": sorted(tr.missed), "announces": tr.announces,
                     "pending": sorted(tr.pending), "rejected": len(tr.rejected), "maneuvers": tr.maneuvers,
+                    "friendly_fire": list(tr.friendly_fire), "intruded": tr.intruded,
                     "agreement": self._agreement(tr),
                     "first_award_ms": tr.first_award_ms, "full_award_ms": tr.full_award_ms,
                 }

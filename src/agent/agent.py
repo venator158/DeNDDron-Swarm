@@ -29,6 +29,12 @@ class DenddronAgent:
     RETARGET_MIN_M = 0.5       # job updates that move our slot less than this do not change the goal
     SLOT_RADIUS = 4.0          # m, spacing of drones around an engagement point
     DETONATE_RADIUS = 8.0      # m, must be this close to the slot at t_engage to detonate (= kill radius)
+    KILL_RADIUS = 8.0          # m, a detonation destroys any drone this close (friendly fire included)
+    CLEARANCE_M = 12.0         # m, non-job drones are kept this far from a detonation (ship's zones)
+    ZONE_MARGIN_M = 2.0        # m, idle drones evade to this far beyond a zone's edge
+    ZONE_HOT_S = 8.0           # s before t_engage from which moving drones may not enter another job's zone
+    # Experiment switch: ZONE_KEEPOUT=0 turns prevention off (friendly fire and the final check stay on).
+    KEEPOUT = os.environ.get("ZONE_KEEPOUT", "1") != "0"
 
     def __init__(self, agent_id: str, sim_bus_locator: str = None):
         self.agent_id = agent_id
@@ -236,6 +242,12 @@ class DenddronAgent:
         self.pub_help      = self.radio.declare_publisher(f"swarm/heartbeat_help/{self.agent_id}")
         self.sub_help      = self.radio.declare_subscriber("swarm/heartbeat_help/*", self._on_peer_help)
         self.sub_ack       = self.radio.declare_subscriber(f"ship/ack/{self.agent_id}", self._on_ack)
+        # Engagement zones: keep clear of other jobs' detonations (_service_zones, _keepout).
+        self.zones = {}                # threat_id -> (zone, simclock time received)
+        self.sub_zones     = self.radio.declare_subscriber("ship/zones", self._on_zones)
+        # Physics: detonations of other jobs within KILL_RADIUS destroy this drone (friendly fire).
+        self.sub_blasts    = self.onboard.declare_subscriber("sim/detonation", self._on_blast)
+        self.pub_damage    = self.onboard.declare_publisher("sim/damage")
 
         # Start background threads
         self.control_thread = threading.Thread(target=self._reflex_control_loop)
@@ -436,6 +448,7 @@ class DenddronAgent:
             tick_start = time.monotonic()
             self._service_auctions()
             self._check_engagement()
+            self._service_zones()
             if self.destroyed:
                 break
             with self.state_lock:
@@ -622,6 +635,9 @@ class DenddronAgent:
                             raw_v[:2] *= 0.80
                         elif min_obs_dist < 3.0:
                             raw_v[:2] *= 0.90
+
+                # ── B2. Keep out of other jobs' engagement zones ─────────────
+                raw_v = self._keepout(raw_v, curr_pos, current_goal, current_time)
 
                 # ── C. Service radius containment ────────────────────────────
                 spawn_xy = np.array([self.spawn_pose["x"], self.spawn_pose["y"]])
@@ -864,7 +880,7 @@ class DenddronAgent:
         new = dict(eng)
         p = job["point"]
         new.update(point=(p["x"], p["y"], p["z"]), t_engage=float(job["t_engage"]),
-                   seq=int(job.get("seq", eng["seq"])))
+                   seq=int(job.get("seq", eng["seq"])), intruders=job.get("intruders", []))
         if me is not None:
             new.update(slot=int(me), n_slots=int(job.get("n_slots", eng["n_slots"])))
         if confirm and not eng["confirmed"]:
@@ -955,6 +971,121 @@ class DenddronAgent:
                 logger.warning(f"[{self.agent_id}] Yielding {threat_id}: enough drones with better bids engaged")
                 self._abandon(threat_id, "withdrawn")
 
+    # ---- engagement zones and friendly fire ----
+    def _on_zones(self, sample):
+        self._radio_heard()
+        self.telemetry.rx("ship/zones")
+        try:
+            zones = self._parse(sample)["zones"]
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] Ignoring malformed zones: {e}")
+            return
+        now = simclock.now()
+        self.zones = {str(z["threat_id"]): (z, now) for z in zones}
+
+    def _foreign_zones(self):
+        """Live zones of jobs other than ours: (center, radius, t_engage, threat_id)."""
+        now = simclock.now()
+        eng = self.engagement
+        mine = eng["threat"].threat_id if eng else None
+        out = []
+        for tid, (z, t) in list(self.zones.items()):
+            if tid == mine or now - t > 3.0:       # ship publishes at 1 Hz; stale after 3 s
+                continue
+            p = z["point"]
+            out.append(((p["x"], p["y"], p["z"]), float(z["radius"]), float(z["t_engage"]), tid))
+        return out
+
+    def _service_zones(self):
+        """An idle drone inside another job's zone moves radially out of it and holds there."""
+        if not self.KEEPOUT or self.destroyed or self.engagement is not None or self._pending_wave_id is not None:
+            return
+        with self.state_lock:
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+            goal = self.current_goal
+        if pose is None:
+            return
+        here = (pose["x"], pose["y"], pose["z"])
+        for center, radius, _, tid in self._foreign_zones():
+            if math.dist(here, center) >= radius:
+                continue
+            if goal is not None and math.dist((goal["x"], goal["y"], goal["z"]), center) >= radius:
+                return                              # already evading to a point outside
+            dx, dy = here[0] - center[0], here[1] - center[1]
+            d = math.hypot(dx, dy)
+            ux, uy = (dx / d, dy / d) if d > 1e-3 else (1.0, 0.0)
+            r = radius + self.ZONE_MARGIN_M
+            evade = {"x": center[0] + ux * r, "y": center[1] + uy * r, "z": here[2]}
+            logger.info(f"[{self.agent_id}] Inside the engagement zone of {tid}; moving "
+                        f"{r - d:.1f} m out to ({evade['x']:.1f}, {evade['y']:.1f})")
+            self.set_goal(evade)
+            return
+
+    def _keepout(self, v, pos, goal, now):
+        """Remove velocity into another job's zone in its last ZONE_HOT_S before detonation.
+
+        A drone whose own goal lies inside that zone keeps going: its target comes first.
+        """
+        if now is None or not self.KEEPOUT:
+            return v
+        for center, radius, t_engage, _ in self._foreign_zones():
+            if not (now >= t_engage - self.ZONE_HOT_S and now <= t_engage + 1.0):
+                continue
+            if goal is not None and math.dist((goal["x"], goal["y"], goal["z"]), center) < radius:
+                continue
+            out = np.asarray(pos, dtype=float) - np.asarray(center, dtype=float)
+            d = float(np.linalg.norm(out))
+            if d >= radius + 3.0 or d < 1e-6:
+                continue
+            n = out / d
+            inward = -float(np.dot(v, n))
+            if inward > 0:
+                v = v + inward * n                  # slide along the boundary instead of entering
+            if d < radius:
+                v = v + n * min(2.0, radius - d)    # inside: push out
+        return v
+
+    def _on_blast(self, sample):
+        """A detonation from another job within KILL_RADIUS destroys this drone (friendly fire)."""
+        if self.destroyed:
+            return
+        try:
+            b = self._parse(sample)
+        except Exception:
+            return
+        if b.get("agent_id") == self.agent_id:
+            return
+        eng = self.engagement
+        if eng is not None and eng["threat"].threat_id == b.get("threat_id"):
+            return                                   # job-mates detonate together by design
+        with self.state_lock:
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+        if pose is None:
+            return
+        dist = math.dist((pose["x"], pose["y"], pose["z"]), (b["x"], b["y"], b["z"]))
+        if dist > self.KILL_RADIUS:
+            return
+        threat_id = eng["threat"].threat_id if eng else None
+        logger.warning(f"[{self.agent_id}] DESTROYED by friendly fire: {b['agent_id']} detonated on "
+                       f"{b.get('threat_id')} {dist:.1f} m away" + (f"; job {threat_id} lost" if threat_id else ""))
+        self.pub_damage.put(json.dumps({"agent_id": self.agent_id, "cause": "friendly_fire", "by": b["agent_id"],
+                                        "by_threat": b.get("threat_id"), "job": threat_id,
+                                        "distance": round(dist, 2), "sim_time": b.get("sim_time")}))
+        self.pub_cmd_vel.put(json.dumps({"linear": {"x": 0.0, "y": 0.0, "z": 0.0},
+                                         "angular": {"x": 0.0, "y": 0.0, "z": 0.0}}))
+        pub_leave = self.onboard.declare_publisher("swarm/agents/despawn")
+        pub_leave.put(json.dumps({"agent_id": self.agent_id, "reason": "friendly_fire"}))
+        pub_leave.undeclare()
+        with self._auction_lock:
+            self.auction.release()
+        with self._eng_lock:
+            self.engaged_threat = None
+            self.engagement = None
+            self._drop_job_sub()
+        self.destroyed = True
+        self._send_heartbeat()
+        threading.Timer(1.0, self.radio.close).start()
+
     def _drop_job_sub(self):
         if self._job_sub is not None:
             self._job_sub.undeclare()
@@ -1024,10 +1155,18 @@ class DenddronAgent:
             self._disengage(threat.threat_id, "missed")
             return
 
+        # Final check: non-job drones within CLEARANCE_M (positions from the ship's job topic).  The
+        # target comes first: detonate anyway, at the risk of friendly fire.
+        here = (pose["x"], pose["y"], pose["z"])
+        intruders = [i["id"] for i in eng.get("intruders", [])
+                     if math.dist(here, (i["pose"]["x"], i["pose"]["y"], i["pose"]["z"])) <= self.CLEARANCE_M]
+        if intruders:
+            logger.warning(f"[{self.agent_id}] Detonating on {threat.threat_id} with non-job drones within "
+                           f"{self.CLEARANCE_M:.0f} m: {intruders} (risk of friendly fire)")
         # Physical event: goes on the onboard bus (the ship's radar observes it there).
         self.pub_detonation.put(json.dumps({
             "agent_id": self.agent_id, "threat_id": threat.threat_id, "sim_time": now,
-            "x": pose["x"], "y": pose["y"], "z": pose["z"],
+            "x": pose["x"], "y": pose["y"], "z": pose["z"], "intruders": intruders,
         }))
         self.pub_cmd_vel.put(json.dumps({
             "linear": {"x": 0.0, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
