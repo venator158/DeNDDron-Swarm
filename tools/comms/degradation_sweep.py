@@ -26,6 +26,7 @@ import re
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -42,10 +43,14 @@ DEFAULT_CONDITIONS = {
     "bw64k": "rate 64kbit",
     "bw24k": "rate 24kbit",
 }
-COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "approved", "destroyed", "failed", "leaked_or_impact",
+COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "drones", "threats", "approved", "destroyed", "failed", "leaked_or_impact",
            "kill_ratio", "award_latency_ms_mean", "award_latency_ms_max", "never_fully_assigned", "reannounces",
-           "over_assigned", "missed_slots", "agreement_mean", "drones_expended", "hb_rx_per_s_at_ship",
-           "wall_s"]
+           "over_assigned", "missed_slots", "rejected_awards", "agreement_mean", "drones_expended",
+           "hb_rx_per_s_at_ship", "wall_s"]
+# Resource columns, sampled during the run (Sampler); see scaling_sweep.py.
+RESOURCE_COLUMNS = ["rtf_measured", "startup_s", "host_cpu_pct", "drone_cpu_pct", "drone_mem_mb", "gazebo_cpu_pct",
+                    "sim_bus_cpu_pct", "ship_cpu_pct", "loop_p99_ms_max", "overruns", "sensor_age_max_ms",
+                    "drone_rx_msgs_per_s", "drone_tx_bytes_per_s", "ship_rx_msgs_per_s"]
 AGGREGATE = ["destroyed", "kill_ratio", "award_latency_ms_mean", "reannounces", "over_assigned", "missed_slots",
              "agreement_mean", "drones_expended"]
 
@@ -86,16 +91,94 @@ def wait_for(cond, timeout, step=2.0):
     return False
 
 
+class Sampler(threading.Thread):
+    """Samples container CPU/memory (docker stats) and drone telemetry (/api/state) during a run.
+
+    Drones that have detonated sit idle, so per-drone figures average only drones still in play,
+    matched to containers through config/agent_registry.json (container hostname -> drone id).
+    """
+
+    def __init__(self, period_s=10.0):
+        super().__init__(daemon=True)
+        self.period_s, self.samples, self._halt = period_s, [], threading.Event()
+
+    def stop(self):
+        self._halt.set()
+        self.join(timeout=30)
+
+    def run(self):
+        while not self._halt.wait(self.period_s):
+            try:
+                self.samples.append(self._sample())
+            except Exception as e:
+                log(f"    sampler: {e}")
+
+    @staticmethod
+    def _sample():
+        wall = time.time()
+        state = get("/api/state", timeout=5)
+        out = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{.ID}}\t{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"],
+                             capture_output=True, text=True, timeout=60).stdout
+        try:
+            registry = json.loads((REPO / "config" / "agent_registry.json").read_text())["assigned"]
+        except Exception:
+            registry = {}
+        live = {d["id"] for d in state["drones"] if d["state"] not in ("expended", None)}
+        containers = {}
+        for line in out.splitlines():
+            cid, name, cpu, mem = line.split("\t")
+            used = mem.split("/")[0].strip()
+            mb = float(re.sub(r"[^0-9.]", "", used)) * (1024 if "GiB" in used else 1 if "MiB" in used else 1 / 1024)
+            containers[name] = (registry.get(cid), float(cpu.rstrip("%") or 0), mb)
+        agents = [(d, c, m) for n, (d, c, m) in containers.items() if "-agent-" in n]
+        tel = [d["telemetry"] for d in state["drones"] if d["id"] in live and d.get("telemetry")]
+        return {
+            "wall": wall, "sim": state["sim_time"],
+            "host_cpu": sum(c for _, c, _ in containers.values()),
+            "drone_cpu": [c for d, c, _ in agents if d in live],
+            "drone_mem": [m for _, _, m in agents],
+            **{k: containers.get(k, (None, None))[1] for k in ("gazebo_simulator", "sim_bus", "ship")},
+            "loop_p99": [t.get("loop_p99_ms") for t in tel if t.get("loop_p99_ms") is not None],
+            "overruns": sum(t.get("overruns") or 0 for t in tel),
+            "sensor_age": [t.get("sensor_age_max_ms") for t in tel if t.get("sensor_age_max_ms") is not None],
+            "rx": [sum((t.get("rx_per_s") or {}).values()) for t in tel],
+            "tx_bytes": [t.get("tx_bytes_per_s") or 0 for t in tel],
+            "ship_rx": sum(v.get("msgs_per_s", 0) for v in state.get("radio_rx_at_ship", {}).values()),
+        }
+
+    def summary(self):
+        s = self.samples
+        if len(s) < 2:
+            return {}
+        mean = lambda xs: round(statistics.mean(xs), 1) if xs else None
+        flat = lambda k: [x for smp in s for x in smp[k]]
+        return {
+            "rtf_measured": round((s[-1]["sim"] - s[0]["sim"]) / (s[-1]["wall"] - s[0]["wall"]), 2),
+            "host_cpu_pct": mean([x["host_cpu"] for x in s]),
+            "drone_cpu_pct": mean(flat("drone_cpu")),
+            "drone_mem_mb": mean(flat("drone_mem")),
+            "gazebo_cpu_pct": mean([x["gazebo_simulator"] for x in s if x["gazebo_simulator"] is not None]),
+            "sim_bus_cpu_pct": mean([x["sim_bus"] for x in s if x["sim_bus"] is not None]),
+            "ship_cpu_pct": mean([x["ship"] for x in s if x["ship"] is not None]),
+            "loop_p99_ms_max": max(flat("loop_p99"), default=None),
+            "overruns": sum(x["overruns"] for x in s),
+            "sensor_age_max_ms": max(flat("sensor_age"), default=None),
+            "drone_rx_msgs_per_s": mean(flat("rx")),
+            "drone_tx_bytes_per_s": mean(flat("tx_bytes")),
+            "ship_rx_msgs_per_s": mean([x["ship_rx"] for x in s]),
+        }
+
+
 def compose_down():
     subprocess.run(["docker", "compose", "--env-file", ".swarm.env", "down"], cwd=REPO,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def run_one(args, profile, cond, netem, rep, outdir):
-    rundir = outdir / f"{profile}_{cond}_r{rep}"
+def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None):
+    rundir = outdir / (name or f"{profile}_{cond}_r{rep}")
     rundir.mkdir(parents=True, exist_ok=True)
     rtf = args.rtf
-    env = dict(os.environ, RADIO_QOS=profile, SIM_RTF=f"{rtf:g}")
+    env = dict(os.environ, RADIO_QOS=profile, SIM_RTF=f"{rtf:g}", **(extra_env or {}))
     applied = scale_netem(netem, rtf) if netem else ""
     t0 = time.time()
     log(f"=== {profile} / {cond} #{rep} ({netem or 'no impairment'}"
@@ -107,9 +190,15 @@ def run_one(args, profile, cond, netem, rep, outdir):
         cwd=REPO, env=env, stdout=swarm_log, stderr=subprocess.STDOUT)
     bot = None
     summary = {}
+    sampler = Sampler(getattr(args, "sample_s", 10.0)) if getattr(args, "sample", False) else None
+    startup_s = None
     try:
-        if not wait_for(lambda: get("/api/state")["roster"]["count"] >= args.drones, 300):
+        if not wait_for(lambda: get("/api/state")["roster"]["count"] >= args.drones,
+                        getattr(args, "startup_timeout", 300)):
             raise RuntimeError("swarm did not come up")
+        startup_s = round(time.time() - t0)
+        if sampler:
+            sampler.start()
         if applied:
             subprocess.run([str(HERE / "degrade_radio.sh"), "apply", applied], check=True)
         bot = subprocess.Popen([sys.executable, str(HERE / "operator_bot.py"), f"{args.reaction / rtf:g}",
@@ -121,10 +210,15 @@ def run_one(args, profile, cond, netem, rep, outdir):
             return s["threats_detected"] >= args.threats and s["still_active"] == 0
         if not wait_for(resolved, args.timeout / rtf, step=min(3.0, 3.0 / rtf + 0.5)):
             log("timeout: not every threat resolved")
+        if sampler:
+            sampler.stop()
+            (rundir / "samples.json").write_text(json.dumps(sampler.samples))
         summary = get("/api/summary", timeout=5)
         (rundir / "summary.json").write_text(json.dumps(summary, indent=2))
         (rundir / "state.json").write_text(json.dumps(get("/api/state", timeout=5), indent=2))
     finally:
+        if sampler and sampler.is_alive():
+            sampler.stop()
         if bot:
             bot.terminate()
         if applied:
@@ -133,10 +227,13 @@ def run_one(args, profile, cond, netem, rep, outdir):
         swarm.wait(timeout=60)
         swarm_log.close()
     row = {k: summary.get(k) for k in COLUMNS if k in summary}
-    row.update(profile=profile, condition=cond, netem=netem or "-", rep=rep, rtf=rtf,
+    if sampler:
+        row.update(sampler.summary(), startup_s=startup_s)
+    row.update(profile=profile, condition=cond, netem=netem or "-", rep=rep, rtf=rtf, drones=args.drones,
+               threats=args.threats,
                hb_rx_per_s_at_ship=summary.get("radio_rx_at_ship", {}).get("swarm/heartbeat", {}).get("msgs_per_s"),
                wall_s=round(time.time() - t0))
-    log("    " + " ".join(f"{k}={row.get(k)}" for k in COLUMNS[5:]))
+    log("    " + " ".join(f"{k}={row.get(k)}" for k in COLUMNS[7:] + (RESOURCE_COLUMNS if sampler else [])))
     return row
 
 

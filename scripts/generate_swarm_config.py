@@ -59,6 +59,12 @@ def build_agent_positions(
 ):
     agents = {}
     points = []
+    # Random placement fills about a third of a ring before it runs out of room, so widen the
+    # ring when it is too small for agent_count drones min_separation apart.
+    needed = math.sqrt(min_radius ** 2 + agent_count * (min_separation / 2.0) ** 2 / 0.35)
+    if needed > max_radius:
+        print(f"Spawn ring widened to {needed:.1f} m for {agent_count} agents")
+        max_radius = needed
     quadrant_angles = [
         (0.0, 0.5 * math.pi),
         (0.5 * math.pi, math.pi),
@@ -97,6 +103,9 @@ def build_agent_positions(
             if all(_distance(candidate, prev) >= min_separation for prev in points):
                 x, y = candidate
                 break
+        else:
+            raise RuntimeError(f"no spawn position for {agent_id} {min_separation} m from the others; "
+                               f"increase --max-radius")
 
         # Generation uses same constraints, generate completely new valid (x,y)
         goal_x, goal_y = center_x, center_y

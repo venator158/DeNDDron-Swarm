@@ -533,7 +533,7 @@ class Ship:
 
     def summary(self):
         """Run-level outcome figures for experiments (GET /api/summary)."""
-        s = self.snapshot()
+        s = self.snapshot(all_threats=True)   # the dashboard's snapshot lists only 10 closed threats
         engaged = [t for t in s["threats"] if t["announces"] > 0]
         lat = [t["full_award_ms"] for t in engaged if t["full_award_ms"] is not None]
         agree = [t["agreement"] for t in engaged if t["agreement"] is not None]
@@ -560,14 +560,15 @@ class Ship:
             "radio_rx_at_ship": s["radio_rx_at_ship"],
         }
 
-    def snapshot(self):
+    def snapshot(self, all_threats=False):
         with self.lock:
             now = self.sim_time
             wall = simclock.now()
             threats = []
             order = self.queue.ordered()
             closed = [t for t in self.tracks.values() if not t.active]
-            for tid in order + [t.threat_id for t in sorted(closed, key=lambda t: t.t0, reverse=True)[:10]]:
+            recent = sorted(closed, key=lambda t: t.t0, reverse=True)
+            for tid in order + [t.threat_id for t in (recent if all_threats else recent[:10])]:
                 tr = self.tracks[tid]
                 row = {
                     "threat_id": tid, "type": tr.type, "level": tr.level, "status": tr.status,
