@@ -61,6 +61,7 @@ DEFAULT_CONDITIONS = {
 COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "drones", "threats", "approved", "destroyed", "failed", "leaked_or_impact",
            "kill_ratio", "award_latency_ms_mean", "award_latency_ms_max", "never_fully_assigned", "reannounces",
            "over_assigned", "missed_slots", "rejected_awards", "friendly_fire", "detonations_with_intruders",
+           "intercept_range_m_mean", "legacy_range_m_mean", "drones_with_holds", "hold_s_max",
            "agreement_mean", "drones_expended",
            "hb_rx_per_s_at_ship", "wall_s"]
 # Resource columns, sampled during the run (Sampler); see scaling_sweep.py.

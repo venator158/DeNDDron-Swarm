@@ -235,14 +235,39 @@ class Intercept:
     tti_s: float           # time needed by the level-th drone (with margin and holds)
 
 
+def _seg_dist(p: Vec3, a: Vec3, b: Vec3) -> float:
+    ab = _sub(b, a)
+    L2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]
+    if L2 < 1e-12:
+        return math.dist(p, a)
+    ap = _sub(p, a)
+    s = max(0.0, min(1.0, (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / L2))
+    return math.dist(p, _along(a, ab, s))
+
+
+def disrupts(blast: Blast, committed: Sequence[Tuple[Vec3, Vec3, float]], now: float, v_max: float,
+             a_max: float) -> bool:
+    """Would this blast force a hold on (or block) any committed drone (position, slot, own t)?"""
+    for pos, goal, t_goal in committed:
+        if _seg_dist(blast.center, pos, goal) >= blast.radius:
+            continue                            # nowhere near its route or slot
+        r = plan_route(pos, goal, now, [blast], v_max, a_max, t_goal=t_goal)
+        if r.blocked or r.hold_s > 0 or r.exposed:
+            return True
+    return False
+
+
 def choose_intercept(track: Callable[[float], Vec3], now: float, t_latest: float, drones: Sequence[Vec3],
                      level: int, reservations: Sequence[Reservation], v_max: float, a_max: float,
                      max_range: float, z_range: Tuple[float, float], slack: float = INTERCEPT_SLACK_S,
-                     margin: float = ETA_MARGIN, step: float = 0.5, verify: int = 3) -> Optional[Intercept]:
+                     margin: float = ETA_MARGIN, step: float = 0.5, verify: int = 3,
+                     committed: Sequence[Tuple[Vec3, Vec3, float]] = ()) -> Optional[Intercept]:
     """Earliest time t in [now + slack, t_latest] at which `level` drones can reach track(t) in time.
 
     A cheap straight-line bound ranks drones; only the best level + `verify` are checked with
-    full routes (holds around the reservations' blasts).
+    full routes (holds around the reservations' blasts).  New jobs yield to committed ones: a point
+    whose blast would force a hold on a drone already flying another job (`committed`: its
+    position, slot and detonation time) is skipped.
     """
     if level < 1 or len(drones) < level:
         return None
@@ -258,7 +283,8 @@ def choose_intercept(track: Callable[[float], Vec3], now: float, t_latest: float
                     route.cost(margin) for route in (
                         plan_route(drones[i], p, now, blasts, v_max, a_max, t_goal=t)
                         for _, i in bound[:level + verify]) if not route.blocked)
-                if len(costs) >= level and now + slack + costs[level - 1] <= t:
+                if (len(costs) >= level and now + slack + costs[level - 1] <= t
+                        and not disrupts(Blast("new", p, blast_radius(level), t), committed, now, v_max, a_max)):
                     return Intercept(t, p, costs[level - 1])
         t += step
     return None

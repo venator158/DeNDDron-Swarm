@@ -140,6 +140,18 @@ class TestChooseIntercept(unittest.TestCase):
         self.assertIsNotNone(ic)
         self.assertGreaterEqual(math.dist(ic.point, res.point), blast_separation(2, 1))
 
+    def test_yields_to_committed_drones(self):
+        drones = [(40.0, 0.0, 20.0), (35.0, 20.0, 20.0)]
+        free = self.choose(drones)
+        # A drone of another job flies straight through that point around that time.
+        px, py, pz = free.point
+        start, goal = (px, py - 100.0, pz), (px, py + 60.0, pz)     # passes the point ~25-26 s from now
+        committed = [(start, goal, free.t + 40)]
+        ic = choose_intercept(self.track, 0.0, 45.0, drones, 1, [], V, A, max_range=150.0, z_range=(5.0, 40.0),
+                              committed=committed)
+        self.assertIsNotNone(ic)
+        self.assertNotAlmostEqual(ic.t, free.t)
+
     def test_none_when_out_of_range_or_time(self):
         self.assertIsNone(self.choose([(-150.0, 0.0, 20.0)], t_latest=10.0))
         self.assertIsNone(self.choose([(40.0, 0.0, 20.0)], max_range=5.0))

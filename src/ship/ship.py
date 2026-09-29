@@ -33,11 +33,11 @@ from pathlib import Path
 from links import open_onboard
 import simclock
 from radio_process import RadioProcess
+from deconflict import Reservation, blast_radius, choose_intercept, plan_route
 from jobs import arbitrate
 from threat_queue import ThreatQueue
-from threats import (DEFAULT_THREAT_TYPES, ETA_MARGIN, ORDER_SLACK_S, Threat, aim_velocity,
-                     closest_point_of_approach, engagement_point, eta, parse_threat_types, position_at,
-                     time_to_intercept)
+from threats import (DEFAULT_THREAT_TYPES, ORDER_SLACK_S, Threat, aim_velocity, closest_point_of_approach,
+                     engagement_point, parse_threat_types, position_at)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [Ship] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("Ship")
@@ -52,12 +52,16 @@ ACK_WINDOW_S = 0.3         # collect competing awards for a threat this long bef
 JOB_HZ = 2.0               # job topic updates per (sim) second
 JOB_CLOSE_REPEATS = 3      # "closed" job updates sent after a threat is resolved (lossy radio)
 HB_MISMATCH_S = 2.0        # a confirmed drone whose heartbeat shows another job this long is dropped
-CLEARANCE_M = 12.0         # non-job drones are kept this far from a detonation (kill radius 8 m + margin)
-SLOT_RADIUS_M = 4.0        # drones' slot circle around the engagement point (multi-drone jobs)
+INTERCEPT_REPLAN_S = 0.5   # intercept search results are reused this long (dashboard polls several times/s)
 
 
 def _env(name, default, cast):
     return cast(os.environ.get(name, default))
+
+
+def _mean(xs):
+    xs = [x for x in xs if x is not None]
+    return round(sum(xs) / len(xs), 1) if xs else None
 
 
 def _xyz(p):
@@ -81,6 +85,9 @@ class Track:
         self.close_repeats = 0
         self.maneuver_at = None         # sim time of the planned heading change, if any
         self.maneuvers = 0
+        self.intercept_range = None     # distance from the ship of the chosen intercept point
+        self.legacy_range = None        # ... of the legacy (defended radius / CPA) point, for comparison
+        self.holds = {}                 # drone -> planned hold time (s) reported with its award
         self.detonated = {}             # drone -> miss distance (m)
         self.friendly_fire = []         # drones destroyed by this threat's detonations
         self.intruded = 0               # detonations with non-job drones within CLEARANCE_M
@@ -95,11 +102,20 @@ class Track:
         self.full_award_ms = None
 
     def retrack(self, p0, v, t0):
-        """New track segment (detection or manoeuvre): recompute CPA and the engagement point."""
+        """New track segment (detection or manoeuvre): recompute CPA and the fallback engagement point.
+
+        The legacy point (defended radius crossing, or CPA) is the latest acceptable intercept; the
+        ship normally engages earlier and farther out (choose_intercept) and overwrites point/t_engage.
+        """
         self.p0, self.v, self.t0 = p0, v, t0
         self.cpa, self.t_cpa = closest_point_of_approach(p0, v, t0)
         self.cpa_dist = math.hypot(self.cpa[0], self.cpa[1])
-        self.point, self.t_engage = engagement_point(p0, v, t0, self.defended_radius)
+        self.legacy_point, self.legacy_t = engagement_point(p0, v, t0, self.defended_radius)
+        self.point, self.t_engage = self.legacy_point, self.legacy_t
+        self.plan_cache = None          # (sim time, Intercept or None)
+
+    def position(self, t):
+        return position_at(self.p0, self.v, self.t0, t)
 
     @property
     def holders(self):
@@ -163,8 +179,10 @@ class Ship:
     def _kinematics(self):
         try:
             cfg = json.loads(Path(self.args.runtime_config).read_text())["defaults"]["kinematics"]
+            self.z_range = (float(cfg.get("min_z", 5.0)), float(cfg.get("max_z", 45.0)))
             return float(cfg["max_velocity"]), float(cfg["max_acceleration"])
         except Exception:
+            self.z_range = (5.0, 45.0)
             return 4.0, 1.0
 
     # ------------------------------------------------------------------ util
@@ -239,6 +257,7 @@ class Ship:
                 if not tr.pending:
                     tr.pending_since = simclock.now()
                 tr.pending[agent] = (float(a.get("cost") or 0.0), wave)
+                tr.holds[agent] = float(a.get("hold_s") or 0.0)
                 if tr.approved_wall is not None and tr.first_award_ms is None:
                     tr.first_award_ms = round((simclock.now() - tr.approved_wall) * 1000)
                 if first:
@@ -269,7 +288,35 @@ class Ship:
     @staticmethod
     def zone_radius(tr):
         """Keep-out radius around a job's engagement point: clearance from every slot."""
-        return CLEARANCE_M + (SLOT_RADIUS_M if tr.level > 1 else 0.0)
+        return blast_radius(tr.level)
+
+    def _reservations(self, exclude=None):
+        return [Reservation(t.threat_id, t.point, t.level, t.t_engage) for t in self.tracks.values()
+                if t.status == "approved" and t.threat_id != exclude]
+
+    def _pose(self, drone):
+        p = self.drones.get(drone, {}).get("hb", {}).get("pose")
+        return (p["x"], p["y"], p["z"]) if p else None
+
+    def plan_intercept(self, tr, now, drones=None, level=None):
+        """Earliest reachable intercept for this track (cached briefly for the free-drone case)."""
+        cacheable = drones is None
+        if cacheable and tr.plan_cache and abs(tr.plan_cache[0] - now) < INTERCEPT_REPLAN_S:
+            return tr.plan_cache[1]
+        if drones is None:
+            drones = [p for p in (self._pose(d) for d in self.free_drones()) if p]
+        # New jobs yield to committed ones: avoid blasts that would force a hold on a drone already
+        # flying another job; only if no such point exists, accept holds (drones route around).
+        committed = [(pos, t.point, t.t_engage) for t in self.tracks.values()
+                     if t.status == "approved" and t.threat_id != tr.threat_id
+                     for pos in (self._pose(d) for d in t.confirmed) if pos]
+        args = (tr.position, now, tr.legacy_t, drones, level or tr.level,
+                self._reservations(exclude=tr.threat_id), self.v_max, self.a_max)
+        kw = dict(max_range=self.args.intercept_range, z_range=self.z_range)
+        ic = choose_intercept(*args, committed=committed, **kw) or choose_intercept(*args, **kw)
+        if cacheable:
+            tr.plan_cache = (now, ic)
+        return ic
 
     def _intruders(self, tr):
         """Drones not on this job inside its zone (heartbeat positions, up to 0.5 s old)."""
@@ -298,8 +345,21 @@ class Ship:
             if not tr.pending or simclock.now() - tr.pending_since < ACK_WINDOW_S:
                 continue
             need = tr.level - len(tr.hits) - len(tr.confirmed) if tr.status == "approved" else 0
-            accepted, rejected = arbitrate({d: c for d, (c, _) in tr.pending.items()}, tr.confirmed,
-                                           need, tr.level)
+            # The ship sees every job: re-check each candidate's route around the other jobs' blasts
+            # from its reported position before confirming it.
+            now = self.sim_time or 0.0
+            blasts = [r.blast() for r in self._reservations(exclude=tr.threat_id)]
+            unfit = set()
+            for d in tr.pending:
+                pos = self._pose(d)
+                if pos is None:
+                    continue
+                route = plan_route(pos, tr.point, now, blasts, self.v_max, self.a_max, t_goal=tr.t_engage)
+                if route.blocked or now + route.cost() > tr.t_engage:
+                    unfit.add(d)
+            accepted, rejected = arbitrate({d: c for d, (c, _) in tr.pending.items() if d not in unfit},
+                                           tr.confirmed, need, tr.level)
+            rejected += sorted(unfit)
             for agent, slot in accepted.items():
                 tr.confirmed[agent] = slot
                 self._send_ack(tr, agent, True, tr.pending[agent][1])
@@ -353,6 +413,12 @@ class Ship:
             miss = self.maneuver_rng.uniform(-self.args.max_miss, self.args.max_miss)
             old_point, old_t = tr.point, tr.t_engage
             tr.retrack(p, aim_velocity(p, speed, miss), now)
+            if tr.status == "approved":
+                # Re-plan the intercept for the drones already on the job (legacy point if none fits).
+                crew = [q for q in (self._pose(d) for d in set(tr.confirmed) | set(tr.pending)) if q]
+                ic = self.plan_intercept(tr, now, drones=crew, level=max(1, len(crew))) if crew else None
+                if ic is not None:
+                    tr.point, tr.t_engage = ic.point, ic.t
             tr.maneuvers += 1
             self.queue.update(tr.threat_id, tr.t_cpa)
             self.pub_tracks.put(json.dumps(tr.track_msg()))
@@ -463,24 +529,19 @@ class Ship:
         return [d for d in self.members() if self.drones[d]["hb"].get("state") == "idle"]
 
     def feasibility(self, tr, now):
-        """Can `level` free drones reach the engagement point before t_engage?"""
-        etas = []
-        for d in self.free_drones():
-            p = self.drones[d]["hb"].get("pose")
-            if p:
-                dist = math.dist((p["x"], p["y"], p["z"]), tr.point)
-                etas.append(eta(dist, self.v_max, self.a_max) * ETA_MARGIN)
-        tti = time_to_intercept(etas, tr.level)
-        available = tr.t_engage - now
-        ok = tti is not None and tti + ORDER_SLACK_S < available
-        if tti is None:
-            reason = f"needs {tr.level} free drones, {len(etas)} available"
-        elif not ok:
-            reason = f"TTI {tti:.1f}s + {ORDER_SLACK_S:.0f}s slack >= {available:.1f}s until engagement"
+        """Is there an intercept point on the track that `level` free drones can reach in time?"""
+        free = len([d for d in self.free_drones() if self._pose(d)])
+        ic = self.plan_intercept(tr, now) if free >= tr.level else None
+        if free < tr.level:
+            reason = f"needs {tr.level} free drones, {free} available"
+        elif ic is None:
+            reason = "no reachable intercept point before the defended radius"
         else:
             reason = "feasible"
-        return {"tti_s": None if tti is None else round(tti, 1), "available_s": round(available, 1),
-                "free": len(etas), "feasible": ok, "reason": reason}
+        return {"tti_s": None if ic is None else round(ic.tti_s, 1),
+                "available_s": None if ic is None else round(ic.t - now, 1),
+                "intercept_range_m": None if ic is None else round(math.hypot(ic.point[0], ic.point[1]), 1),
+                "free": free, "feasible": ic is not None, "reason": reason}
 
     # ------------------------------------------------------------- orders
     def approve(self, threat_id):
@@ -492,14 +553,19 @@ class Ship:
             if tr.status != "tracking":
                 return False, f"threat is {tr.status}"
             f = self.feasibility(tr, now)
-            if not f["feasible"]:
+            ic = tr.plan_cache[1] if f["feasible"] else None
+            if ic is None:
                 self.event("approval_rejected", threat=threat_id, reason=f["reason"])
                 return False, f["reason"]
+            tr.point, tr.t_engage = ic.point, ic.t      # engage as far out as the drones can reach
+            tr.intercept_range = round(math.hypot(ic.point[0], ic.point[1]), 1)
+            tr.legacy_range = round(math.hypot(tr.legacy_point[0], tr.legacy_point[1]), 1)
             tr.status = "approved"
             tr.approved_wall = simclock.now()
             self._announce(tr, tr.level)
             self._publish_zones()             # idle drones start clearing the zone right away
-            self.event("approved", threat=threat_id, tti_s=f["tti_s"], available_s=f["available_s"])
+            self.event("approved", threat=threat_id, tti_s=f["tti_s"], available_s=f["available_s"],
+                       intercept_range_m=tr.intercept_range, legacy_range_m=tr.legacy_range)
             return True, "approved"
 
     def _announce(self, tr, required):
@@ -514,7 +580,7 @@ class Ship:
         """Roster members whose latest heartbeat says they are engaging this threat."""
         return {d for d in self.members()
                 if self.drones[d]["hb"].get("threat_id") == tr.threat_id
-                and self.drones[d]["hb"].get("state") in ("engaging", "on_station")}
+                and self.drones[d]["hb"].get("state") in ("engaging", "holding", "on_station")}
 
     def _retry_underassigned(self, now):
         for tr in self.tracks.values():
@@ -605,6 +671,10 @@ class Ship:
             "over_assigned": sum(1 for t in engaged if len(t["detonated"]) > t["level"]),
             "rejected_awards": sum(t["rejected"] for t in engaged),
             "friendly_fire": sum(len(t["friendly_fire"]) for t in s["threats"]),
+            "intercept_range_m_mean": _mean([t["intercept_range_m"] for t in engaged]),
+            "legacy_range_m_mean": _mean([t["legacy_range_m"] for t in engaged]),
+            "drones_with_holds": sum(sum(1 for h in t["holds"].values() if h > 0) for t in engaged),
+            "hold_s_max": max([h for t in engaged for h in t["holds"].values()], default=0.0),
             "detonations_with_intruders": sum(t["intruded"] for t in s["threats"]),
             "maneuvers": sum(t["maneuvers"] for t in s["threats"]),
             "missed_slots": sum(len(t["missed"]) for t in engaged),
@@ -634,6 +704,8 @@ class Ship:
                     "missed": sorted(tr.missed), "announces": tr.announces,
                     "pending": sorted(tr.pending), "rejected": len(tr.rejected), "maneuvers": tr.maneuvers,
                     "friendly_fire": list(tr.friendly_fire), "intruded": tr.intruded,
+                    "intercept_range_m": tr.intercept_range, "legacy_range_m": tr.legacy_range,
+                    "holds": dict(tr.holds),
                     "agreement": self._agreement(tr),
                     "first_award_ms": tr.first_award_ms, "full_award_ms": tr.full_award_ms,
                 }
@@ -740,6 +812,8 @@ def main():
     ap.add_argument("--detect-max", type=float, default=_env("DETECT_MAX_M", 190.0, float))
     ap.add_argument("--max-miss", type=float, default=_env("MAX_MISS_M", 30.0, float),
                     help="largest lateral miss distance of generated tracks")
+    ap.add_argument("--intercept-range", type=float, default=_env("INTERCEPT_MAX_RANGE_M", 140.0, float),
+                    help="farthest intercept point from the ship (drones' reach: spawn ring + service radius)")
     ap.add_argument("--maneuver-p", type=float, default=_env("THREAT_MANEUVER_P", 0.0, float),
                     help="probability that a threat turns once, re-aiming past the ship")
     ap.add_argument("--defended-radius", type=float, default=_env("DEFENDED_RADIUS_M", 45.0, float))

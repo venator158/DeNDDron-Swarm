@@ -12,7 +12,8 @@ from path_planning import APFStrategy, ORCAStrategy
 from timing import TimingManager, TimingState
 from auction import AuctionManager
 from telemetry import Telemetry
-from threats import ETA_MARGIN, ORDER_SLACK_S, Threat, eta, slot_point
+from threats import ETA_MARGIN, ORDER_SLACK_S, Threat, slot_point
+from deconflict import BLAST_TOL_S, Blast, plan_route
 from links import open_onboard
 from radio_process import RadioProcess
 import simclock
@@ -32,7 +33,7 @@ class DenddronAgent:
     KILL_RADIUS = 8.0          # m, a detonation destroys any drone this close (friendly fire included)
     CLEARANCE_M = 12.0         # m, non-job drones are kept this far from a detonation (ship's zones)
     ZONE_MARGIN_M = 2.0        # m, idle drones evade to this far beyond a zone's edge
-    ZONE_HOT_S = 8.0           # s before t_engage from which moving drones may not enter another job's zone
+    GIVE_BACK_CUTOFF_S = 10.0  # s before t_engage after which a drone keeps its job (no time to clear the zone)
     # Experiment switch: ZONE_KEEPOUT=0 turns prevention off (friendly fire and the final check stay on).
     KEEPOUT = os.environ.get("ZONE_KEEPOUT", "1") != "0"
 
@@ -244,6 +245,8 @@ class DenddronAgent:
         self.sub_ack       = self.radio.declare_subscriber(f"ship/ack/{self.agent_id}", self._on_ack)
         # Engagement zones: keep clear of other jobs' detonations (_service_zones, _keepout).
         self.zones = {}                # threat_id -> (zone, simclock time received)
+        self._zones_sig = None
+        self._aborted_job = None       # (threat_id, t_engage) of a job we aborted at its detonation time
         self.sub_zones     = self.radio.declare_subscriber("ship/zones", self._on_zones)
         # Physics: detonations of other jobs within KILL_RADIUS destroy this drone (friendly fire).
         self.sub_blasts    = self.onboard.declare_subscriber("sim/detonation", self._on_blast)
@@ -449,6 +452,7 @@ class DenddronAgent:
             self._service_auctions()
             self._check_engagement()
             self._service_zones()
+            self._service_route()
             if self.destroyed:
                 break
             with self.state_lock:
@@ -636,9 +640,6 @@ class DenddronAgent:
                         elif min_obs_dist < 3.0:
                             raw_v[:2] *= 0.90
 
-                # ── B2. Keep out of other jobs' engagement zones ─────────────
-                raw_v = self._keepout(raw_v, curr_pos, current_goal, current_time)
-
                 # ── C. Service radius containment ────────────────────────────
                 spawn_xy = np.array([self.spawn_pose["x"], self.spawn_pose["y"]])
                 curr_xy  = np.array([current_pose["x"], current_pose["y"]])
@@ -780,12 +781,16 @@ class DenddronAgent:
         v_max = float(self.kinematics["max_velocity"])
         a_max = float(self.kinematics["max_acceleration"])
         slack = max(ORDER_SLACK_S, self.auction.bid_window_s + 1.0)
+        here = (pose["x"], pose["y"], pose["z"])
         costs = {}
         for t in threats:
-            d = float(np.linalg.norm([
-                t.location["x"] - pose["x"], t.location["y"] - pose["y"], t.location["z"] - pose["z"],
-            ]))
-            e = eta(d, v_max, a_max) * ETA_MARGIN
+            # Route around other jobs' blasts (holds included); a goal inside one is not an option.
+            goal = (t.location["x"], t.location["y"], t.location["z"])
+            route = plan_route(here, goal, now, self._blasts(exclude=t.threat_id), v_max, a_max,
+                               t_goal=t.t_engage)
+            if route.blocked:
+                continue
+            e = route.cost(ETA_MARGIN)
             if now + slack + e <= t.t_engage:
                 costs[t.threat_id] = round(e, 2)
         return costs
@@ -861,17 +866,83 @@ class DenddronAgent:
             self._publish_award({
                 "threat_id": t.threat_id, "agent_id": self.agent_id, "cost": r.my_cost, "wave_id": r.wave_id,
                 "status": "engaged", "slot": slot, "t_engage": t.t_engage,
+                "hold_s": self.engagement.get("hold_s", 0.0) if self.engagement else 0.0,
             })
 
     # ---- job confirmation and updates from the ship ----
     def _set_engagement(self, eng):
-        """Install an engagement (a new dict) and fly to its slot if the slot moved."""
+        """Install an engagement (a new dict): plan the route to its slot around other jobs' blasts
+        (holds included) and fly its first leg.  Caller holds _eng_lock."""
         sp = slot_point(eng["point"], eng["slot"], eng["n_slots"], self.SLOT_RADIUS)
         eng["slot_point"] = {"x": sp[0], "y": sp[1], "z": sp[2]}
-        old = self.engagement
+        with self.state_lock:
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+            now = self.current_time
+        if pose is not None and now is not None:
+            route = plan_route((pose["x"], pose["y"], pose["z"]), sp, now,
+                               self._blasts(exclude=eng["threat"].threat_id),
+                               float(self.kinematics["max_velocity"]), float(self.kinematics["max_acceleration"]),
+                               t_goal=eng["t_engage"])
+            eng["legs"] = route.legs
+            eng["hold_s"] = round(route.hold_s, 1)
+            # Give the job back only for a real conflict (our slot inside another job's blast), and only
+            # while there is time to fly clear of our own job's zone: a drone that gives its job back
+            # becomes an outsider there.  Estimated lateness is no reason: the rest-to-rest ETA used
+            # here is ~2 s pessimistic mid-flight; a drone that really is late misses at t_engage.
+            v_max, a_max = float(self.kinematics["max_velocity"]), float(self.kinematics["max_acceleration"])
+            on_slot = math.dist((pose["x"], pose["y"], pose["z"]), sp) <= self.DETONATE_RADIUS
+            late = not on_slot and route.arrival - v_max / (2 * a_max) > eng["t_engage"]
+            eng["route_ok"] = not ((route.blocked or late) and now < eng["t_engage"] - self.GIVE_BACK_CUTOFF_S)
+            eng["blocked"] = route.blocked
+            if route.exposed:
+                logger.warning(f"[{self.agent_id}] Cannot get clear of {route.exposed} in time: risk of friendly fire")
+            if route.hold_s > 0 and len(route.legs) != len(self.engagement.get("legs", [])
+                                                           if self.engagement else []):
+                logger.info(f"[{self.agent_id}] Route to {eng['threat'].threat_id}: {len(route.legs) - 1} "
+                            f"hold/exit leg(s), holding {route.hold_s:.1f}s, arrive t={route.arrival:.1f}")
+        else:
+            eng["legs"], eng["hold_s"], eng["route_ok"] = [], 0.0, True
+        target = eng["legs"][0].target if eng["legs"] else sp
+        goal = {"x": target[0], "y": target[1], "z": target[2]}
         self.engagement = eng
-        if old is None or math.dist(sp, tuple(old["slot_point"][k] for k in "xyz")) >= self.RETARGET_MIN_M:
-            self.set_goal(dict(eng["slot_point"]))
+        cur = self.current_goal
+        if cur is None or math.dist(target, (cur["x"], cur["y"], cur["z"])) >= self.RETARGET_MIN_M:
+            self.set_goal(goal)
+
+    def _service_route(self):
+        """Advance through the route's legs: a hold ends when its blast has passed, an exit leg when
+        reached.  A route that can no longer be flown safely and in time gives the job back."""
+        eng = self.engagement
+        if eng is None or self.destroyed:
+            return
+        if not eng.get("route_ok", True):
+            with self._eng_lock:
+                if self.engagement is eng:
+                    why = "is inside another job's blast" if eng.get("blocked") else "cannot be reached in time"
+                    logger.warning(f"[{self.agent_id}] Slot for {eng['threat'].threat_id} {why} "
+                                   f"(route around other jobs' blasts); giving the job back")
+                    self._abandon(eng["threat"].threat_id, "withdrawn")
+            return
+        legs = eng.get("legs") or []
+        if len(legs) <= 1:
+            return
+        with self.state_lock:
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+            now = self.current_time
+        if pose is None or now is None:
+            return
+        leg = legs[0]
+        here = (pose["x"], pose["y"], pose["z"])
+        if (leg.release is not None and now >= leg.release) or \
+                (leg.release is None and math.dist(here, leg.target) < self.RETARGET_MIN_M * 3):
+            with self._eng_lock:
+                if self.engagement is not eng:
+                    return
+                new = dict(eng)
+                new["legs"] = legs[1:]
+                self.engagement = new
+                nxt = new["legs"][0].target
+                self.set_goal({"x": nxt[0], "y": nxt[1], "z": nxt[2]})
 
     def _apply_job(self, job: dict, confirm: bool) -> None:
         """Update our engagement from a job message (ACK or job topic).  Caller holds _eng_lock."""
@@ -981,7 +1052,20 @@ class DenddronAgent:
             logger.warning(f"[{self.agent_id}] Ignoring malformed zones: {e}")
             return
         now = simclock.now()
+        sig = tuple(sorted((str(z["threat_id"]), round(z["point"]["x"]), round(z["point"]["y"]),
+                            round(float(z["t_engage"]), 1)) for z in zones))
         self.zones = {str(z["threat_id"]): (z, now) for z in zones}
+        if sig != self._zones_sig:
+            self._zones_sig = sig
+            with self._eng_lock:                # new or moved blasts: re-plan our route
+                if self.engagement is not None and not self.destroyed:
+                    self._set_engagement(dict(self.engagement))
+
+    def _blasts(self, exclude=None):
+        """Other jobs' blasts to route around (none with ZONE_KEEPOUT=0)."""
+        if not self.KEEPOUT:
+            return []
+        return [Blast(tid, center, radius, t) for center, radius, t, tid in self._foreign_zones() if tid != exclude]
 
     def _foreign_zones(self):
         """Live zones of jobs other than ours: (center, radius, t_engage, threat_id)."""
@@ -1021,30 +1105,6 @@ class DenddronAgent:
             self.set_goal(evade)
             return
 
-    def _keepout(self, v, pos, goal, now):
-        """Remove velocity into another job's zone in its last ZONE_HOT_S before detonation.
-
-        A drone whose own goal lies inside that zone keeps going: its target comes first.
-        """
-        if now is None or not self.KEEPOUT:
-            return v
-        for center, radius, t_engage, _ in self._foreign_zones():
-            if not (now >= t_engage - self.ZONE_HOT_S and now <= t_engage + 1.0):
-                continue
-            if goal is not None and math.dist((goal["x"], goal["y"], goal["z"]), center) < radius:
-                continue
-            out = np.asarray(pos, dtype=float) - np.asarray(center, dtype=float)
-            d = float(np.linalg.norm(out))
-            if d >= radius + 3.0 or d < 1e-6:
-                continue
-            n = out / d
-            inward = -float(np.dot(v, n))
-            if inward > 0:
-                v = v + inward * n                  # slide along the boundary instead of entering
-            if d < radius:
-                v = v + n * min(2.0, radius - d)    # inside: push out
-        return v
-
     def _on_blast(self, sample):
         """A detonation from another job within KILL_RADIUS destroys this drone (friendly fire)."""
         if self.destroyed:
@@ -1058,6 +1118,9 @@ class DenddronAgent:
         eng = self.engagement
         if eng is not None and eng["threat"].threat_id == b.get("threat_id"):
             return                                   # job-mates detonate together by design
+        ab = self._aborted_job
+        if ab and ab[0] == b.get("threat_id") and abs(float(b.get("sim_time") or ab[1]) - ab[1]) <= BLAST_TOL_S:
+            return                                   # our own job's blast, the instant we aborted it
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
         if pose is None:
@@ -1150,6 +1213,8 @@ class DenddronAgent:
         if miss > self.DETONATE_RADIUS:
             logger.warning(f"[{self.agent_id}] MISSED {threat.threat_id}: {miss:.1f} m from slot at "
                            f"t_engage; aborting and holding position")
+            # Still on this job for its own blast: job-mates detonate in the same instant.
+            self._aborted_job = (threat.threat_id, eng["t_engage"])
             with self._auction_lock:
                 self.auction.release()
             self._disengage(threat.threat_id, "missed")
@@ -1195,6 +1260,9 @@ class DenddronAgent:
         if self.destroyed:
             return "expended"
         if self.engagement is not None:
+            legs = self.engagement.get("legs") or []
+            if len(legs) > 1 and legs[0].release is not None:
+                return "holding"
             with self.state_lock:
                 return "on_station" if self._goal_reached else "engaging"
         if self._pending_wave_id is not None:
