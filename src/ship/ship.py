@@ -507,7 +507,9 @@ class Ship:
                 if wall - last_roster >= 1.0 / ROSTER_HZ:
                     last_roster = wall
                     members = self.members()
-                    self.pub_roster.put(json.dumps({"sim_time": now, "count": len(members), "members": members}))
+                    relayed = [d for d in members if self.drones[d].get("relayed")]
+                    self.pub_roster.put(json.dumps({"sim_time": now, "count": len(members), "members": members,
+                                                    "relayed": relayed}))
                     span = wall - self._rx_window_start
                     if span >= 1.0:
                         self.rx_rates = {k: {"msgs_per_s": round(self.rx_counts[k] / span, 1),

@@ -156,10 +156,11 @@ The assigned drones take up slots 4 m apart around that point and **detonate at 
 | `sim/clock` | onboard | sim → ship | `{sim_time}` at 10 Hz |
 | `sim/detonation` | onboard | drone → ship | `{agent_id, threat_id, sim_time, x, y, z}` (physical event, observed by radar) |
 | `sim/threat_tracks` | onboard | ship → sim | `{threat_id, type, level, status, t0, p0, v}` for Gazebo markers |
-| `swarm/heartbeat/{id}` | radio | drone → all | `{state, link, pose, threat_id, t_engage, confirmed}` at 2 Hz |
-| `swarm/heartbeat_relay/{id}` | radio | drone → ship | a peer's heartbeat, forwarded when the ship's roster lacks that peer |
+| `swarm/heartbeat/{id}` | radio | drone → ship | `{state, link, pose, threat_id, t_engage, confirmed}` at 2 Hz (drones do not subscribe) |
+| `swarm/heartbeat_help/{id}` | radio | drone → drones | the same heartbeat, only while the ship does not hear this drone directly |
+| `swarm/heartbeat_relay/{id}` | radio | drone → ship | a peer's help heartbeat, forwarded by drones in the roster |
 | `swarm/telemetry/{id}` | radio | drone → ship | instrumentation, 1 Hz |
-| `ship/roster` | radio | ship → drones | `{count, members[]}` at 1 Hz: drones the ship hears |
+| `ship/roster` | radio | ship → drones | `{count, members[], relayed[]}` at 1 Hz: drones the ship hears, and which of them only through relays |
 | `swarm/threats` | radio | ship → drones | engagement order `{wave_id, threats[{threat_id, type, level, required, location, t_engage}]}` |
 | `swarm/bids` | radio | drone → all | `{agent_id, wave_id, costs{threat_id: ETA s}}` |
 | `swarm/awards` | radio | drone → all, ship | `{threat_id, agent_id, wave_id, cost, status: engaged\|withdrawn\|missed\|released, slot, t_engage}` |
@@ -202,13 +203,14 @@ Measured (8 drones, `--rtf 3`):
 - **The same manoeuvre scenario in real time** (with the Gazebo window) gave an identical result: same drones, slots, point shifts and miss distances as the `--rtf 3` run.
 
 ### Membership and link loss
-- Each drone heartbeats at 2 Hz. The ship publishes the roster (drones heard in the last 3 s) at 1 Hz. The dashboard's drone count and free count come from it.
-- A drone considers its **radio link up** while it hears the ship or any peer within 3 s.
+- Each drone heartbeats at 2 Hz, to the ship only: drones do not subscribe to each other's heartbeats, so radio load grows with the number of drones, not its square. The ship publishes the roster (drones heard in the last 3 s) at 1 Hz. The dashboard's drone count and free count come from it.
+- A drone considers its **radio link up** while it hears the ship or any peer (orders, bids, awards, help) within 3 s.
 - **Link lost, no job:** the drone holds position and does not bid.
 - **Link lost, confirmed job:** the drone continues to the last engagement point and time the job topic gave it, and detonates then. It gets no more target updates, so a manoeuvre after the loss makes it miss. The detonation is observed through the onboard bus, standing in for the ship's radar.
 - **Link lost before confirmation:** no ACK arrives, so the drone abandons the job after 3 s.
 - **Link lost at auction close:** the drone ignores the result, because it was computed from whatever bids reached it.
-- **Not in the ship's roster although it hears the ship:** the drone keeps heartbeating and logs a warning. Any drone that is itself in the roster and hears that peer forwards the peer's heartbeat on `swarm/heartbeat_relay/{id}` once a second. The ship accepts it as membership, and the dashboard marks the drone *relayed*. Zenoh 1.10 peers do not relay for each other, so this is done at the application level.
+- **The ship does not hear a drone directly** (the drone is missing from, or listed as relayed in, 3 rosters, or has heard no roster for 3 s): the drone also publishes its heartbeat on `swarm/heartbeat_help/{id}`, which every drone hears. Drones in the roster forward it on `swarm/heartbeat_relay/{id}` once a second. The ship accepts it as membership, and the dashboard marks the drone *relayed*. Relaying continues while the roster lists the drone as relayed, so it does not stop as soon as it works. Zenoh 1.10 peers do not relay for each other, so this is done at the application level.
+  - Measured (8 drones, ship deaf to one drone): out of the roster after ~3 s, back in (relayed) by 6 s, relayed without a gap for the next 20 s, and back to direct when the link was restored.
 
 ## Degraded communications
 
@@ -266,7 +268,7 @@ Setup: `scaling_sweep.py`. N drones face N/2 threats (default type mix), detecte
 
 All sizes: no re-announces, no conflicts, full agreement on assignments, decision latency ~1.4 s. The 16-drone run predates the sim-following protocol clock.
 
-- **Radio traffic grows with the square of the swarm.** Each drone hears every other drone's heartbeats, so messages per drone double when the swarm doubles: about 4,300/s swarm-wide at 50 drones.
+- **Radio traffic grew with the square of the swarm** while every drone heard every heartbeat: messages per drone doubled when the swarm doubled, about 4,300/s swarm-wide at 50 drones. Heartbeats now go to the ship only. At 50 drones that cut the messages each drone receives from 86 to 4.4 per second. It also cut host CPU from 3.8 to 3.1 cores, worst loop time from 137 to 86 ms and oldest sensor frame from 378 to 172 ms, and 23 of 25 threats were destroyed (was 22).
 - **CPU per drone is roughly constant** at 7–9% of a core per 1× of sim speed (the radio process included), rising slightly with the heartbeats received. 50 drones need about 4–5 cores at real time.
 - **At 50 drones this host is the limit.** Drones are starved of CPU: loop times reach 137 ms (target 20 ms) and sensor frames 378 ms. The 3 failed threats were each one drone of a multi-drone threat arriving 8.3, 12.9 and 10.8 m from its slot, just outside the 8 m kill radius; the protocol itself had no errors. A bigger host, or fewer processes per drone, is needed for clean 50-drone runs.
 
@@ -295,7 +297,7 @@ Every drone sends `swarm/telemetry/{id}` once a second, covering the last second
 | `sensor_age_p50_ms`, `sensor_age_max_ms` | age of the newest onboard sensor frame, sampled every tick |
 | `perception_p99_ms`, `planner_p99_ms` | lidar processing per scan; planner per tick |
 | `rx_per_s`, `tx_per_s`, `tx_bytes_per_s` | radio messages per topic, and bytes sent, per simulated second |
-| `peers_heard`, `voxels` | peers heard in the last 3 s; voxel map size |
+| `peers_heard`, `voxels` | peers heard from (bids, awards, help) in the last 3 s; voxel map size |
 
 The ship adds per-topic radio receive rates, per-threat decision latency (approval → first and last award), and an event log. Events also go to `/state/ship_log.jsonl` in the `swarm_state` volume, for offline analysis. The metrics node logs positions, distance flown and collisions (under 2.5 m).
 

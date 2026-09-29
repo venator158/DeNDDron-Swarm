@@ -196,11 +196,13 @@ class DenddronAgent:
         # --- Radio link and membership ---
         self.telemetry = Telemetry(1.0 / (self.control_rate_hz * simclock.RTF))
         self._last_radio_rx = None     # simclock time of the last message from the ship or a peer
-        self.peers = {}                # peer drone id -> simclock time last heard
-        self._peer_heartbeats = {}     # peer drone id -> last heartbeat payload (for relaying)
+        self.peers = {}                # peer drone id -> simclock time any message from it was last heard
+        self._peer_help = {}           # peer drone id -> (heartbeat payload, simclock time) it asked us to relay
+        self._started = simclock.now()
         self._roster_time = None       # simclock time of the last roster
         self._assign_hashes = OrderedDict()   # order id -> short hash of the assignment we computed
         self.roster = []               # drone ids the ship last reported hearing
+        self.roster_relayed = set()    # of those, the ones it hears only through peer relays
         self._missing_from_roster = 0
         self._link_was_up = False
         self._award_resends = {}       # threat_id -> [award payload, copies left]; newest status wins
@@ -228,7 +230,11 @@ class DenddronAgent:
         self.sub_bids      = self.radio.declare_subscriber("swarm/bids", self._on_bid_received)
         self.sub_awards    = self.radio.declare_subscriber("swarm/awards", self._on_award_received)
         self.sub_roster    = self.radio.declare_subscriber("ship/roster", self._on_roster)
-        self.sub_peers     = self.radio.declare_subscriber("swarm/heartbeat/*", self._on_peer_heartbeat)
+        # Heartbeats go to the ship only (drones do not subscribe to them), so radio load grows with N,
+        # not N^2.  A drone the ship cannot hear also publishes on heartbeat_help, which every drone
+        # hears, and drones in the roster relay it (_relay_unheard_peers).
+        self.pub_help      = self.radio.declare_publisher(f"swarm/heartbeat_help/{self.agent_id}")
+        self.sub_help      = self.radio.declare_subscriber("swarm/heartbeat_help/*", self._on_peer_help)
         self.sub_ack       = self.radio.declare_subscriber(f"ship/ack/{self.agent_id}", self._on_ack)
 
         # Start background threads
@@ -777,6 +783,7 @@ class DenddronAgent:
         self.telemetry.rx("swarm/bids")
         try:
             bid = self._parse(sample)
+            self._peer_heard(str(bid["agent_id"]))
             if bid["agent_id"] == self.agent_id:
                 return  # own bid already recorded when placed
             with self._auction_lock:
@@ -928,6 +935,7 @@ class DenddronAgent:
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed award: {e}")
             return
+        self._peer_heard(agent_id)
         if agent_id == self.agent_id:
             return
         with self._eng_lock:
@@ -1047,12 +1055,20 @@ class DenddronAgent:
             return "bidding"
         return "idle"
 
+    def _needs_help(self) -> bool:
+        """The ship does not seem to hear us: not in its recent rosters, or no roster for a while."""
+        if self.destroyed:
+            return False
+        if self._roster_time is None:
+            return simclock.now() - self._started > 2 * self.LINK_TIMEOUT_S
+        return simclock.now() - self._roster_time > self.LINK_TIMEOUT_S or self._missing_from_roster >= 3
+
     def _send_heartbeat(self):
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
             now = self.current_time
         eng = self.engagement
-        self._radio_put(self.pub_heartbeat, "swarm/heartbeat", {
+        hb = {
             "agent_id": self.agent_id,
             "sim_time": now,
             "state": self._state_name(),
@@ -1061,7 +1077,10 @@ class DenddronAgent:
             "threat_id": eng["threat"].threat_id if eng else None,
             "t_engage": eng["t_engage"] if eng else None,
             "confirmed": eng["confirmed"] if eng else None,
-        })
+        }
+        self._radio_put(self.pub_heartbeat, "swarm/heartbeat", hb)
+        if self._needs_help():
+            self._radio_put(self.pub_help, "swarm/heartbeat_help", hb)
 
     def _heartbeat_loop(self):
         period = 1.0 / self.HEARTBEAT_HZ
@@ -1093,49 +1112,61 @@ class DenddronAgent:
         now = simclock.now()
         return [p for p, t in self.peers.items() if now - t <= self.LINK_TIMEOUT_S]
 
-    def _on_peer_heartbeat(self, sample):
+    def _peer_heard(self, peer: str):
+        if peer != self.agent_id:
+            self.peers[peer] = simclock.now()
+
+    def _on_peer_help(self, sample):
         peer = str(sample.key_expr).rsplit("/", 1)[-1]
         if peer == self.agent_id:
             return
-        self.telemetry.rx("swarm/heartbeat")
-        self.peers[peer] = simclock.now()
-        self._peer_heartbeats[peer] = bytes(sample.payload)
+        self.telemetry.rx("swarm/heartbeat_help")
+        self._peer_heard(peer)
+        self._peer_help[peer] = (bytes(sample.payload), simclock.now())
         self._radio_heard()
 
     def _relay_unheard_peers(self):
-        """Forward heartbeats of peers the ship cannot hear but we can (once per second).
+        """Forward heartbeats of peers that asked for help and are not in the roster (once per second).
 
         Zenoh peers do not relay for each other, so a drone whose link to the ship
         is lost while its links to other drones still work would drop out of the
-        roster.  Only drones that are themselves in a fresh roster relay.
+        roster.  Such a drone publishes on swarm/heartbeat_help (_needs_help); only
+        drones that are themselves in a fresh roster relay.
         """
         if self.destroyed or self._roster_time is None or simclock.now() - self._roster_time > self.LINK_TIMEOUT_S:
             return
         if self.agent_id not in self.roster:
             return
-        for peer in self._fresh_peers():
-            if peer not in self.roster and peer in self._peer_heartbeats:
-                self.pub_relay.put(f"swarm/heartbeat_relay/{peer}", self._peer_heartbeats[peer])
-                self.telemetry.tx("swarm/heartbeat_relay", len(self._peer_heartbeats[peer]))
+        now = simclock.now()
+        for peer, (payload, t) in list(self._peer_help.items()):
+            if now - t > self.LINK_TIMEOUT_S:
+                del self._peer_help[peer]
+            elif peer not in self.roster or peer in self.roster_relayed:
+                self.pub_relay.put(f"swarm/heartbeat_relay/{peer}", payload)
+                self.telemetry.tx("swarm/heartbeat_relay", len(payload))
 
     def _on_roster(self, sample):
         self._radio_heard()
         self.telemetry.rx("ship/roster")
         try:
-            self.roster = list(self._parse(sample).get("members", []))
+            msg = self._parse(sample)
+            self.roster = list(msg.get("members", []))
+            self.roster_relayed = set(msg.get("relayed", []))
             self._roster_time = simclock.now()
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed roster: {e}")
             return
-        if self.agent_id in self.roster or self.destroyed:
+        if (self.agent_id in self.roster and self.agent_id not in self.roster_relayed) or self.destroyed:
             self._missing_from_roster = 0
             return
-        # The ship cannot hear us although we hear it.  Heartbeats keep going out,
-        # and peers that hear us relay them (_relay_unheard_peers).
+        # The ship does not hear us directly although we hear it.  Heartbeats keep going out, also on
+        # heartbeat_help, and peers relay them (_relay_unheard_peers) - also while the roster lists us
+        # as relayed, otherwise the relay would stop as soon as it worked.
         self._missing_from_roster += 1
         if self._missing_from_roster in (3, 30) or self._missing_from_roster % 300 == 0:
-            logger.warning(f"[{self.agent_id}] Not in the ship's roster for {self._missing_from_roster} "
-                           f"rosters; still heartbeating")
+            how = "relayed by peers" if self.agent_id in self.roster else "not in the roster"
+            logger.warning(f"[{self.agent_id}] Ship has not heard us directly for {self._missing_from_roster} "
+                           f"rosters ({how}); still heartbeating")
 
     def shutdown(self):
         self.running = False

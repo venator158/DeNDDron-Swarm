@@ -59,7 +59,7 @@ QOS_PROFILES = {
          "config": {"priority": "interactive_high", "express": True, "congestion_control": "block"}},
         {"key_exprs": ["ship/roster"],
          "config": {"priority": "data_high", "express": True, "congestion_control": "drop"}},
-        {"key_exprs": ["swarm/heartbeat/**", "swarm/heartbeat_relay/**"],
+        {"key_exprs": ["swarm/heartbeat/**", "swarm/heartbeat_relay/**", "swarm/heartbeat_help/**"],
          "config": {"priority": "data_low", "congestion_control": "drop", "reliability": "best_effort"}},
         {"key_exprs": ["swarm/telemetry/**"],
          "config": {"priority": "background", "congestion_control": "drop", "reliability": "best_effort"}},
