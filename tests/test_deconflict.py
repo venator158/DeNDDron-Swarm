@@ -2,7 +2,7 @@ import math
 import unittest
 
 from deconflict import (BLAST_TOL_S, Blast, Reservation, blast_radius, blast_separation, choose_intercept,
-                        plan_route, progress)
+                        plan_route, progress, stop_distance, travel_time)
 from threats import eta, position_at
 
 V, A = 4.0, 1.0
@@ -45,6 +45,38 @@ class TestProgress(unittest.TestCase):
             self.assertAlmostEqual(progress(d, V, A, T / 2), d / 2, places=6)   # symmetric
             xs = [progress(d, V, A, T * k / 50) for k in range(51)]
             self.assertEqual(xs, sorted(xs))
+
+
+class TestMovingStart(unittest.TestCase):
+    def test_from_rest_matches_eta(self):
+        for d in (2.0, 16.0, 60.0):
+            self.assertAlmostEqual(travel_time(d, V, A), eta(d, V, A))
+
+    def test_moving_start_is_faster_by_the_acceleration_saved(self):
+        # Cruising at 4 m/s over a long leg: no acceleration phase, 2 s sooner than from rest.
+        self.assertAlmostEqual(eta(60, V, A) - travel_time(60, V, A, v0=4.0), 2.0)
+
+    def test_progress_consistent_with_moving_start(self):
+        for d, v0 in ((60.0, 4.0), (60.0, 2.0), (10.0, 3.0), (5.0, 4.0)):   # incl. braking-only
+            T = travel_time(d, V, A, v0)
+            self.assertAlmostEqual(progress(d, V, A, T, v0), d, places=6)
+            xs = [progress(d, V, A, T * k / 60, v0) for k in range(61)]
+            self.assertEqual(xs, sorted(xs))
+            self.assertAlmostEqual(xs[1], v0 * T / 60, delta=0.05 * d)   # starts at v0
+
+    def test_fast_drone_cannot_hold_short_of_a_near_blast(self):
+        # Blast sphere starts 6 m ahead; at 4 m/s the stopping distance is 8 m.
+        self.assertEqual(stop_distance(4.0, A), 8.0)
+        b = Blast("T9", (20.0, 0.0, 20.0), 12.0, t=4.0)
+        r = plan_route((0, 0, 20), (60, 0, 20), 0.0, [b], V, A, t_goal=100.0, v0=4.0)
+        self.assertEqual(r.exposed, ["T9"])
+        self.assertEqual(r.hold_s, 0.0)             # carries on instead of turning back into it
+
+    def test_slow_drone_still_holds(self):
+        b = Blast("T9", (30.0, 0.0, 20.0), 12.0, t=8.0)
+        r = plan_route((0, 0, 20), (60, 0, 20), 0.0, [b], V, A, t_goal=100.0, v0=1.0)
+        self.assertEqual(r.exposed, [])
+        self.assertGreater(r.hold_s, 0.0)
 
 
 class TestPlanRoute(unittest.TestCase):
@@ -91,10 +123,16 @@ class TestPlanRoute(unittest.TestCase):
         self.assertEqual(inside_during_window(fly(r, (0, 0, 20), 0.0, 40.0), b), [])
 
     def test_too_close_to_escape_is_reported(self):
-        # 11 m to get clear takes 6.6 s; the blast window opens at 4.5 s.
+        # Heading through the centre; getting clear sideways (11 m) takes 6.6 s, the window opens at 4.5 s.
+        b = Blast("T9", (0.0, 3.0, 20.0), blast_radius(1), t=6.0)
+        r = plan_route((0, 0, 20), (0, 60, 20), 0.0, [b], V, A, t_goal=100.0)
+        self.assertEqual(r.exposed, ["T9"])
+
+    def test_no_exit_when_straight_path_leaves_in_time(self):
+        # Inside now, but flying away: out of the sphere (9 m, 4.2 s) before the window opens (4.5 s).
         b = Blast("T9", (0.0, 3.0, 20.0), blast_radius(1), t=6.0)
         r = plan_route((0, 0, 20), (0, -60, 20), 0.0, [b], V, A, t_goal=100.0)
-        self.assertEqual(r.exposed, ["T9"])
+        self.assertEqual((r.exposed, len(r.legs), r.hold_s), ([], 1, 0.0))
 
     def test_two_blasts_on_path(self):
         b1 = Blast("T8", (25.0, 0.0, 20.0), blast_radius(1), t=7.0)

@@ -208,6 +208,31 @@ def wait_for_roster(n, timeout, stall_s=60.0, inst=DEFAULT_INST):
     raise RuntimeError(f"swarm did not come up: roster {max(best, 0)}/{n} after {timeout:.0f}s")
 
 
+def diagnose_stall(n, inst, path):
+    """Before tearing down a stalled start: stack dumps of every drone missing from the roster
+    (needs the denddron-pyspy image: FROM denddron-swarm-agent + pip install py-spy)."""
+    out = []
+    try:
+        members = set(get("/api/state", timeout=5, inst=inst)["roster"]["members"])
+        registry = json.loads((inst.config_dir / "agent_registry.json").read_text())["assigned"]
+        by_drone = {v: k for k, v in registry.items()}
+        for d in (f"drone_{i}" for i in range(1, n + 1)):
+            if d in members:
+                continue
+            cid = by_drone.get(d)
+            out.append(f"===== {d} (container {cid})")
+            if not cid:
+                continue
+            script = ('for p in $(ls /proc | grep -E "^[0-9]+$"); do c=$(tr "\\0" " " < /proc/$p/cmdline 2>/dev/null); '
+                      'case "$c" in *main.py*|*spawn_main*) echo "=== pid $p: $c"; py-spy dump --pid $p;; esac; done')
+            r = subprocess.run(["docker", "run", "--rm", f"--pid=container:{cid}", "--cap-add", "SYS_PTRACE",
+                                "denddron-pyspy", "sh", "-c", script], capture_output=True, text=True, timeout=120)
+            out.append(r.stdout + r.stderr)
+    except Exception as e:
+        out.append(f"diagnosis failed: {e}")
+    path.write_text("\n".join(out))
+
+
 def compose_down(inst=DEFAULT_INST):
     subprocess.run(["docker", "compose", "-p", inst.project, "down", "--remove-orphans"], cwd=REPO,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -263,14 +288,19 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
     swarm_log = open(rundir / "swarm.log", "w")
     swarm = subprocess.Popen(
         ["bash", "scripts/run_swarm.sh", str(args.drones), "--threats", str(args.threats),
-         "--threat-interval", str(args.interval), "--first-threat", str(args.first), "--seed", str(args.seed)],
+         "--threat-interval", str(args.interval), "--first-threat", str(args.first), "--seed", str(args.seed),
+         "--algorithm", getattr(args, "algorithm", "orca")],
         cwd=REPO, env=env, stdout=swarm_log, stderr=subprocess.STDOUT)
     bot = None
     summary = {}
     sampler = Sampler(getattr(args, "sample_s", 10.0), inst) if getattr(args, "sample", False) else None
     startup_s = None
     try:
-        wait_for_roster(args.drones, getattr(args, "startup_timeout", 300), inst=inst)
+        try:
+            wait_for_roster(args.drones, getattr(args, "startup_timeout", 300), inst=inst)
+        except RuntimeError:
+            diagnose_stall(args.drones, inst, rundir / "stall_dump.txt")
+            raise
         startup_s = round(time.time() - t0)
         if sampler:
             sampler.start()
@@ -348,6 +378,7 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--reaction", type=float, default=3.0, help="operator reaction time, sim seconds")
     ap.add_argument("--timeout", type=float, default=360, help="sim seconds per run after the swarm is up")
+    ap.add_argument("--algorithm", default="apf", choices=["orca", "apf"], help="drones' path planner")
     ap.add_argument("--instance", type=int, default=0, help="swarm instance to use (0 = default)")
     ap.add_argument("--parallel", type=int, default=1,
                     help="runs at once, each on its own swarm instance (instances 1..P)")

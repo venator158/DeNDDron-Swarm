@@ -27,7 +27,7 @@ from threats import ETA_MARGIN, eta
 Vec3 = Tuple[float, float, float]
 
 CLEARANCE_M = 12.0         # non-job drones are kept this far from a detonation (kill radius 8 m + margin)
-SLOT_RADIUS_M = 4.0        # drones' slot circle around the engagement point (multi-drone jobs)
+SLOT_RADIUS_M = 3.0        # job-mates are stacked within +-this of the engagement point (multi-drone jobs)
 BLAST_TOL_S = 1.5          # detonation time uncertainty: a blast is dangerous for t_engage +- this
 HOLD_MARGIN_M = 2.0        # holds stop this far before a blast sphere
 INTERCEPT_SLACK_S = 4.0    # time kept free before an intercept (orders, bids, confirmation, errors)
@@ -83,25 +83,52 @@ class Route:
         return self.travel_s * margin + self.hold_s
 
 
-def progress(d_total: float, v_max: float, a_max: float, tau: float) -> float:
-    """Distance covered after tau seconds of a rest-to-rest trapezoidal move over d_total."""
+def _profile(d: float, v_max: float, a_max: float, v0: float):
+    """Straight move over d starting at speed v0 along it, ending at rest, accelerating/braking at
+    a_max and cruising at v_max.  Returns (T, t1, tc, v_peak, d1, brake_a): accelerate for t1 to
+    v_peak (covering d1), cruise tc, brake to rest.  brake_a is set when the drone cannot even
+    stop within d (it brakes harder than a_max and arrives at rest)."""
+    v0 = min(max(v0, 0.0), v_max)
+    if d <= 0.0:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, None
+    if v0 > 0.0 and d < v0 * v0 / (2.0 * a_max):
+        a = v0 * v0 / (2.0 * d)
+        return v0 / a, 0.0, 0.0, v0, 0.0, a
+    d_acc = (v_max * v_max - v0 * v0) / (2.0 * a_max)
+    d_dec = v_max * v_max / (2.0 * a_max)
+    if d_acc + d_dec <= d:
+        v_peak, tc = v_max, (d - d_acc - d_dec) / v_max
+    else:
+        v_peak, tc = math.sqrt(a_max * d + 0.5 * v0 * v0), 0.0
+    t1 = (v_peak - v0) / a_max
+    d1 = (v_peak * v_peak - v0 * v0) / (2.0 * a_max)
+    return t1 + tc + v_peak / a_max, t1, tc, v_peak, d1, None
+
+
+def travel_time(d: float, v_max: float, a_max: float, v0: float = 0.0) -> float:
+    """Time to fly d in a straight line from speed v0 (along it) to rest.  v0 = 0: threats.eta."""
+    return _profile(d, v_max, a_max, v0)[0]
+
+
+def stop_distance(v0: float, a_max: float) -> float:
+    return max(0.0, v0) ** 2 / (2.0 * a_max)
+
+
+def progress(d_total: float, v_max: float, a_max: float, tau: float, v0: float = 0.0) -> float:
+    """Distance covered after tau seconds of that move."""
     if tau <= 0.0 or d_total <= 0.0:
         return 0.0
-    t_total = eta(d_total, v_max, a_max)
-    if tau >= t_total:
+    T, t1, tc, v_peak, d1, brake_a = _profile(d_total, v_max, a_max, v0)
+    if tau >= T:
         return d_total
-    t_acc = v_max / a_max
-    if d_total >= v_max * t_acc:                       # reaches cruise speed
-        d_acc = 0.5 * a_max * t_acc * t_acc
-        if tau < t_acc:
-            return 0.5 * a_max * tau * tau
-        if tau < t_total - t_acc:
-            return d_acc + v_max * (tau - t_acc)
-    else:                                              # triangular profile
-        t_acc = t_total / 2.0
-        if tau < t_acc:
-            return 0.5 * a_max * tau * tau
-    rem = t_total - tau
+    if brake_a is not None:
+        return min(d_total, v_peak * tau - 0.5 * brake_a * tau * tau)
+    v0 = min(max(v0, 0.0), v_max)
+    if tau < t1:
+        return v0 * tau + 0.5 * a_max * tau * tau
+    if tau < t1 + tc:
+        return d1 + v_peak * (tau - t1)
+    rem = T - tau
     return d_total - 0.5 * a_max * rem * rem
 
 
@@ -125,13 +152,14 @@ def _entry(p: Vec3, u: Vec3, d: float, c: Vec3, r: float) -> Optional[float]:
     return s if 0.0 <= s <= d else None
 
 
-def _first_conflict(pos, goal, t, blasts, v_max, a_max, t_goal, tol):
+def _first_conflict(pos, goal, t, blasts, v_max, a_max, t_goal, tol, v0=0.0):
     """First blast the drone would be inside during its window, flying pos -> goal from time t
-    and then waiting at the goal until t_goal.  Returns (blast, segment conflict?) or None."""
+    (at speed v0 along the way) and then waiting at the goal until t_goal.
+    Returns (blast, segment conflict?) or None."""
     d = math.dist(pos, goal)
     u = _sub(goal, pos)
     u = (u[0] / d, u[1] / d, u[2] / d) if d > 1e-9 else (0.0, 0.0, 0.0)
-    t_arr = t + eta(d, v_max, a_max)
+    t_arr = t + travel_time(d, v_max, a_max, v0)
     for b in sorted(blasts, key=lambda b: b.t):
         lo, hi = b.window(tol)
         if hi < t:
@@ -142,77 +170,89 @@ def _first_conflict(pos, goal, t, blasts, v_max, a_max, t_goal, tol):
         # flying the segment
         tau = max(lo, t)
         while tau <= min(hi, t_arr):
-            if math.dist(_along(pos, u, progress(d, v_max, a_max, tau - t)), b.center) < b.radius:
+            if math.dist(_along(pos, u, progress(d, v_max, a_max, tau - t, v0)), b.center) < b.radius:
                 return b, True
             tau += SAMPLE_S
     return None
 
 
 def plan_route(start: Vec3, goal: Vec3, t0: float, blasts: Iterable[Blast], v_max: float, a_max: float,
-               t_goal: Optional[float] = None, tol: float = BLAST_TOL_S, max_legs: int = 12) -> Route:
+               t_goal: Optional[float] = None, tol: float = BLAST_TOL_S, max_legs: int = 12,
+               v0: float = 0.0) -> Route:
     """Route start -> goal from time t0 that stays out of every blast during its window.
 
     t_goal: until when the drone will wait at the goal (its own detonation time); a goal inside
     a blast that goes off before then makes the route `blocked`.
+    v0: current speed towards the goal (a moving drone gets there sooner, and needs its stopping
+    distance to hold before a blast; a blast it cannot stop short of is `exposed`).
     """
     blasts = list(blasts)
     route = Route()
     pos, t = tuple(start), float(t0)
-    # Already inside a blast whose window is still ahead: leave it radially first.
-    for b in sorted(blasts, key=lambda b: b.t):
-        if b.window(tol)[1] >= t and math.dist(pos, b.center) < b.radius:
+    for _ in range(max_legs):
+        hit = _first_conflict(pos, goal, t, blasts, v_max, a_max, t_goal, tol, v0)
+        d = math.dist(pos, goal)
+        if hit is None:
+            dt = travel_time(d, v_max, a_max, v0)
+            route.legs.append(Leg(tuple(goal)))
+            route.travel_s += dt
+            route.arrival = t + dt
+            return route
+        b, on_segment = hit
+        if on_segment and math.dist(pos, b.center) < b.radius:
+            # Inside it now, and the straight path would still be inside when it goes off: leave
+            # radially if that can be done before its window opens, otherwise it is unavoidable.
             w = _sub(pos, b.center)
             n = math.hypot(w[0], w[1])
             ux, uy = (w[0] / n, w[1] / n) if n > 1e-6 else (1.0, 0.0)
             r = b.radius + HOLD_MARGIN_M
             exit_pt = (b.center[0] + ux * r, b.center[1] + uy * r, pos[2])
             dt = eta(math.dist(pos, exit_pt), v_max, a_max)
+            blasts = [o for o in blasts if o is not b]
             if t + dt > b.window(tol)[0]:
-                route.exposed.append(b.threat_id)   # too close to get out before it goes off
-            route.legs.append(Leg(exit_pt))
+                route.exposed.append(b.threat_id)
+                continue
+            route.legs.append(Leg(exit_pt, b.window(tol)[1]))     # wait outside until it has gone off
             route.travel_s += dt
-            pos, t = exit_pt, t + dt
-    for _ in range(max_legs):
-        hit = _first_conflict(pos, goal, t, blasts, v_max, a_max, t_goal, tol)
-        d = math.dist(pos, goal)
-        if hit is None:
-            dt = eta(d, v_max, a_max)
-            route.legs.append(Leg(tuple(goal)))
-            route.travel_s += dt
-            route.arrival = t + dt
-            return route
-        b, on_segment = hit
+            route.hold_s += b.window(tol)[1] - (t + dt)
+            pos, t, v0 = exit_pt, b.window(tol)[1], 0.0
+            continue
         if not on_segment:
             route.blocked = True               # the goal itself is inside the blast
             route.legs.append(Leg(tuple(goal)))
-            route.travel_s += eta(d, v_max, a_max)
-            route.arrival = t + eta(d, v_max, a_max)
+            route.travel_s += travel_time(d, v_max, a_max, v0)
+            route.arrival = t + travel_time(d, v_max, a_max, v0)
             return route
         u = _sub(goal, pos)
         u = (u[0] / d, u[1] / d, u[2] / d)
         s_in = _entry(pos, u, d, b.center, b.radius)
         s_hold = max(0.0, (s_in if s_in is not None else 0.0) - HOLD_MARGIN_M)
+        if s_hold < stop_distance(v0, a_max):
+            # Moving too fast to stop short of it: unavoidable, carry on (don't turn back into it).
+            route.exposed.append(b.threat_id)
+            blasts = [o for o in blasts if o is not b]
+            continue
         release_at = b.window(tol)[1]
         # The hold point must also be clear of every other blast going off while we wait there.
         while True:
             hold_pt = _along(pos, u, s_hold)
-            dt = eta(s_hold, v_max, a_max)
+            dt = travel_time(s_hold, v_max, a_max, v0)
             unsafe = [o for o in blasts if o.window(tol)[0] <= release_at and o.window(tol)[1] >= t + dt
                       and math.dist(hold_pt, o.center) < o.radius]
             if not unsafe:
                 break
             if s_hold <= 0.0:
                 route.blocked = True
-                route.arrival = t + eta(d, v_max, a_max)
+                route.arrival = t + travel_time(d, v_max, a_max, v0)
                 return route
             s_hold = max(0.0, s_hold - HOLD_MARGIN_M)
         release = max(t + dt, release_at)
         route.legs.append(Leg(hold_pt, release))
         route.travel_s += dt
         route.hold_s += release - (t + dt)
-        pos, t = hold_pt, release
+        pos, t, v0 = hold_pt, release, 0.0
     route.blocked = True                        # too many holds: give up
-    route.arrival = t + eta(math.dist(pos, goal), v_max, a_max)
+    route.arrival = t + travel_time(math.dist(pos, goal), v_max, a_max, v0)
     return route
 
 

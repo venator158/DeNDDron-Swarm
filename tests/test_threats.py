@@ -57,11 +57,11 @@ class TestGeometry(unittest.TestCase):
         p, t = engagement_point((10.0, 0.0, 15.0), (-1.0, 0.0, 0.0), 7.0, defended_radius=45.0)
         self.assertEqual(t, 7.0)
 
-    def test_slots_spread_around_point(self):
-        pts = [slot_point((0.0, 0.0, 10.0), k, 3, 4.0) for k in range(3)]
-        for p in pts:
-            self.assertAlmostEqual(math.hypot(p[0], p[1]), 4.0)
-        self.assertEqual(slot_point((1.0, 2.0, 3.0), 0, 1, 4.0), (1.0, 2.0, 3.0))
+    def test_slots_stacked_through_point(self):
+        pts = [slot_point((5.0, 6.0, 20.0), k, 3, 3.0) for k in range(3)]
+        self.assertEqual(pts, [(5.0, 6.0, 17.0), (5.0, 6.0, 20.0), (5.0, 6.0, 23.0)])
+        self.assertEqual([slot_point((5.0, 6.0, 20.0), k, 2, 3.0)[2] for k in range(2)], [17.0, 23.0])
+        self.assertEqual(slot_point((1.0, 2.0, 3.0), 0, 1, 3.0), (1.0, 2.0, 3.0))
 
 
 class TestEta(unittest.TestCase):

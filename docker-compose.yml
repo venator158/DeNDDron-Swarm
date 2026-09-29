@@ -77,6 +77,7 @@ services:
     environment:
       SIM_BUS: tcp/${SIM_BUS_IP:-172.20.0.2}:7447
       RADIO_SUBNET: ${RADIO_SUBNET:-172.21.0.0/16}
+      RADIO_CONNECT: udp/${RADIO_SHIP_IP:-172.21.0.2}:7450
       RADIO_QOS: ${RADIO_QOS:-default}
       SIM_RTF: ${SIM_RTF:-1}
       ZONE_KEEPOUT: ${ZONE_KEEPOUT:-1}
@@ -117,6 +118,7 @@ services:
     environment:
       SIM_BUS: tcp/${SIM_BUS_IP:-172.20.0.2}:7447
       RADIO_SUBNET: ${RADIO_SUBNET:-172.21.0.0/16}
+      RADIO_LISTEN_PORT: 7450
       RADIO_QOS: ${RADIO_QOS:-default}
       SIM_RTF: ${SIM_RTF:-1}
       SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
@@ -130,8 +132,9 @@ services:
     command: >
       sh -c 'exec python -u ship.py --sim-bus "$${SIM_BUS}"'
     networks:
-      - sim_net
-      - radio_net
+      sim_net:
+      radio_net:
+        ipv4_address: ${RADIO_SHIP_IP:-172.21.0.2}
     ports:
       - "${DASHBOARD_PORT:-8080}:8080"
     depends_on:
@@ -177,11 +180,13 @@ networks:
     ipam:
       config:
         - subnet: ${SIM_SUBNET:-172.20.0.0/16}
+          ip_range: ${SIM_IP_RANGE:-172.20.128.0/17}   # automatic addresses; fixed ones stay below
   radio_net:
     driver: bridge
     ipam:
       config:
         - subnet: ${RADIO_SUBNET:-172.21.0.0/16}
+          ip_range: ${RADIO_IP_RANGE:-172.21.128.0/17}
 
 volumes:
   swarm_state:

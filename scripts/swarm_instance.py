@@ -56,6 +56,12 @@ def instance(k: int) -> dict:
     # The sim bus router has a fixed address (.2 of the sim subnet): everything connects by IP.
     cfg["SIM_BUS_IP"] = os.environ.get("SIM_BUS_IP") if k and os.environ.get("SIM_BUS_IP") else \
         str(ipaddress.ip_network(cfg["SIM_SUBNET"]).network_address + 2)
+    # The ship's radio has a fixed address (.2 of the radio subnet): drones connect to it explicitly.
+    cfg["RADIO_SHIP_IP"] = os.environ.get("RADIO_SHIP_IP") if k and os.environ.get("RADIO_SHIP_IP") else \
+        str(ipaddress.ip_network(cfg["RADIO_SUBNET"]).network_address + 2)
+    # Docker assigns container addresses from the upper half only, so fixed ones never collide.
+    for net in ("SIM", "RADIO"):
+        cfg[f"{net}_IP_RANGE"] = str(list(ipaddress.ip_network(cfg[f"{net}_SUBNET"]).subnets())[1])
     cfg["SWARM_INSTANCE"] = str(k)
     return cfg
 

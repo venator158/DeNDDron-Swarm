@@ -43,6 +43,7 @@ def main():
     ap.add_argument("--startup-timeout", type=float, default=180,
                     help="wall seconds for the full roster (a roster that stops growing for 60 s aborts sooner)")
     ap.add_argument("--sample-s", type=float, default=10.0, help="wall seconds between resource samples")
+    ap.add_argument("--algorithm", default="apf", choices=["orca", "apf"], help="drones' path planner")
     ap.add_argument("--instance", type=int, default=0, help="swarm instance to use (0 = default)")
     ap.add_argument("--parallel", type=int, default=1,
                     help="runs at once, each on its own swarm instance (instances 1..P); mind host CPU")

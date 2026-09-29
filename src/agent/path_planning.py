@@ -52,6 +52,7 @@ class APFStrategy(PathPlanningStrategy):
         self.max_z = 50.0
 
         self.max_repulsive_force = 10.0
+        self.goal_repulsion_fade_m = 10.0   # repulsion fades to zero over the last 10 m to the goal
         # Internal state.
         self.prev_v_total = np.zeros(3, dtype=float)
         self.last_pos = None
@@ -98,6 +99,7 @@ class APFStrategy(PathPlanningStrategy):
         self.max_z = float(config["max_z"])
         self.velocity_smoothing = float(config["velocity_smoothing"])
         self.max_repulsive_force = float(config.get("max_repulsive_force", 10.0))
+        self.goal_repulsion_fade_m = float(config.get("goal_repulsion_fade_m", self.goal_repulsion_fade_m))
         self.current_k_att  = self.k_attractive
         self._goal_reached  = False   # reset on reconfigure
         self.prev_v_total = np.zeros(3)
@@ -174,6 +176,11 @@ class APFStrategy(PathPlanningStrategy):
 
         # 2) Repulsive force from obstacles and ship
         repulsive = self._repulsive_force(curr_pos, voxel_map)
+        # Goal reachable with obstacles nearby: fade repulsion out within goal_repulsion_fade_m of the
+        # goal (to zero at the goal), or neighbours near the goal - e.g. job-mates at adjacent slots
+        # ~7 m apart - push the drone away from it forever.
+        if self.goal_repulsion_fade_m > 0 and dist_to_goal < self.goal_repulsion_fade_m:
+            repulsive = repulsive * (dist_to_goal / self.goal_repulsion_fade_m) ** 2
 
         # 3) Combine force vectors
         total_force = attractive + repulsive

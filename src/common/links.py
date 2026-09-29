@@ -93,7 +93,17 @@ def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = Non
     # link handling; over UDP that does not happen. UDP means best-effort delivery: the protocol
     # recovers from lost orders/bids/awards by re-announcement and conflict repair.
     protos = [p.strip() for p in (os.environ.get("RADIO_PROTO") or "udp").split(",") if p.strip()]
-    conf.insert_json5("listen/endpoints", json.dumps([f"{p}/{ip}:0" for p in protos]))
+    port = int(os.environ.get("RADIO_LISTEN_PORT") or 0)       # the ship listens on a fixed port
+    conf.insert_json5("listen/endpoints", json.dumps([f"{p}/{ip}:{port}" for p in protos]))
+    # Meeting point: also connect to the ship's fixed radio address (RADIO_CONNECT), retrying until
+    # it is up.  Multicast discovery alone occasionally missed a node when ~50 start at once, and
+    # a drone with no radio session is silent; peer gossip introduces the others once connected.
+    connect = [e.strip() for e in (os.environ.get("RADIO_CONNECT") or "").split(",") if e.strip()]
+    if connect:
+        conf.insert_json5("connect/endpoints", json.dumps(connect))
+        conf.insert_json5("connect/exit_on_failure", "false")
+        conf.insert_json5("connect/retry", json.dumps({"period_init_ms": 500, "period_max_ms": 2000,
+                                                       "period_increase_factor": 2}))
     if len(protos) > 1:
         conf.insert_json5("transport/unicast/max_links", str(len(protos)))
     conf.insert_json5("scouting/multicast/enabled", "true")

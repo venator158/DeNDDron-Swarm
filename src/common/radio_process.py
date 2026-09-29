@@ -19,6 +19,7 @@ import logging
 import multiprocessing as mp
 import queue
 import threading
+import time
 from collections import namedtuple
 
 log = logging.getLogger("RadioProcess")
@@ -29,6 +30,7 @@ Sample = namedtuple("Sample", ["key_expr", "payload"])
 def _worker(conn, subnet, routing_mode, lease_ms):
     """Child process: owns the Zenoh radio session and relays over the pipe."""
     import links   # imported here so the child opens its own Zenoh runtime
+    import zenoh
     import os, sys, time
     debug = os.environ.get("RADIO_DEBUG") == "1"
     session = links.open_radio(subnet, routing_mode, lease_ms)
@@ -39,18 +41,30 @@ def _worker(conn, subnet, routing_mode, lease_ms):
     publishers, subscribers = {}, {}
     send_lock = threading.Lock()
 
-    def forwarder(sub_id):
-        def forward(sample):
-            if debug and str(sample.key_expr) not in publishers:   # remote traffic only
-                now = time.monotonic()
-                stats["rx_gap"] = max(stats["rx_gap"], now - stats["last_rx"])
-                stats["last_rx"] = now
-            try:
-                with send_lock:
-                    conn.send(("msg", sub_id, str(sample.key_expr), bytes(sample.payload)))
-            except (BrokenPipeError, EOFError, OSError):
-                pass
-        return forward
+    def forward(sub_id, sample):
+        if debug and str(sample.key_expr) not in publishers:   # remote traffic only
+            now = time.monotonic()
+            stats["rx_gap"] = max(stats["rx_gap"], now - stats["last_rx"])
+            stats["last_rx"] = now
+        try:
+            with send_lock:
+                conn.send(("msg", sub_id, str(sample.key_expr), bytes(sample.payload)))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+
+    def subscribe(sub_id, key):
+        # Channel handler + our own pulling thread, not a Python callback: with callbacks, Zenoh
+        # threads call into Python while this thread declares the next subscriber, and at ~50
+        # drones that occasionally deadlocked a drone's radio at startup (stuck in
+        # declare_subscriber: the drone never joined).  A ring channel drops the oldest message
+        # if we fall behind instead of blocking Zenoh (the radio is lossy anyway).
+        sub = session.declare_subscriber(key, zenoh.handlers.RingChannel(1024))
+
+        def pull():
+            for sample in sub:          # ends when the subscriber is undeclared
+                forward(sub_id, sample)
+        threading.Thread(target=pull, name=f"radio-sub-{sub_id}", daemon=True).start()
+        return sub
 
     while True:
         try:
@@ -73,11 +87,17 @@ def _worker(conn, subnet, routing_mode, lease_ms):
                     stats.update(put_max=0.0, rx_gap=0.0, t=t0)
         elif op == "sub":
             _, sub_id, key = cmd
-            subscribers[sub_id] = session.declare_subscriber(key, forwarder(sub_id))
+            subscribers[sub_id] = subscribe(sub_id, key)
         elif op == "unsub":
             sub = subscribers.pop(cmd[1], None)
             if sub is not None:
                 sub.undeclare()
+        elif op == "ping":
+            try:
+                with send_lock:
+                    conn.send(("pong", 0, "", b""))
+            except (BrokenPipeError, EOFError, OSError):
+                break
         elif op == "close":
             break
     session.close()
@@ -100,25 +120,29 @@ class _Subscriber:
 
     def undeclare(self):
         self._radio._callbacks[self._id] = None
+        self._radio._subs.pop(self._id, None)
         self._radio._send(("unsub", self._id))
 
 
 class RadioProcess:
     SEND_QUEUE = 1000
+    PING_S = 1.0          # the watchdog pings the radio process this often
+    STALL_S = 5.0         # no answer for this long: the radio process is stuck, restart it
+    START_GRACE_S = 10.0  # allowance for opening the Zenoh session
 
     def __init__(self, subnet=None, routing_mode=None, lease_ms=None):
-        ctx = mp.get_context("spawn")   # never fork a process that already runs a Zenoh runtime
-        self._conn, child = ctx.Pipe()
-        self._proc = ctx.Process(target=_worker, args=(child, subnet, routing_mode, lease_ms),
-                                 name="radio", daemon=True)
-        self._proc.start()
-        child.close()
+        self._ctx = mp.get_context("spawn")   # never fork a process that already runs a Zenoh runtime
+        self._args = (subnet, routing_mode, lease_ms)
         self._callbacks = []            # indexed by subscription id
+        self._subs = {}                 # active subscription id -> key (re-declared after a restart)
         self._out = queue.Queue(maxsize=self.SEND_QUEUE)
+        self._send_lock = threading.Lock()
         self._dropped = 0
+        self.restarts = 0
         self._running = True
+        self._start_child()
         threading.Thread(target=self._sender, name="radio-tx", daemon=True).start()
-        threading.Thread(target=self._receiver, name="radio-rx", daemon=True).start()
+        threading.Thread(target=self._watchdog, name="radio-watchdog", daemon=True).start()
 
     # --- Session-like API ------------------------------------------------
     def declare_publisher(self, key):
@@ -127,6 +151,7 @@ class RadioProcess:
     def declare_subscriber(self, key, callback):
         self._callbacks.append(callback)
         sub_id = len(self._callbacks) - 1
+        self._subs[sub_id] = key
         self._send(("sub", sub_id, key))
         return _Subscriber(self, sub_id)
 
@@ -136,7 +161,8 @@ class RadioProcess:
     def close(self):
         self._running = False
         try:
-            self._conn.send(("close",))
+            with self._send_lock:
+                self._conn.send(("close",))
         except (BrokenPipeError, OSError):
             pass
         self._proc.join(timeout=3)
@@ -148,6 +174,36 @@ class RadioProcess:
         return self._proc.is_alive()
 
     # --- plumbing ----------------------------------------------------------
+    def _start_child(self):
+        conn, child = self._ctx.Pipe()
+        proc = self._ctx.Process(target=_worker, args=(child,) + self._args, name="radio", daemon=True)
+        proc.start()
+        child.close()
+        with self._send_lock:
+            self._conn, self._proc = conn, proc
+            self._last_pong = time.monotonic() + self.START_GRACE_S
+            for sub_id, key in list(self._subs.items()):    # a restarted session needs them again
+                conn.send(("sub", sub_id, key))
+        threading.Thread(target=self._receiver, args=(conn,), name="radio-rx", daemon=True).start()
+
+    def _watchdog(self):
+        """Restart the radio process if it stops answering.  At ~50 peers starting at once, a
+        drone's Zenoh session occasionally hung inside a call (declare_subscriber, put) and the
+        drone never joined; a fresh session joins normally."""
+        while self._running:
+            time.sleep(self.PING_S)
+            if not self._running:
+                return
+            self._send(("ping",))
+            silent = time.monotonic() - self._last_pong
+            if silent > self.STALL_S or not self._proc.is_alive():
+                self.restarts += 1
+                log.warning("radio process %s for %.0fs; restarting it (restart %d)",
+                            "gone" if not self._proc.is_alive() else "unresponsive", max(silent, 0), self.restarts)
+                self._proc.kill()               # unblocks a sender stuck writing to its pipe
+                self._proc.join(timeout=3)
+                self._start_child()
+
     def _send(self, cmd):
         try:
             self._out.put_nowait(cmd)
@@ -164,17 +220,22 @@ class RadioProcess:
         while self._running:
             cmd = self._out.get()
             try:
-                self._conn.send(cmd)
+                # One writer at a time on the pipe.  If the child is stuck this blocks with the lock
+                # held; the watchdog kills the child first, which breaks the pipe and frees it.
+                with self._send_lock:
+                    self._conn.send(cmd)
             except (BrokenPipeError, OSError):
-                log.error("radio process is gone")
-                return
+                time.sleep(0.1)                 # the watchdog is replacing the process (subs re-declared)
 
-    def _receiver(self):
+    def _receiver(self, conn):
         while self._running:
             try:
-                op, sub_id, key, payload = self._conn.recv()
+                op, sub_id, key, payload = conn.recv()
             except (EOFError, OSError):
                 return
+            if op == "pong":
+                self._last_pong = time.monotonic()
+                continue
             callback = self._callbacks[sub_id] if op == "msg" else None
             if callback is None:
                 continue

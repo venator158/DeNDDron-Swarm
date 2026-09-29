@@ -48,7 +48,7 @@ The first run builds the images, which takes several minutes. Add `--build` afte
 | `--threats K` | 0 (radar off) | threats the ship's radar generates; drones get no static goals |
 | `--threat-interval S` | 30 | mean sim seconds between detections |
 | `--first-threat S` | 20 | sim seconds before the first detection |
-| `--algorithm orca\|apf` | `orca` | path planner |
+| `--algorithm apf\|orca` | `apf` | path planner (APF with goal-proximity repulsion fade; ORCA dead-ends in crowds, see [Spatial queue](#spatial-queue)) |
 | `--seed S` | 42 | spawn layout and threat scenario |
 | `--maneuver-p P` | 0 | probability that a threat turns once mid-flight (`THREAT_MANEUVER_P`) |
 | `--rtf K` | 1 | run the simulation K times faster than real time (see [Faster than real time](#faster-than-real-time)) |
@@ -134,11 +134,16 @@ Threat levels are both priority and the number of drones needed:
 Speeds are scaled to the drones' 4 m/s.
 
 ### Engagement geometry
-The ship reports each threat as a straight-line track with its CPA and TCPA. The drones intercept at the **engagement point**:
-- the CPA, if the threat passes outside the defended radius (45 m);
-- otherwise, the point where the track first crosses the defended radius. A threat aimed at the ship has its CPA on the ship itself, so intercepting there would be too late.
+The ship reports each threat as a straight-line track with its CPA and TCPA. The drones intercept at the **engagement point**, the **earliest point on the track** (so the farthest from the ship) that satisfies all of these (see [Spatial queue](#spatial-queue)):
+- enough free drones can reach it in time, with a 1.25× ETA margin plus 4 s of slack;
+- it is within 140 m of the ship (`INTERCEPT_MAX_RANGE_M`);
+- it is kept clear of other jobs.
 
-The assigned drones take up slots 4 m apart around that point and **detonate at the allocated time**, the moment the threat arrives. The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
+The latest acceptable point, used as a fallback, is the old rule:
+- the CPA, if the threat passes outside the defended radius (45 m);
+- otherwise, the point where the track first crosses the defended radius.
+
+The assigned drones take up slots **stacked vertically** through that point (within ±3 m) and **detonate at the allocated time**, the moment the threat arrives. Vertical stacking matters: the lidar is planar, so job-mates stacked 3 m apart don't repel each other off their slots (a horizontal ring did). The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
 
 ## Architecture
 
@@ -158,7 +163,7 @@ The assigned drones take up slots 4 m apart around that point and **detonate at 
 
 - **Two links per node** (`src/common/links.py`).
   - The *onboard bus* goes through a Zenoh router on `sim_net`. It stands in for a drone's own wiring (sensors, actuators, detonation), and for the ship's radar truth. It is not communications.
-  - The *radio* runs peer-to-peer over UDP on `radio_net` (Zenoh 1.10.1). Peers find each other by multicast scouting on the radio interface and connect directly. Every drone and the ship run the radio **in a separate OS process** (`src/common/radio_process.py`), so a radio failure cannot freeze flight control or C2.
+  - The *radio* runs peer-to-peer over UDP on `radio_net` (Zenoh 1.10.1). Peers find each other by multicast scouting on the radio interface and connect directly. Drones also connect to the ship's fixed radio address (`.2` of the radio subnet, port 7450) as a meeting point, and Zenoh gossip introduces the rest. Every drone and the ship run the radio **in a separate OS process** (`src/common/radio_process.py`), so a radio failure cannot freeze flight control or C2. A watchdog pings the radio process every second, and restarts it if it stops answering for 5 s (subscriptions are re-declared). At ~50 peers starting together, a drone's Zenoh session occasionally hung inside a call and the drone never joined.
   - Degrading `radio_net` degrades only the communications. The physics keeps working.
 - **Simulator** (`sim/GazeboSimulator.cpp`).
   - Integrates the drones' motion from `cmd_vel`.
@@ -178,7 +183,9 @@ The assigned drones take up slots 4 m apart around that point and **detonate at 
 | `swarm/{id}/cmd_vel` | onboard | drone → sim | `{linear, angular}` |
 | `swarm/agents/join`, `swarm/agents/despawn` | onboard | drone → sim, metrics | spawn / remove this drone |
 | `sim/clock` | onboard | sim → ship | `{sim_time}` at 10 Hz |
-| `sim/detonation` | onboard | drone → ship | `{agent_id, threat_id, sim_time, x, y, z}` (physical event, observed by radar) |
+| `sim/detonation` | onboard | drone → ship, drones | `{agent_id, threat_id, sim_time, x, y, z, intruders[]}` (physical event, observed by radar; drones within 8 m of another job's blast are destroyed) |
+| `sim/damage` | onboard | drone → ship | `{agent_id, cause: friendly_fire, by, by_threat, job, distance}` |
+| `ship/zones` | radio | ship → drones | `{zones[{threat_id, point, radius, t_engage}]}` at 1 Hz: every job's reserved blast |
 | `sim/threat_tracks` | onboard | ship → sim | `{threat_id, type, level, status, t0, p0, v}` for Gazebo markers |
 | `swarm/heartbeat/{id}` | radio | drone → ship | `{state, link, pose, threat_id, t_engage, confirmed}` at 2 Hz (drones do not subscribe) |
 | `swarm/heartbeat_help/{id}` | radio | drone → drones | the same heartbeat, only while the ship does not hear this drone directly |
@@ -278,6 +285,34 @@ The loss rows are from the run with the award fixes below. The other rows come f
   The fix is less background traffic, not QoS.
 - **`tuned` vs `default`.** No meaningful difference in any condition, so `default` stays the default.
 - **Impairment method.** `degrade_radio.sh` impairs only UDP. The earlier version impaired all traffic on the radio interface, including the dashboard's TCP connection (Docker forwards `:8080` to the ship's radio address). At 64 kbit/s one dashboard request then took 1.2 s instead of 1 ms, which is why the earlier tuned 64 kbit/s run failed.
+
+### Spatial queue
+
+A detonation destroys any drone within 8 m (friendly fire), and the drones have no seeker. The rule: at detonation, every drone not on that job must be more than **12 m** away. `src/common/deconflict.py` is shared by the ship and the drones, and is unit-tested. It enforces the rule in space and time:
+
+- **Reservations.** Each confirmed job reserves its blast: 12 m around each slot, at its detonation time ±1.5 s.
+- **Intercept choice (ship).** The ship picks the earliest reachable point on the track that is separated from every other job's slots. It also avoids points whose blast would force a hold on a drone already flying another job, so new jobs yield to committed ones. Only if no such point exists are holds accepted.
+- **Routes with holds (drones).** A drone plans a straight route with its real speed profile, starting from its current speed. If it would be inside another job's blast during that blast's window, it holds just outside, beyond its stopping distance, until the blast has passed. Bids include hold time, and the ship re-checks each drone's route before confirming it. Drones re-plan every second and whenever the zones change.
+- **Giving a job back.** A drone gives its job back only if its slot is inside another job's blast, or it really can't arrive in time. It never does so within 10 s of detonation, because it would be left inside the zone as an outsider.
+- **Idle drones** inside a zone move out of it.
+- **Final check.** At detonation, a drone counts non-job drones within 12 m. If there are any, it detonates anyway: the target comes first.
+- **Friendly fire is modelled.** A detonation of another job within 8 m destroys a drone (`sim/damage`); job-mates detonating together are exempt. `ZONE_KEEPOUT=0` turns prevention off for experiments.
+
+Results, 50 drones, 25 threats, real time, APF planner:
+
+| | Before (CPA/defended-radius intercepts) | Now |
+|---|---|---|
+| Intercept distance from the ship | 45 m | 86 m |
+| Threats destroyed | 23/25 | **25/25, 25/25** (two runs) |
+| Friendly-fire kills | 3 (first zones version) | 0 |
+| Detonations with non-job drones within 12 m | 5 | 0 |
+
+With 8 drones: 4/4 destroyed at 92 m. Manoeuvring missiles (each turns once, points shift 7–27 m): 3/3 destroyed; before, the largest shift was a miss.
+
+What it took, from traced flights:
+- **Planner.** ORCA's greedy solver dead-ends at zero velocity when boxed in (e.g. by a drone parked on the route), so APF is now the default. APF's repulsion fades out over the last 10 m to the goal; otherwise neighbours near a goal push the drone away forever.
+- **Vertical slots.** Drones in a horizontal ring pushed each other 6–10 m off their slots.
+- **Speed-aware planning.** Routes that assumed a standing start put hold points inside the stopping distance of a cruising drone.
 
 ### Scaling
 
@@ -454,7 +489,7 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
 - **Shared simulation clock.** Detonation times use the simulator's clock, which every node shares. A distributed clock is future work.
 - **Idealized threats.** They fly straight lines at constant speed, apart from at most one optional turn, and a detonation within the kill radius always kills (no kill probability).
-- **No re-planning after a manoeuvre.** The job's drones follow the new point, but the ship does not re-check whether they can still make it, or bring in closer free drones.
+- **Re-planning after a manoeuvre uses the job's own drones only.** The ship re-picks the intercept point for them (falling back to the legacy point if none fits). It doesn't bring in closer free drones.
 - **Greedy assignment.** Orders are assigned per order, highest level first, not globally optimized. A drone waiting on one order's result skips any other order that arrives before that result.
 - **Planar perception.** The lidar is 2D, and voxels are placed at the drone's own altitude. ORCA uses greedy projection, not a full linear program.
 - **No security.** Radio traffic is unauthenticated: a forged order or bid would be acted on.

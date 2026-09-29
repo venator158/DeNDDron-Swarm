@@ -154,7 +154,7 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducible layouts")
     parser.add_argument("--no-goals", action="store_true",
                         help="Omit static goals; drones hold station until tasked (threat scenario)")
-    parser.add_argument("--algorithm", type=str, default="orca", choices=["orca", "apf"], help="Path planning algorithm (orca or apf)")
+    parser.add_argument("--algorithm", type=str, default="apf", choices=["orca", "apf"], help="Path planning algorithm (orca or apf)")
     parser.add_argument(
         "--output",
         type=Path,

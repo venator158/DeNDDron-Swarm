@@ -87,11 +87,16 @@ def engagement_point(p0: Vec3, v: Vec3, t0: float, defended_radius: float) -> Tu
 
 
 def slot_point(point: Vec3, slot: int, n_slots: int, radius: float) -> Vec3:
-    """Spread n drones on a small horizontal circle around the engagement point."""
+    """Stack n drones vertically through the engagement point, evenly within +-radius.
+
+    Vertical, not a horizontal circle: the drones' lidar is planar (obstacles within ~1.75 m of
+    their altitude), so job-mates a few metres apart vertically do not repel each other off their
+    slots, and each is at most `radius` from the point (the threat) - fewer misses.
+    """
     if n_slots <= 1:
         return point
-    ang = 2.0 * math.pi * slot / n_slots
-    return (point[0] + radius * math.cos(ang), point[1] + radius * math.sin(ang), point[2])
+    dz = -radius + 2.0 * radius * slot / (n_slots - 1)
+    return (point[0], point[1], point[2] + dz)
 
 
 def aim_velocity(p: Vec3, speed: float, miss: float) -> Vec3:
