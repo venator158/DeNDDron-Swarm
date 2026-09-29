@@ -1,5 +1,4 @@
 import argparse
-import faulthandler
 import fcntl
 import json
 import os
@@ -113,8 +112,6 @@ def main():
     agent = DenddronAgent(agent_id=agent_id, sim_bus_locator=args.sim_bus)
 
     # docker stop sends SIGTERM: shut down cleanly instead of being killed after the grace period.
-    # `docker kill -s USR1 <agent container>` dumps every thread's stack to the log (diagnosing hangs).
-    faulthandler.register(signal.SIGUSR1, all_threads=True)
     stop = {"requested": False}
     signal.signal(signal.SIGTERM, lambda *_: stop.update(requested=True))
     try:

@@ -18,7 +18,6 @@ peer-to-peer radio (everything to and from the drones).
 """
 
 import argparse
-import faulthandler
 import json
 import logging
 import math
@@ -556,8 +555,6 @@ def main():
              f"{args.max_threats} threats" if args.max_threats else "off")
     # Running as PID 1 in the container: SIGTERM is ignored unless handled.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
-    # `docker kill -s USR1 ship` dumps every thread's stack to the log (diagnosing hangs).
-    faulthandler.register(signal.SIGUSR1, all_threads=True)
     try:
         ship.run()
     except KeyboardInterrupt:
