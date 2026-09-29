@@ -16,17 +16,21 @@ def arbitrate(pending: Dict[str, float], confirmed: Dict[str, int], need: int,
 
     pending: drone -> bid cost of awards awaiting a decision; confirmed: drone -> slot already
     held; need: drones still wanted; n_slots: slots around the engagement point (the level).
-    Lowest cost wins, ties broken by drone id (the auction's order).  Returns
-    (accepted drone -> slot, rejected drones).
+    Lowest cost wins, ties broken by drone id (the auction's order).  Free slots then go to the
+    accepted drones in drone-id order: the same convention drones use for their tentative slot
+    (rank among the winners by id), so confirmation does not move a drone that is already flying.
+    Assigning by bid order made drones swap slots across the formation after confirmation and
+    miss.  Returns (accepted drone -> slot, rejected drones).
     """
     taken = set(confirmed.values())
     free = [s for s in range(n_slots) if s not in taken]
-    accepted, rejected = {}, []
+    winners, rejected = [], []
     for agent, _ in sorted(pending.items(), key=lambda kv: (float(kv[1]), str(kv[0]))):
         if agent in confirmed:
             continue
-        if len(accepted) < need and free:
-            accepted[agent] = free.pop(0)
+        if len(winners) < min(need, len(free)):
+            winners.append(agent)
         else:
             rejected.append(agent)
+    accepted = dict(zip(sorted(winners), free))
     return accepted, rejected

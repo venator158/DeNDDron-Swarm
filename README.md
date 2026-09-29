@@ -203,7 +203,7 @@ The allocation is decentralized (`src/agent/auction.py`).
    - each threat gets its `required` fastest drones, ties broken by drone ID;
    - **all or nothing**: a threat that cannot get every drone it needs gets none, and those drones stay free.
 4. Each winner is only **tentatively** engaged. It publishes an award (with the order ID), starts flying toward its slot, and subscribes to the job topic `ship/jobs/{threat}`. The drones carry no seeker, so an engaged drone depends on the ship for the target's position; it is not fire-and-forget.
-5. **The ship confirms** (`src/common/jobs.py`). It collects the awards for a threat for 0.3 s, then confirms the best bids up to the number of drones still needed, and gives each a slot. It sends each one an ACK on `ship/ack/{drone}`; the rest get a NACK and become free again. The ship hears every drone, so this also settles conflicts between drones that could not hear each other.
+5. **The ship confirms** (`src/common/jobs.py`). It collects the awards for a threat for 0.3 s, then confirms the best bids up to the number of drones still needed, and gives each a slot. Slots go to the confirmed drones in drone-ID order, the same convention a tentative drone uses for itself, so confirmation doesn't move a drone that is already flying. Assigning slots by bid order moved 17 of 41 confirmed drones across the formation at 50 drones, causing misses of up to 24 m. It sends each one an ACK on `ship/ack/{drone}`; the rest get a NACK and become free again. The ship hears every drone, so this also settles conflicts between drones that could not hear each other.
    - The radio is best-effort, so each award and withdrawal is sent 3 times (now and on the next two heartbeat ticks, 0.5 s apart). A newer status for the same threat replaces the pending copies. The ship ACKs every copy it gets from a confirmed drone.
    - Until confirmed, a drone still yields to better awards from its peers. Once confirmed, only the ship can release it.
    - No ACK within 3 s (sim) means the drone abandons the job, withdraws and becomes free. A drone never detonates without confirmation.
@@ -289,12 +289,18 @@ Setup: `scaling_sweep.py`. N drones face N/2 threats (default type mix), detecte
 | 16 | 3 → 2.72× | 3.5 cores | 8.1% | 37% | 33 ms | 47 ms | 27 | 38 | 8/8 destroyed, 10 drones |
 | 25 | 2 → 1.9× | 3.4 cores | 7.3% | 33% | 42 ms | 54 ms | 44 | 60 | 12/12 destroyed, 16 drones |
 | 50 | 1 → 0.87× | 3.8 cores | 9.4% | 26% | 137 ms | 378 ms | 86 | 123 | 22/25 destroyed, 38 drones |
+| 50, now | 1 → 0.98× | 1.9 cores | 3.9% | 30% | 55 ms | 110 ms | 6 | 108 | 23/25 destroyed, 39 drones |
 
-All sizes: no re-announces, no conflicts, full agreement on assignments, decision latency ~1.4 s. The 16-drone run predates the sim-following protocol clock.
+All sizes: no re-announces, no conflicts, full agreement on assignments, decision latency ~1.4 s. The 16-drone run predates the sim-following protocol clock. "50, now" is after the heartbeat, idle-perception, expended-radio and slot fixes below.
 
 - **Radio traffic grew with the square of the swarm** while every drone heard every heartbeat: messages per drone doubled when the swarm doubled, about 4,300/s swarm-wide at 50 drones. Heartbeats now go to the ship only. At 50 drones that cut the messages each drone receives from 86 to 4.4 per second. It also cut host CPU from 3.8 to 3.1 cores, worst loop time from 137 to 86 ms and oldest sensor frame from 378 to 172 ms, and 23 of 25 threats were destroyed (was 22).
-- **CPU per drone is roughly constant** at 7–9% of a core per 1× of sim speed (the radio process included), rising slightly with the heartbeats received. 50 drones need about 4–5 cores at real time.
-- **At 50 drones this host is the limit.** Drones are starved of CPU: loop times reach 137 ms (target 20 ms) and sensor frames 378 ms. The 3 failed threats were each one drone of a multi-drone threat arriving 8.3, 12.9 and 10.8 m from its slot, just outside the 8 m kill radius; the protocol itself had no errors. A bigger host, or fewer processes per drone, is needed for clean 50-drone runs.
+- **Profile (py-spy, 50 drones).** An active drone used 4.7–5.7% of a core in its main process and ~1.5% in its radio process. An expended drone still used 1.6%, because its radio kept running. Of the main process's work, 75–80% was lidar perception: ray tracing every 10 Hz scan into the voxel map, whether the drone was idle or engaged. The control loop was 12–16%; the auction, heartbeats and telemetry barely registered.
+- **Two changes from the profile:**
+  - Idle drones skip lidar processing. Only the planner reads the map, and it runs only with a goal; voxels expire after 0.5 s, and the first scan after tasking rebuilds the map.
+  - Expended drones close their radio 1 s after detonating.
+
+  At 50 drones, CPU per drone fell from 6.9% to 3.9%. Host CPU fell from 3.1 to 1.9 cores, control-loop overruns from 3,064 to 40, and the simulator reached 0.98× real time.
+- **The two remaining misses are geometry, not load.** In every 50-drone run the same drones miss the same threats by the same distances: drone_40 on T7 by 8.3–8.7 m, drone_48 on T22 by 10.4–11 m. That was true before and after the CPU fixes, so it isn't CPU starvation, as first assumed. It's probably an optimistic ETA bid or crowding on the way; it still needs investigating.
 
 ### Tools (`tools/comms/`)
 

@@ -309,7 +309,11 @@ class DenddronAgent:
                     self._goal_hold_ticks = 0
                     self._prev_to_goal_vec = None
 
-            if lidar_data:
+            # Perception feeds only the planner, which runs only with a goal: a drone holding
+            # station sends zero velocity and never reads the map.  Voxels expire after 0.5 s, so
+            # there is nothing to keep fresh either; the first scan after tasking (<= 0.1 s)
+            # rebuilds the map.  Skipping it while idle was ~75% of an idle drone's CPU.
+            if lidar_data and self.current_goal is not None:
                 t0 = time.perf_counter()
                 self.voxel_map.cleanup_stale_data(max_age=0.5, current_time=self.current_time)
                 self._process_lidar(lidar_data, current_pose)
@@ -1039,6 +1043,9 @@ class DenddronAgent:
             self._drop_job_sub()
         self.destroyed = True
         self._send_heartbeat()   # final "expended" heartbeat
+        # An expended drone has nothing left to say: close the radio (it cost ~1.6% of a core and
+        # kept the drone in the radio mesh).  Delayed so the queued final heartbeat goes out first.
+        threading.Timer(1.0, self.radio.close).start()
         logger.info(f"[{self.agent_id}] DETONATED on {threat.threat_id} ({threat.type}) at t={now:.2f}, "
                     f"{miss:.1f} m from slot; drone expended")
 
