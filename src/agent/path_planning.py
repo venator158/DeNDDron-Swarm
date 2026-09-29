@@ -278,7 +278,6 @@ class ORCAStrategy(PathPlanningStrategy):
         self.time_horizon_obst = 1.5      # seconds — how far ahead to avoid obstacles
         self.agent_radius = 2.0           # conservative bounding sphere (meters)
         self.influence_radius = 8.0       # only consider voxels within this range
-        self.neighbor_dist = 5.0          # max distance for inter-agent ORCA (future)
 
         self.agent_vertical_radius = 0.5
         self.voxel_vertical_radius = 0.25

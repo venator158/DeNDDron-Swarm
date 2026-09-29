@@ -36,8 +36,6 @@ class DenddronAgent:
         self.step_count = 0
         self.sensor_frame_count = 0
         self.current_time = None  # Gazebo sim-time (seconds), NOT Unix wall-clock
-        self.sensor_wall_time = time.monotonic()
-        self.latest_visible_obstacles = []
         self.latest_voxel_summary = {
             "hits": 0,
             "placed": 0,
@@ -161,8 +159,6 @@ class DenddronAgent:
         self.planner_cfg = planner_cfg
         self.path_planner.configure(planner_cfg)
 
-        self.sensor_wall_time = time.monotonic()
-        self.sensor_sim_time = None
         self.max_control_dt = float(planner_cfg.get("max_control_dt", 0.2))
         self.sensor_timeout_s = float(planner_cfg.get("sensor_timeout_s", 0.5))
         self.control_rate_hz = 50.0
@@ -263,14 +259,8 @@ class DenddronAgent:
                 return
 
             with self.state_lock:
-                if sim_time is not None:
-                    self.current_time = float(sim_time)
-                    self.sensor_sim_time = float(sim_time)
-                else:
-                    self.current_time = None
-                    self.sensor_sim_time = None
+                self.current_time = float(sim_time) if sim_time is not None else None
                 self.current_pose = current_pose
-                self.sensor_wall_time = time.monotonic()
 
                 if timing_state == TimingState.TIME_RESET:
                     self.last_velocity = np.zeros(3)
@@ -336,7 +326,6 @@ class DenddronAgent:
                 for d, o in with_dist[:3]
             ]
 
-        self.latest_visible_obstacles = visible_obstacles
         self.latest_voxel_summary = {
             "hits": lidar_hits,
             "placed": placed_occupied,

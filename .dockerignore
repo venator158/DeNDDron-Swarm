@@ -1,5 +1,6 @@
 # Exclude build directories to prevent CMake cache conflicts
 build/
+build_test/
 Build/
 .build/
 cmake-build-debug/
@@ -10,8 +11,6 @@ cmake-build-release/
 .gitignore
 .gitattributes
 .gitmodules
-
-# Exclude external dependencies (60MB+ wasted, rebuilt in container)
 
 # Exclude IDE files
 .vscode/
@@ -36,6 +35,7 @@ CTestTestfile.cmake
 
 # Exclude documentation
 *.md
+*.pdf
 docs/
 
 # Exclude test files

@@ -50,11 +50,20 @@ private:
     std::optional<zenoh::Subscriber<void>> _sub_agent_join;
     std::optional<zenoh::Subscriber<void>> _sub_cmd_vel;
     std::optional<zenoh::Subscriber<void>> _sub_agent_despawn;
-    std::optional<zenoh::Publisher> _pub_metrics;
+    std::optional<zenoh::Subscriber<void>> _sub_threats;
+    std::optional<zenoh::Subscriber<void>> _sub_intercepts;
 
     // false = despawned (expended drones stay false so a rejoin cannot respawn them)
     std::map<std::string, bool> _spawned_agents;
     std::vector<std::string> _pending_despawns;   // guarded by _state_mtx, applied in step()
+
+    // Threat markers (visual only): threat_id -> drones needed / intercepts so far
+    struct ThreatMarker {
+        int level;
+        int intercepts;
+    };
+    std::map<std::string, ThreatMarker> _threat_markers;          // guarded by _state_mtx
+    std::vector<std::string> _pending_model_deletes;              // guarded by _state_mtx
     std::map<std::string, bool> _seen_cmd_vel;
 
     struct SpawnPoint {
@@ -69,6 +78,10 @@ private:
     void on_agent_join(const zenoh::Sample& sample);
     void on_cmd_vel(const zenoh::Sample& sample);
     void on_agent_despawn(const zenoh::Sample& sample);
+    void on_threats(const zenoh::Sample& sample);
+    void on_intercept(const zenoh::Sample& sample);
+    std::string generate_threat_sdf(const std::string& threat_id, const std::string& type,
+                                    int level, double x, double y, double z);
     void apply_pending_despawns();
     void load_spawn_config();
 

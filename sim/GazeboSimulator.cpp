@@ -74,18 +74,28 @@ void GazeboSimulator::init() {
         std::move(sub_opt_cmd)
     ));
 
+    auto sub_opt_threats = zenoh::Session::SubscriberOptions::create_default();
+    _sub_threats.emplace(_session->declare_subscriber(
+        zenoh::KeyExpr("swarm/threats"),
+        std::bind(&GazeboSimulator::on_threats, this, std::placeholders::_1),
+        [](){},
+        std::move(sub_opt_threats)
+    ));
+
+    auto sub_opt_intercepts = zenoh::Session::SubscriberOptions::create_default();
+    _sub_intercepts.emplace(_session->declare_subscriber(
+        zenoh::KeyExpr("swarm/intercepts"),
+        std::bind(&GazeboSimulator::on_intercept, this, std::placeholders::_1),
+        [](){},
+        std::move(sub_opt_intercepts)
+    ));
+
     auto sub_opt_despawn = zenoh::Session::SubscriberOptions::create_default();
     _sub_agent_despawn.emplace(_session->declare_subscriber(
         zenoh::KeyExpr("swarm/agents/despawn"),
         std::bind(&GazeboSimulator::on_agent_despawn, this, std::placeholders::_1),
         [](){},
         std::move(sub_opt_despawn)
-    ));
-
-    auto pub_opt = zenoh::Session::PublisherOptions::create_default();
-    _pub_metrics.emplace(_session->declare_publisher(
-        zenoh::KeyExpr("swarm/metrics"), 
-        std::move(pub_opt)
     ));
 
     load_spawn_config();
@@ -183,9 +193,11 @@ void GazeboSimulator::on_agent_despawn(const zenoh::Sample& sample) {
 
 void GazeboSimulator::apply_pending_despawns() {
     std::vector<std::string> ids;
+    std::vector<std::string> models;
     {
         std::lock_guard<std::mutex> lock(_state_mtx);
         ids.swap(_pending_despawns);
+        models.swap(_pending_model_deletes);
         for (const auto& id : ids) {
             _spawned_agents[id] = false;
             _drone_states.erase(id);
@@ -198,6 +210,83 @@ void GazeboSimulator::apply_pending_despawns() {
         }
         std::cout << "[GazeboSimulator] Despawned drone: " << id << std::endl;
     }
+    for (const auto& name : models) {
+        if (_gznode) {
+            gazebo::transport::requestNoReply(_gznode, "entity_delete", name);
+        }
+    }
+}
+
+void GazeboSimulator::on_threats(const zenoh::Sample& sample) {
+    try {
+        auto msg = json::parse(sample.get_payload().as_string());
+        for (const auto& t : msg["threats"]) {
+            const std::string threat_id = t["threat_id"];
+            const std::string type = t.value("type", "unknown");
+            const int level = t.value("level", 1);
+            const auto& loc = t["location"];
+            {
+                std::lock_guard<std::mutex> lock(_state_mtx);
+                // Re-announcements repeat a threat; draw it once.
+                if (!_threat_markers.emplace(threat_id, ThreatMarker{level, 0}).second) continue;
+            }
+            if (_factory_pub) {
+                gazebo::msgs::Factory factory_msg;
+                factory_msg.set_sdf(generate_threat_sdf(threat_id, type, level,
+                    loc.value("x", 0.0), loc.value("y", 0.0), loc.value("z", 10.0)));
+                _factory_pub->Publish(factory_msg);
+            }
+            std::cout << "[GazeboSimulator] Threat marker: " << threat_id << " (" << type
+                      << ", level " << level << ")" << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] Error processing threat wave: " << e.what() << std::endl;
+    }
+}
+
+void GazeboSimulator::on_intercept(const zenoh::Sample& sample) {
+    try {
+        auto msg = json::parse(sample.get_payload().as_string());
+        const std::string threat_id = msg["threat_id"];
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        auto it = _threat_markers.find(threat_id);
+        if (it == _threat_markers.end()) return;
+        if (++it->second.intercepts == it->second.level) {
+            _pending_model_deletes.push_back("threat_" + threat_id);
+            std::cout << "[GazeboSimulator] Threat neutralized: " << threat_id << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] Error processing intercept: " << e.what() << std::endl;
+    }
+}
+
+std::string GazeboSimulator::generate_threat_sdf(const std::string& threat_id, const std::string& type,
+                                                 int level, double x, double y, double z) {
+    // Red, larger for higher threat levels; tint by type so types are distinguishable.
+    double r = 1.0, g = 0.1, b = 0.1;
+    if (type == "uav") { g = 0.8; }            // yellow
+    else if (type == "missile") { g = 0.45; }  // orange
+    const double radius = 0.6 + 0.4 * level;
+
+    std::stringstream sdf;
+    sdf << "<?xml version='1.0'?>"
+        << "<sdf version='1.6'>"
+        << "  <model name='threat_" << threat_id << "'>"
+        << "    <static>true</static>"
+        << "    <pose>" << x << " " << y << " " << z << " 0 0 0</pose>"
+        << "    <link name='link'>"
+        << "      <visual name='visual'>"
+        << "        <geometry><sphere><radius>" << radius << "</radius></sphere></geometry>"
+        << "        <material>"
+        << "          <ambient>" << r << " " << g << " " << b << " 1.0</ambient>"
+        << "          <diffuse>" << r << " " << g << " " << b << " 1.0</diffuse>"
+        << "          <emissive>" << r * 0.6 << " " << g * 0.6 << " " << b * 0.6 << " 1.0</emissive>"
+        << "        </material>"
+        << "      </visual>"
+        << "    </link>"
+        << "  </model>"
+        << "</sdf>";
+    return sdf.str();
 }
 
 void GazeboSimulator::on_cmd_vel(const zenoh::Sample& sample) {

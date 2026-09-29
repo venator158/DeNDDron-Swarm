@@ -9,8 +9,10 @@ Protocol (one round per wave of threats):
      ``swarm/bids`` (one message per drone).
   3. ``bid_window_s`` after an agent received the wave (in its own clock) it
      runs ``assign()``: threats in priority order, each taking its ``required``
-     cheapest still-unassigned bidders.  The ordering and the (cost, agent_id)
-     tie-break make every agent that saw the same bids compute the same result.
+     cheapest still-unassigned bidders.  A threat that cannot get all of them
+     is declined outright (no drone engages it) and those drones stay free for
+     lower-priority threats.  The ordering and the (cost, agent_id) tie-break
+     make every agent that saw the same bids compute the same result.
   4. Each winner publishes an award on ``swarm/awards``.  If views diverged and
      a threat collects more holders than its level, a holder yields (and
      publishes a withdrawal) once it sees ``level`` holders with better bids.
@@ -28,11 +30,11 @@ def bid_key(cost: float, agent_id: str) -> Tuple[float, str]:
 
 
 def assign(threats: List[Threat], bids: Dict[str, Dict[str, float]]) -> Dict[str, List[str]]:
-    """Deterministic priority-greedy assignment.
+    """Deterministic, all-or-nothing, priority-greedy assignment.
 
     ``bids`` maps agent_id -> {threat_id: cost}.  Each agent is assigned to at
-    most one threat.  Returns threat_id -> winning agent_ids (may be shorter
-    than ``required`` if too few drones bid).
+    most one threat.  Returns threat_id -> winning agent_ids: exactly
+    ``required`` of them, or an empty list if too few free drones bid.
     """
     taken = set()
     result = {}
@@ -42,6 +44,9 @@ def assign(threats: List[Threat], bids: Dict[str, Dict[str, float]]) -> Dict[str
             for agent, costs in bids.items()
             if agent not in taken and threat.threat_id in costs
         )
+        if len(candidates) < threat.required:
+            result[threat.threat_id] = []   # cannot be fully covered: decline it
+            continue
         winners = [agent for _, agent in candidates[:threat.required]]
         taken.update(winners)
         result[threat.threat_id] = winners

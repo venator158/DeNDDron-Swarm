@@ -48,11 +48,20 @@ class TestAssign(unittest.TestCase):
         self.assertEqual(len(flat), len(set(flat)))
         self.assertEqual(sum(len(ws) for ws in out.values()), 6)
 
-    def test_short_of_drones_fills_highest_priority_first(self):
+    def test_threat_that_cannot_be_fully_covered_is_declined(self):
+        bids = {"d1": {"M": 1.0}, "d2": {"M": 2.0}}
+        self.assertEqual(assign([T("M", 3)], bids), {"M": []})
+
+    def test_declined_threat_leaves_drones_for_lower_priority(self):
+        # Level-3 threat cannot be covered by 2 drones; the level-1 threat still gets one.
         bids = {"d1": {"A": 1.0, "B": 1.0}, "d2": {"A": 2.0, "B": 2.0}}
         out = assign([T("A", 1), T("B", 3)], bids)
-        self.assertEqual(out["B"], ["d1", "d2"])
-        self.assertEqual(out["A"], [])
+        self.assertEqual(out["B"], [])
+        self.assertEqual(out["A"], ["d1"])
+
+    def test_exactly_enough_drones_is_accepted(self):
+        bids = {"d1": {"M": 1.0}, "d2": {"M": 2.0}}
+        self.assertEqual(assign([T("M", 2)], bids), {"M": ["d1", "d2"]})
 
     def test_tie_broken_by_agent_id(self):
         bids = {"d3": {"A": 5.0}, "d1": {"A": 5.0}, "d2": {"A": 5.0}}
@@ -121,10 +130,11 @@ class TestAuctionManager(unittest.TestCase):
         self.assertIsNone(m.held)
 
     def test_overfilled_threat_worst_holder_yields(self):
-        # d3 missed the other bids and believes it won a level-2 threat.
+        # d3 missed d1's and d2's better bids, so it believes {d3, d4} cover the level-2 threat.
         m3 = AuctionManager("d3")
         m3.on_wave("W1", [T("M", 2)], now=0.0)
         m3.on_bid("W1", "d3", {"M": 9.0})
+        m3.on_bid("W1", "d4", {"M": 10.0})
         self.assertEqual(m3.close_due(now=1.0)[0].my_threat.threat_id, "M")
         self.assertFalse(m3.on_award("M", "d1", 1.0))   # one better holder: still needed
         self.assertTrue(m3.on_award("M", "d2", 2.0))    # level reached by better bids: yield
@@ -133,7 +143,8 @@ class TestAuctionManager(unittest.TestCase):
         m = AuctionManager("d1")
         m.on_wave("W1", [T("M", 2)], now=0.0)
         m.on_bid("W1", "d1", {"M": 1.0})
-        m.close_due(now=1.0)
+        m.on_bid("W1", "d2", {"M": 5.0})
+        self.assertEqual(m.close_due(now=1.0)[0].my_threat.threat_id, "M")
         self.assertFalse(m.on_award("M", "d2", 5.0))
         self.assertFalse(m.on_award("M", "d3", 6.0))
 
@@ -141,7 +152,8 @@ class TestAuctionManager(unittest.TestCase):
         m = AuctionManager("d3")
         m.on_wave("W1", [T("M", 2)], now=0.0)
         m.on_bid("W1", "d3", {"M": 9.0})
-        m.close_due(now=1.0)
+        m.on_bid("W1", "d4", {"M": 10.0})
+        self.assertEqual(m.close_due(now=1.0)[0].my_threat.threat_id, "M")
         m.on_award("M", "d1", 1.0)
         m.on_withdraw("M", "d1")
         self.assertFalse(m.on_award("M", "d2", 2.0))

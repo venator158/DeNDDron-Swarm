@@ -74,7 +74,6 @@ services:
       ZENOH_ROUTER_IP: tcp/zenoh_router:7447
       SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
       AGENT_ID_REGISTRY: /app/config/agent_registry.json
-      LOOP_RATE_HZ: "50"
     command: >
       sh -c 'python -u main.py --zenoh-router "$${ZENOH_ROUTER_IP}"'
     networks:
@@ -115,6 +114,7 @@ services:
       THREATS_PER_WAVE: ${THREATS_PER_WAVE:-4}
       THREAT_SEED: ${THREAT_SEED:-42}
       THREAT_MIX: ${THREAT_MIX:-}
+      THREAT_INITIAL_DELAY_S: ${THREAT_INITIAL_DELAY_S:-25}
     command: >
       sh -c 'python -u threat_dispatcher.py --zenoh-router "$${ZENOH_ROUTER_IP}"'
     networks:

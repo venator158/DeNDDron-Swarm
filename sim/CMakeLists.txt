@@ -6,10 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(gazebo REQUIRED)
 
-# Nlohmann JSON - header only in extern/json/include if not found
-find_path(NLOHMANN_JSON_INCLUDE_DIR nlohmann/json.hpp
-    PATHS ${CMAKE_SOURCE_DIR}/extern/json/include
-)
+# nlohmann/json is header-only (nlohmann-json3-dev in the gazebo image)
+find_path(NLOHMANN_JSON_INCLUDE_DIR nlohmann/json.hpp)
 
 include_directories(
     ${GAZEBO_INCLUDE_DIRS}
