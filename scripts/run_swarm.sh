@@ -13,6 +13,7 @@ BUILD_FLAG=""
 MAX_THREATS=0
 THREAT_INTERVAL_S=30
 THREAT_FIRST_S=20
+INSTANCE="${SWARM_INSTANCE:-0}"
 
 # Parse positional argument for AGENT_COUNT if provided as the very first argument (legacy support)
 if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
@@ -51,6 +52,12 @@ while [[ $# -gt 0 ]]; do
       export THREAT_MANEUVER_P="$2"
       shift 2
       ;;
+    --instance)
+      # Run as instance K (0 = default): own project, names, ports, subnets and config,
+      # so several swarms can run side by side (scripts/swarm_instance.py).
+      INSTANCE="$2"
+      shift 2
+      ;;
     --rtf)
       # Real-time factor: run the simulation (and the swarm's protocol clocks) this many times faster.
       export SIM_RTF="$2"
@@ -84,18 +91,23 @@ GEN_ARGS=(--agents "$AGENT_COUNT" --seed "$SEED" --algorithm "$ALGORITHM")
 if [[ "$MAX_THREATS" -gt 0 ]]; then
   GEN_ARGS+=(--no-goals)
 fi
+eval "$(python3 scripts/swarm_instance.py "$INSTANCE")"
+mkdir -p "$SWARM_CONFIG_DIR"
+GEN_ARGS+=(--output "$SWARM_CONFIG_DIR/swarm_runtime.json" --env-output "$ENV_FILE")
 python3 scripts/generate_swarm_config.py "${GEN_ARGS[@]}"
+# Instance settings go into the env file too, so `docker compose --env-file <it> down` targets this instance.
+python3 scripts/swarm_instance.py "$INSTANCE" | grep -v '^ENV_FILE=' >> "$ENV_FILE"
 
 # Reset per-container ID assignment so replicas get clean drone_1..drone_N IDs.
-rm -f config/agent_registry.json config/agent_registry.json.lock
+rm -f "$SWARM_CONFIG_DIR/agent_registry.json" "$SWARM_CONFIG_DIR/agent_registry.json.lock"
 
-if [[ ! -f .swarm.env ]]; then
-  echo "Failed to generate .swarm.env" >&2
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "Failed to generate $ENV_FILE" >&2
   exit 1
 fi
 
 # shellcheck disable=SC1091
-source .swarm.env
+source "$ENV_FILE"
 
 echo "Starting swarm with AGENT_COUNT=${AGENT_COUNT}, SEED=${SEED}, ALGORITHM=${ALGORITHM}"
 
@@ -111,9 +123,12 @@ fi
 if [[ -n "${SIM_RTF:-}" && "${SIM_RTF}" != "1" ]]; then
   echo "Simulation runs at ${SIM_RTF}x real time"
 fi
-echo "Operator dashboard: http://localhost:8080"
+if [[ "$INSTANCE" != "0" ]]; then
+  echo "Instance ${INSTANCE}: project ${COMPOSE_PROJECT_NAME}, env file ${ENV_FILE}"
+fi
+echo "Operator dashboard: http://localhost:${DASHBOARD_PORT}"
 
-compose_cmd=(docker compose --env-file .swarm.env up --scale agent="${AGENT_COUNT}")
+compose_cmd=(docker compose --env-file "$ENV_FILE" up --scale agent="${AGENT_COUNT}")
 compose_cmd+=("${COMPOSE_ARGS[@]}")
 
 "${compose_cmd[@]}"

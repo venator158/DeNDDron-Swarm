@@ -6,11 +6,12 @@ most urgent (smallest TCPA) first, after a human-like reaction delay.
 All three are wall seconds; the sweep divides them by the sim's real-time factor.
 """
 import json
+import os
 import sys
 import time
 import urllib.request
 
-URL = "http://localhost:8080"
+URL = os.environ.get("DASHBOARD_URL", "http://localhost:8080")   # set per swarm instance by the sweeps
 REACTION_S = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
 DURATION_S = float(sys.argv[2]) if len(sys.argv) > 2 else 400.0
 POLL_S = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0

@@ -82,6 +82,30 @@ Measured at K = 3 with 8 drones:
 - A sweep run takes 87 s instead of 201 s.
 - Results match real-time runs: decision latency 1030 vs 1015 ms with no impairment, and 1440 vs 1445 ms at 200 ms delay.
 
+### Several swarms at once
+
+`--instance K` runs an independent swarm next to others on the same host, for example sweep cells in parallel on a cluster node. `scripts/swarm_instance.py` maps K to the instance's settings; instance 0 is the default and keeps the original names, ports and subnets.
+
+| | Instance 0 | Instance K ≥ 1 |
+|---|---|---|
+| Compose project | `denddron-swarm` | `denddron-swarm-K` |
+| Containers | `ship`, `gazebo_simulator`, ... | `iK-ship`, `iK-gazebo_simulator`, ... |
+| Dashboard / Gazebo ports | 8080 / 11345 | 8080+K / 11345+K |
+| Sim / radio subnets | 172.20.0.0/16, 172.21.0.0/16 | 10.(210+K).0.0/17, 10.(210+K).128.0/17 |
+| Config, env file | `config/`, `.swarm.env` | `config/instances/K/`, `.swarm.K.env` |
+
+- **Images are shared**, so an instance never rebuilds. K goes up to 30.
+- **Subnet clashes:** if the host already routes the 10.21x ranges, set `SWARM_SUBNET_BASE`, or set `SIM_SUBNET`, `RADIO_SUBNET` and `SIM_BUS_IP` directly.
+- **Stopping an instance:** `docker compose -p denddron-swarm-K down`.
+
+```bash
+bash scripts/run_swarm.sh 8 --threats 4 --instance 2            # dashboard on :8082
+python3 tools/comms/degradation_sweep.py --parallel 3 --rtf 3    # 3 runs at a time, instances 1-3
+python3 tools/comms/scaling_sweep.py --sizes 8:3 16:3 --parallel 2
+```
+
+The sweeps, `degrade_radio.sh` (`SWARM_INSTANCE=K`) and `operator_bot.py` (`DASHBOARD_URL`) all work per instance. The ARP table is shared by every instance on a host, so the limit must cover the sum of all meshes; the sweeps warn when it does not. Plan CPU at about 8% of a core per drone per 1× of sim speed, plus about 0.3 core for each instance's Gazebo.
+
 ## Operator workflow
 
 The dashboard is at `http://localhost:8080`. It is served by the ship and updates 4 times a second.

@@ -33,7 +33,22 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-API = "http://localhost:8080"
+sys.path.insert(0, str(REPO / "scripts"))
+from swarm_instance import instance as instance_cfg   # noqa: E402
+
+
+class Inst:
+    """One swarm instance (scripts/swarm_instance.py): where its dashboard, config and containers are."""
+
+    def __init__(self, k=0):
+        self.k, self.cfg = k, instance_cfg(k)
+        self.api = f"http://localhost:{self.cfg['DASHBOARD_PORT']}"
+        self.project, self.prefix = self.cfg["COMPOSE_PROJECT_NAME"], self.cfg["NAME_PREFIX"]
+        self.config_dir = (REPO / self.cfg["SWARM_CONFIG_DIR"]).resolve()
+        self.tag = f"[i{k}] " if k else ""
+
+
+DEFAULT_INST = Inst(0)
 
 DEFAULT_CONDITIONS = {
     "baseline": "",
@@ -71,12 +86,12 @@ def scale_netem(netem, rtf):
     return " ".join(out)
 
 
-def log(msg):
-    print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+def log(msg, inst=None):
+    print(f"{time.strftime('%H:%M:%S')} {inst.tag if inst else ''}{msg}", flush=True)
 
 
-def get(path, timeout=2):
-    return json.load(urllib.request.urlopen(API + path, timeout=timeout))
+def get(path, timeout=2, inst=DEFAULT_INST):
+    return json.load(urllib.request.urlopen(inst.api + path, timeout=timeout))
 
 
 def wait_for(cond, timeout, step=2.0):
@@ -98,9 +113,9 @@ class Sampler(threading.Thread):
     matched to containers through config/agent_registry.json (container hostname -> drone id).
     """
 
-    def __init__(self, period_s=10.0):
+    def __init__(self, period_s=10.0, inst=DEFAULT_INST):
         super().__init__(daemon=True)
-        self.period_s, self.samples, self._halt = period_s, [], threading.Event()
+        self.period_s, self.samples, self._halt, self.inst = period_s, [], threading.Event(), inst
 
     def stop(self):
         self._halt.set()
@@ -111,16 +126,19 @@ class Sampler(threading.Thread):
             try:
                 self.samples.append(self._sample())
             except Exception as e:
-                log(f"    sampler: {e}")
+                log(f"    sampler: {e}", self.inst)
 
-    @staticmethod
-    def _sample():
+    def _sample(self):
+        inst = self.inst
         wall = time.time()
-        state = get("/api/state", timeout=5)
-        out = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{.ID}}\t{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"],
+        state = get("/api/state", timeout=5, inst=inst)
+        names = subprocess.run(["docker", "ps", "--filter", f"label=com.docker.compose.project={inst.project}",
+                                "--format", "{{.Names}}"], capture_output=True, text=True, timeout=30).stdout.split()
+        out = subprocess.run(["docker", "stats", "--no-stream", "--format",
+                              "{{.ID}}\t{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"] + names,
                              capture_output=True, text=True, timeout=60).stdout
         try:
-            registry = json.loads((REPO / "config" / "agent_registry.json").read_text())["assigned"]
+            registry = json.loads((inst.config_dir / "agent_registry.json").read_text())["assigned"]
         except Exception:
             registry = {}
         live = {d["id"] for d in state["drones"] if d["state"] not in ("expended", None)}
@@ -137,7 +155,7 @@ class Sampler(threading.Thread):
             "host_cpu": sum(c for _, c, _ in containers.values()),
             "drone_cpu": [c for d, c, _ in agents if d in live],
             "drone_mem": [m for _, _, m in agents],
-            **{k: containers.get(k, (None, None))[1] for k in ("gazebo_simulator", "sim_bus", "ship")},
+            **{k: containers.get(inst.prefix + k, (None, None))[1] for k in ("gazebo_simulator", "sim_bus", "ship")},
             "loop_p99": [t.get("loop_p99_ms") for t in tel if t.get("loop_p99_ms") is not None],
             "overruns": sum(t.get("overruns") or 0 for t in tel),
             "sensor_age": [t.get("sensor_age_max_ms") for t in tel if t.get("sensor_age_max_ms") is not None],
@@ -169,12 +187,12 @@ class Sampler(threading.Thread):
         }
 
 
-def wait_for_roster(n, timeout, stall_s=60.0):
+def wait_for_roster(n, timeout, stall_s=60.0, inst=DEFAULT_INST):
     """Wait for n drones in the ship's roster; give up early if it stops growing for stall_s."""
     end, best, best_t = time.time() + timeout, -1, time.time()
     while time.time() < end:
         try:
-            count = get("/api/state")["roster"]["count"]
+            count = get("/api/state", inst=inst)["roster"]["count"]
         except Exception:
             count = -1
         if count >= n:
@@ -188,20 +206,58 @@ def wait_for_roster(n, timeout, stall_s=60.0):
     raise RuntimeError(f"swarm did not come up: roster {max(best, 0)}/{n} after {timeout:.0f}s")
 
 
-def compose_down():
-    subprocess.run(["docker", "compose", "--env-file", ".swarm.env", "down"], cwd=REPO,
+def compose_down(inst=DEFAULT_INST):
+    subprocess.run(["docker", "compose", "-p", inst.project, "down", "--remove-orphans"], cwd=REPO,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None):
+def arp_check(drones, parallel):
+    """Warn if the host ARP table cannot hold every radio mesh at once (it is shared by all containers)."""
+    try:
+        limit = int(Path("/proc/sys/net/ipv4/neigh/default/gc_thresh3").read_text())
+    except OSError:
+        return
+    need = parallel * ((drones + 1) * drones + 2 * (drones + 4))
+    if need > limit:
+        log(f"WARNING: {parallel} x {drones} drones need ~{need} ARP entries; the host allows {limit}. "
+            "Raise net.ipv4.neigh.default.gc_thresh3 (see README) or runs will stall.")
+
+
+def run_jobs(jobs, parallel, base_instance=0):
+    """Run jobs (callables taking an Inst) on `parallel` swarm instances at once; results in job order.
+
+    One job runs at a time per instance.  With parallel > 1, instances base..base+parallel-1 are
+    used (base defaults to 1, leaving the default instance 0 free).
+    """
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+    if parallel <= 1:
+        inst = Inst(base_instance)
+        return [job(inst) for job in jobs]
+    free = queue.Queue()
+    for k in range(base_instance or 1, (base_instance or 1) + parallel):
+        free.put(Inst(k))
+
+    def on_instance(job):
+        inst = free.get()
+        try:
+            return job(inst)
+        finally:
+            free.put(inst)
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        return list(pool.map(on_instance, jobs))
+
+
+def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, inst=DEFAULT_INST):
     rundir = outdir / (name or f"{profile}_{cond}_r{rep}")
     rundir.mkdir(parents=True, exist_ok=True)
     rtf = args.rtf
-    env = dict(os.environ, RADIO_QOS=profile, SIM_RTF=f"{rtf:g}", **(extra_env or {}))
+    env = dict(os.environ, RADIO_QOS=profile, SIM_RTF=f"{rtf:g}", SWARM_INSTANCE=str(inst.k),
+               DASHBOARD_URL=inst.api, **(extra_env or {}))
     applied = scale_netem(netem, rtf) if netem else ""
     t0 = time.time()
     log(f"=== {profile} / {cond} #{rep} ({netem or 'no impairment'}"
-        + (f"; applied as '{applied}' at {rtf:g}x" if netem and rtf != 1 else "") + ")")
+        + (f"; applied as '{applied}' at {rtf:g}x" if netem and rtf != 1 else "") + ")", inst)
     swarm_log = open(rundir / "swarm.log", "w")
     swarm = subprocess.Popen(
         ["bash", "scripts/run_swarm.sh", str(args.drones), "--threats", str(args.threats),
@@ -209,48 +265,49 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None):
         cwd=REPO, env=env, stdout=swarm_log, stderr=subprocess.STDOUT)
     bot = None
     summary = {}
-    sampler = Sampler(getattr(args, "sample_s", 10.0)) if getattr(args, "sample", False) else None
+    sampler = Sampler(getattr(args, "sample_s", 10.0), inst) if getattr(args, "sample", False) else None
     startup_s = None
     try:
-        wait_for_roster(args.drones, getattr(args, "startup_timeout", 300))
+        wait_for_roster(args.drones, getattr(args, "startup_timeout", 300), inst=inst)
         startup_s = round(time.time() - t0)
         if sampler:
             sampler.start()
         if applied:
-            subprocess.run([str(HERE / "degrade_radio.sh"), "apply", applied], check=True)
+            subprocess.run([str(HERE / "degrade_radio.sh"), "apply", applied], check=True, env=env,
+                           stdout=subprocess.DEVNULL)
         bot = subprocess.Popen([sys.executable, str(HERE / "operator_bot.py"), f"{args.reaction / rtf:g}",
-                                f"{args.timeout / rtf:g}", f"{1.0 / rtf:g}"],
+                                f"{args.timeout / rtf:g}", f"{1.0 / rtf:g}"], env=env,
                                stdout=open(rundir / "operator.log", "w"), stderr=subprocess.STDOUT)
 
         def resolved():
-            s = get("/api/summary")
+            s = get("/api/summary", inst=inst)
             return s["threats_detected"] >= args.threats and s["still_active"] == 0
         if not wait_for(resolved, args.timeout / rtf, step=min(3.0, 3.0 / rtf + 0.5)):
-            log("timeout: not every threat resolved")
+            log("timeout: not every threat resolved", inst)
         if sampler:
             sampler.stop()
             (rundir / "samples.json").write_text(json.dumps(sampler.samples))
-        summary = get("/api/summary", timeout=5)
+        summary = get("/api/summary", timeout=5, inst=inst)
         (rundir / "summary.json").write_text(json.dumps(summary, indent=2))
-        (rundir / "state.json").write_text(json.dumps(get("/api/state", timeout=5), indent=2))
+        (rundir / "state.json").write_text(json.dumps(get("/api/state", timeout=5, inst=inst), indent=2))
     finally:
         if sampler and sampler.is_alive():
             sampler.stop()
         if bot:
             bot.terminate()
         if applied:
-            subprocess.run([str(HERE / "degrade_radio.sh"), "clear"], stdout=subprocess.DEVNULL)
-        compose_down()
+            subprocess.run([str(HERE / "degrade_radio.sh"), "clear"], stdout=subprocess.DEVNULL, env=env)
+        compose_down(inst)
         swarm.wait(timeout=60)
         swarm_log.close()
     row = {k: summary.get(k) for k in COLUMNS if k in summary}
     if sampler:
         row.update(sampler.summary(), startup_s=startup_s)
     row.update(profile=profile, condition=cond, netem=netem or "-", rep=rep, rtf=rtf, drones=args.drones,
-               threats=args.threats,
+               threats=args.threats, instance=inst.k,
                hb_rx_per_s_at_ship=summary.get("radio_rx_at_ship", {}).get("swarm/heartbeat", {}).get("msgs_per_s"),
                wall_s=round(time.time() - t0))
-    log("    " + " ".join(f"{k}={row.get(k)}" for k in COLUMNS[7:] + (RESOURCE_COLUMNS if sampler else [])))
+    log("    " + " ".join(f"{k}={row.get(k)}" for k in COLUMNS[7:] + (RESOURCE_COLUMNS if sampler else [])), inst)
     return row
 
 
@@ -289,6 +346,9 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--reaction", type=float, default=3.0, help="operator reaction time, sim seconds")
     ap.add_argument("--timeout", type=float, default=360, help="sim seconds per run after the swarm is up")
+    ap.add_argument("--instance", type=int, default=0, help="swarm instance to use (0 = default)")
+    ap.add_argument("--parallel", type=int, default=1,
+                    help="runs at once, each on its own swarm instance (instances 1..P)")
     ap.add_argument("--out", default=str(REPO / "results" / time.strftime("sweep_%Y%m%d_%H%M%S")))
     args = ap.parse_args()
 
@@ -296,21 +356,30 @@ def main():
         (c.split("=", 1) + [""])[:2] for c in args.conditions)
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
-    compose_down()
-    rows = []
-    for rep in range(1, args.repeats + 1):     # repeats outermost: a partial sweep still covers every cell
-        for cond, netem in conditions.items():
-            for profile in args.profiles:
-                try:
-                    rows.append(run_one(args, profile, cond, netem, rep, outdir))
-                except Exception as e:
-                    log(f"run failed: {e}")
-                    rows.append({"profile": profile, "condition": cond, "netem": netem or "-", "rep": rep,
-                                 "rtf": args.rtf})
+    arp_check(args.drones, args.parallel)
+    done, lock = [], threading.Lock()
+
+    def job(profile, cond, netem, rep):
+        def run(inst):
+            compose_down(inst)
+            try:
+                row = run_one(args, profile, cond, netem, rep, outdir, inst=inst)
+            except Exception as e:
+                log(f"run failed: {e}", inst)
+                row = {"profile": profile, "condition": cond, "netem": netem or "-", "rep": rep, "rtf": args.rtf}
+            with lock:
+                done.append(row)
                 with open(outdir / "results.csv", "w", newline="") as f:
-                    w = csv.DictWriter(f, fieldnames=COLUMNS)
+                    w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
                     w.writeheader()
-                    w.writerows(rows)
+                    w.writerows(done)
+            return row
+        return run
+
+    # repeats outermost: a partial sweep still covers every cell
+    jobs = [job(profile, cond, netem, rep) for rep in range(1, args.repeats + 1)
+            for cond, netem in conditions.items() for profile in args.profiles]
+    rows = run_jobs(jobs, args.parallel, args.instance)
     md = ["| " + " | ".join(COLUMNS) + " |", "|" + "---|" * len(COLUMNS)]
     md += ["| " + " | ".join(str(r.get(k, "")) for k in COLUMNS) + " |" for r in rows]
     md += ["", "Mean ± sd per cell:", ""] + aggregate(rows)

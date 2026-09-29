@@ -16,12 +16,13 @@ summary.json,state.json,samples.json}
 import argparse
 import copy
 import csv
+import threading
 import time
 from pathlib import Path
 
-from degradation_sweep import COLUMNS, REPO, RESOURCE_COLUMNS, compose_down, log, run_one
+from degradation_sweep import COLUMNS, REPO, RESOURCE_COLUMNS, arp_check, compose_down, log, run_jobs, run_one
 
-SCALE_COLUMNS = ["drones", "threats", "rtf", "condition", "profile", "rep"] + [
+SCALE_COLUMNS = ["drones", "threats", "rtf", "condition", "profile", "rep", "instance"] + [
     c for c in COLUMNS + RESOURCE_COLUMNS if c not in ("drones", "threats", "rtf", "condition", "profile", "rep")]
 
 
@@ -42,35 +43,47 @@ def main():
     ap.add_argument("--startup-timeout", type=float, default=180,
                     help="wall seconds for the full roster (a roster that stops growing for 60 s aborts sooner)")
     ap.add_argument("--sample-s", type=float, default=10.0, help="wall seconds between resource samples")
+    ap.add_argument("--instance", type=int, default=0, help="swarm instance to use (0 = default)")
+    ap.add_argument("--parallel", type=int, default=1,
+                    help="runs at once, each on its own swarm instance (instances 1..P); mind host CPU")
     ap.add_argument("--out", default=str(REPO / "results" / time.strftime("scaling_%Y%m%d_%H%M%S")))
     args = ap.parse_args()
 
     conditions = dict((c.split("=", 1) + [""])[:2] for c in args.conditions)
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
-    compose_down()
-    rows = []
-    for rep in range(1, args.repeats + 1):
-        for size in args.sizes:
-            n, rtf = size.split(":")
-            run = copy.copy(args)
-            run.drones, run.rtf = int(n), float(rtf)
-            run.threats = max(1, round(run.drones * args.threats_per_drone))
-            run.interval = args.load_s / run.drones
-            run.sample = True
-            for cond, netem in conditions.items():
-                name = f"n{run.drones}_{cond}_r{rep}"
-                try:
-                    row = run_one(run, args.profile, cond, netem, rep, outdir, name=name)
-                except Exception as e:
-                    log(f"run failed: {e}")
-                    row = {"profile": args.profile, "condition": cond, "rep": rep, "rtf": run.rtf,
-                           "drones": run.drones, "threats": run.threats}
-                rows.append(row)
+    arp_check(max(int(size.split(":")[0]) for size in args.sizes), args.parallel)
+    done, lock = [], threading.Lock()
+
+    def job(size, cond, netem, rep):
+        n, rtf = size.split(":")
+        run = copy.copy(args)
+        run.drones, run.rtf = int(n), float(rtf)
+        run.threats = max(1, round(run.drones * args.threats_per_drone))
+        run.interval = args.load_s / run.drones
+        run.sample = True
+
+        def go(inst):
+            compose_down(inst)
+            name = f"n{run.drones}_{cond}_r{rep}"
+            try:
+                row = run_one(run, args.profile, cond, netem, rep, outdir, name=name, inst=inst)
+            except Exception as e:
+                log(f"run failed: {e}", inst)
+                row = {"profile": args.profile, "condition": cond, "rep": rep, "rtf": run.rtf,
+                       "drones": run.drones, "threats": run.threats, "instance": inst.k}
+            with lock:
+                done.append(row)
                 with open(outdir / "results.csv", "w", newline="") as f:
                     w = csv.DictWriter(f, fieldnames=SCALE_COLUMNS, extrasaction="ignore")
                     w.writeheader()
-                    w.writerows(rows)
+                    w.writerows(done)
+            return row
+        return go
+
+    jobs = [job(size, cond, netem, rep) for rep in range(1, args.repeats + 1)
+            for size in args.sizes for cond, netem in conditions.items()]
+    rows = run_jobs(jobs, args.parallel, args.instance)
     md = ["| " + " | ".join(SCALE_COLUMNS) + " |", "|" + "---|" * len(SCALE_COLUMNS)]
     md += ["| " + " | ".join(str(r.get(k, "")) for k in SCALE_COLUMNS) + " |" for r in rows]
     (outdir / "results.md").write_text("\n".join(md) + "\n")

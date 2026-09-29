@@ -10,16 +10,19 @@
 #
 #   netem args, e.g.:  "loss 10%"   "delay 200ms 50ms"   "rate 64kbit"   "loss 5% delay 100ms rate 256kbit"
 #   containers default to every drone and the ship of the running swarm.
-#   env: RADIO_SUBNET (default 172.21.0.0/16)
+#   env: SWARM_INSTANCE (default 0) picks the swarm; RADIO_SUBNET overrides its radio subnet.
 set -eu
 MODE=$1; shift
 ARGS=""
 if [[ "$MODE" == apply ]]; then ARGS=$1; shift; fi
-SUBNET=${RADIO_SUBNET:-172.21.0.0/16}
+OVERRIDE_SUBNET=${RADIO_SUBNET:-}
+eval "$(python3 "$(dirname "$0")/../../scripts/swarm_instance.py" "${SWARM_INSTANCE:-0}")"
+SUBNET=${OVERRIDE_SUBNET:-$RADIO_SUBNET}
 if [[ $# -gt 0 ]]; then
   CONTAINERS=("$@")
 else
-  mapfile -t CONTAINERS < <(docker ps --format '{{.Names}}' | grep -E '^denddron-swarm-agent-[0-9]+$|^ship$' | sort)
+  mapfile -t CONTAINERS < <(docker ps --format '{{.Names}}' \
+    | grep -E "^${COMPOSE_PROJECT_NAME}-agent-[0-9]+\$|^${NAME_PREFIX}ship\$" | sort)
 fi
 
 iface_of() {   # radio interface name inside container $1
