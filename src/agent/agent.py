@@ -295,6 +295,7 @@ class DenddronAgent:
 
             with self.state_lock:
                 self.current_time = float(sim_time) if sim_time is not None else None
+                simclock.observe(self.current_time)
                 self.current_pose = current_pose
 
                 if timing_state == TimingState.TIME_RESET:

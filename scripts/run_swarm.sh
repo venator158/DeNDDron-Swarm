@@ -68,6 +68,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# The radio is a full mesh, so every node needs an ARP entry for every other node, and Linux keeps
+# one ARP table for all containers on the host. Past gc_thresh3 new nodes cannot reach anyone
+# (at the default 1024 the mesh stops at ~32 drones; kernel log: "neighbor table overflow").
+ARP_MAX=$(cat /proc/sys/net/ipv4/neigh/default/gc_thresh3 2>/dev/null || echo 0)
+ARP_NEED=$(( (AGENT_COUNT + 1) * AGENT_COUNT + 2 * (AGENT_COUNT + 4) ))
+if [[ "$ARP_MAX" -gt 0 && "$ARP_NEED" -gt "$ARP_MAX" ]]; then
+  echo "WARNING: ${AGENT_COUNT} drones need ~${ARP_NEED} ARP entries; this host allows ${ARP_MAX}." >&2
+  echo "         Drones beyond ~32 will not join the radio. Raise the limit (needs sudo):" >&2
+  echo "         sudo sysctl -w net.ipv4.neigh.default.gc_thresh1=4096 net.ipv4.neigh.default.gc_thresh2=8192 net.ipv4.neigh.default.gc_thresh3=16384" >&2
+fi
+
 GEN_ARGS=(--agents "$AGENT_COUNT" --seed "$SEED" --algorithm "$ALGORITHM")
 # In the defence scenario drones hold station until tasked, so no static goals.
 if [[ "$MAX_THREATS" -gt 0 ]]; then

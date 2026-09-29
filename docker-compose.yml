@@ -17,13 +17,16 @@ services:
     image: denddron_base:latest
 
   # Simulator bus (onboard links only)
+  # Fixed address: everything connects by IP. With ~50 containers starting, Docker's embedded DNS
+  # failed lookups of "sim_bus" intermittently, and every failed lookup was a crashed drone.
   sim_bus:
     image: eclipse/zenoh:latest
     container_name: sim_bus
     environment:
       RUST_LOG: info
     networks:
-      - sim_net
+      sim_net:
+        ipv4_address: 172.20.0.2
     restart: unless-stopped
     command: >
       --listen tcp/0.0.0.0:7447
@@ -35,7 +38,7 @@ services:
       dockerfile: docker/gazebo.Dockerfile
     container_name: gazebo_simulator
     environment:
-      ZENOH_ROUTER_IP: tcp/sim_bus:7447
+      ZENOH_ROUTER_IP: tcp/172.20.0.2:7447
       SIM_RTF: ${SIM_RTF:-1}
       GAZEBO_RESOURCE_PATH: /usr/share/gazebo-11:/home/app/sim
       SWARM_RUNTIME_CONFIG: /home/app/config/swarm_runtime.json
@@ -66,7 +69,7 @@ services:
       context: .
       dockerfile: docker/agent.Dockerfile
     environment:
-      SIM_BUS: tcp/sim_bus:7447
+      SIM_BUS: tcp/172.20.0.2:7447
       RADIO_SUBNET: 172.21.0.0/16
       RADIO_QOS: ${RADIO_QOS:-default}
       SIM_RTF: ${SIM_RTF:-1}
@@ -104,7 +107,7 @@ services:
       dockerfile: docker/ship.Dockerfile
     container_name: ship
     environment:
-      SIM_BUS: tcp/sim_bus:7447
+      SIM_BUS: tcp/172.20.0.2:7447
       RADIO_SUBNET: 172.21.0.0/16
       RADIO_QOS: ${RADIO_QOS:-default}
       SIM_RTF: ${SIM_RTF:-1}
@@ -139,7 +142,7 @@ services:
       dockerfile: docker/metrics.Dockerfile
     container_name: metrics_node
     environment:
-      ZENOH_ROUTER_IP: tcp/sim_bus:7447
+      ZENOH_ROUTER_IP: tcp/172.20.0.2:7447
     command: ["python", "-u", "src/metrics/main.py"]
     networks:
       - sim_net

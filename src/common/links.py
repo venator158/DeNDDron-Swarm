@@ -17,6 +17,7 @@ import json
 import os
 import socket
 import struct
+import time
 
 import zenoh
 
@@ -115,11 +116,25 @@ def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = Non
     return zenoh.open(conf)
 
 
-def open_onboard(router_locator: str = None) -> zenoh.Session:
-    """Client session to the simulator's router (onboard sensors/actuators)."""
-    conf = zenoh.Config()
-    conf.insert_json5("mode", '"client"')
-    conf.insert_json5("scouting/multicast/enabled", "false")
-    if router_locator:
-        conf.insert_json5("connect/endpoints", json.dumps([router_locator]))
-    return zenoh.open(conf)
+def open_onboard(router_locator: str = None, attempts: int = 30) -> zenoh.Session:
+    """Client session to the simulator's router (onboard sensors/actuators).
+
+    Retries with backoff: when many containers start at once the router can be slow to accept,
+    and crashing instead would put the container in Docker's restart loop, which adds load.
+    """
+    delay = 0.5
+    for attempt in range(1, attempts + 1):
+        conf = zenoh.Config()
+        conf.insert_json5("mode", '"client"')
+        conf.insert_json5("scouting/multicast/enabled", "false")
+        if router_locator:
+            conf.insert_json5("connect/endpoints", json.dumps([router_locator]))
+        try:
+            return zenoh.open(conf)
+        except zenoh.ZError as e:
+            if attempt == attempts:
+                raise
+            print(f"[links] onboard bus {router_locator}: {e}; retry {attempt}/{attempts - 1} in {delay:.1f}s",
+                  flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 5.0)

@@ -72,7 +72,7 @@ class Telemetry:
         wall, cpu = time.monotonic(), time.process_time()
         with self._lock:
             span = max(1e-6, wall - self._wall0)
-            sim_span = span * simclock.RTF
+            sim_span = span * simclock.rate()
             ms = lambda v: None if v is None else round(v * 1000.0, 2)
             out = {
                 "window_s": round(span, 2),

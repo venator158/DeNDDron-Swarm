@@ -181,6 +181,7 @@ class Ship:
     def _on_clock(self, sample):
         with self.lock:
             self.sim_time = float(self._parse(sample)["sim_time"])
+        simclock.observe(self.sim_time)
 
     def _on_heartbeat(self, sample):
         self._count_rx("swarm/heartbeat", sample)

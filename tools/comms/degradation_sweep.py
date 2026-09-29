@@ -169,6 +169,25 @@ class Sampler(threading.Thread):
         }
 
 
+def wait_for_roster(n, timeout, stall_s=60.0):
+    """Wait for n drones in the ship's roster; give up early if it stops growing for stall_s."""
+    end, best, best_t = time.time() + timeout, -1, time.time()
+    while time.time() < end:
+        try:
+            count = get("/api/state")["roster"]["count"]
+        except Exception:
+            count = -1
+        if count >= n:
+            return
+        if count > best:
+            best, best_t = count, time.time()
+        elif best >= 0 and time.time() - best_t > stall_s:
+            raise RuntimeError(f"roster stalled at {best}/{n} for {stall_s:.0f}s "
+                               "(check `journalctl -k | grep neighbour` for ARP table overflow)")
+        time.sleep(2)
+    raise RuntimeError(f"swarm did not come up: roster {max(best, 0)}/{n} after {timeout:.0f}s")
+
+
 def compose_down():
     subprocess.run(["docker", "compose", "--env-file", ".swarm.env", "down"], cwd=REPO,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -193,9 +212,7 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None):
     sampler = Sampler(getattr(args, "sample_s", 10.0)) if getattr(args, "sample", False) else None
     startup_s = None
     try:
-        if not wait_for(lambda: get("/api/state")["roster"]["count"] >= args.drones,
-                        getattr(args, "startup_timeout", 300)):
-            raise RuntimeError("swarm did not come up")
+        wait_for_roster(args.drones, getattr(args, "startup_timeout", 300))
         startup_s = round(time.time() - t0)
         if sampler:
             sampler.start()

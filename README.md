@@ -24,6 +24,14 @@ This README is the project's only documentation. Keep it up to date when behavio
 
 Requirements: Docker with Compose v2, and an X11 display for the Gazebo window.
 
+**More than ~30 drones:** raise the host's ARP table limit first. The radio is a full mesh, so every node needs an ARP entry for every other node, and Linux keeps one ARP table for all containers on the host. At the default `gc_thresh3 = 1024`, the mesh stops at about 32 nodes: later drones cannot reach anyone, and the kernel log fills with `neighbor table overflow`. `run_swarm.sh` warns when the swarm is too big for the limit.
+
+```bash
+sudo sysctl -w net.ipv4.neigh.default.gc_thresh1=4096 net.ipv4.neigh.default.gc_thresh2=8192 net.ipv4.neigh.default.gc_thresh3=16384
+```
+
+Put the same three settings in `/etc/sysctl.d/` to keep them after a reboot. 16384 covers about 125 drones.
+
 ```bash
 xhost +local:docker                                   # let containers open windows
 bash scripts/run_swarm.sh 8 --threats 6               # 8 drones, radar generates 6 threats
@@ -58,10 +66,15 @@ With no `--threats`, drones fly to the static goals in `config/swarm_runtime.jso
 - **Gazebo** steps its 1 ms physics at 1000·K steps per second.
 - **The bridge** ticks every 20/K ms, so poses stay at 50 Hz and lidar at 10 Hz per simulated second.
 - **Drones** run their control loop at 50·K Hz. The simulator filters each velocity command, so the command rate per simulated second must stay the same for the flight dynamics to match.
-- **Protocol timers** (heartbeats, link and roster timeouts, re-announce delay, decision latency, radio rates) use `src/common/simclock.py`, which counts simulated seconds.
+- **Protocol timers** (heartbeats, link and roster timeouts, re-announce delay, decision latency, radio rates) use `src/common/simclock.py`. It follows the simulator's actual clock: drones feed it the sim time from their sensor frames, and the ship from `sim/clock`. Between updates it runs at the measured sim speed, so timers stay correct when Gazebo falls behind the target. At 25 drones, Gazebo reached 1.9× against a 2× target, and the ship still received exactly the expected 75 messages per simulated second.
 - **Radio impairments** must be scaled by hand: delay ÷ K and rate × K. Loss is unchanged. `degradation_sweep.py --rtf K` does this for you.
 
-Compute metrics (loop timing, CPU) stay in real time. The only things that don't scale are the computer's own processing latencies and Zenoh's internal timers, so keep K small.
+Compute metrics (loop timing, CPU) stay in real time. What doesn't scale:
+- the computer's own processing latencies;
+- Zenoh's internal timers;
+- netem impairments, which are scaled by the *target* K, so a simulator that falls behind makes delays slightly longer in simulated terms.
+
+Keep K small, and check `rtf_measured` in sweep results.
 
 Measured at K = 3 with 8 drones:
 - Gazebo reaches 2.98× real time.

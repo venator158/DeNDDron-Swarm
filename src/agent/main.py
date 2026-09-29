@@ -91,7 +91,7 @@ def main():
         "--sim-bus",
         type=str,
         default=os.getenv("SIM_BUS", None),
-        help="Locator of the simulator's Zenoh router (onboard bus), e.g. tcp/sim_bus:7447",
+        help="Locator of the simulator's Zenoh router (onboard bus), e.g. tcp/172.20.0.2:7447",
     )
     parser.add_argument(
         "--runtime-config",

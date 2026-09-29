@@ -39,7 +39,8 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--reaction", type=float, default=3.0)
     ap.add_argument("--timeout", type=float, default=420, help="sim seconds per run after the swarm is up")
-    ap.add_argument("--startup-timeout", type=float, default=600, help="wall seconds for the full roster")
+    ap.add_argument("--startup-timeout", type=float, default=180,
+                    help="wall seconds for the full roster (a roster that stops growing for 60 s aborts sooner)")
     ap.add_argument("--sample-s", type=float, default=10.0, help="wall seconds between resource samples")
     ap.add_argument("--out", default=str(REPO / "results" / time.strftime("scaling_%Y%m%d_%H%M%S")))
     args = ap.parse_args()
