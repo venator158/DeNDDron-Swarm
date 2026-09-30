@@ -7,10 +7,12 @@ ship's hull), without saying which is which, with noise.  The fuze:
 1. Tracks the contacts from scan to scan (nearest-neighbour association in world coordinates).
 2. Arms during t_engage +- window_s, in the drone's synchronized (protocol) time.
 3. Records every object already in range as known: the spatial queue keeps non-job drones more
-   than 12 m away, so these are job-mates (or the ship).  The record is taken while the job's track
-   still puts the threat beyond range + record_margin_m, i.e. at t_engage - (range + margin) / v,
-   or at arming if that is earlier: at the scaled threat speeds (2.5-4.5 m/s) a threat is already
-   5-9 m away, inside the 10 m range, at t_engage - 2 s, and would be taken for a job-mate.
+   than 12 m away, so these are job-mates (or the ship).  The record is taken at the first scan at
+   which the job's track puts the threat within range + record_margin_m of *us* (or at arming if
+   that is earlier): at the scaled threat speeds (2.5-4.5 m/s) a threat is already 5-9 m away,
+   inside the 10 m range, at t_engage - 2 s, and would be taken for a job-mate.  Timing it on the
+   threat's distance to the engagement point failed after a manoeuvre: the drone had stopped 3 m
+   short of the new point on the threat's side, so the threat was already in range when recorded.
 4. Fires on a *new* track, one that appeared after arming, while it lies within gate_m of the
    threat position predicted from the job's track, either at the track's closest approach within
    the kill radius (fire="cpa", the default) or as soon as it is within the kill radius
@@ -99,15 +101,13 @@ class Fuze:
         self.done = False
         self._next_id = 0
 
-    def record_time(self, t_engage: float, predict) -> float:
-        """When to record the objects in range as job-mates: the threat still beyond range + margin."""
-        t = t_engage - self.cfg.window_s
-        if predict is not None:
-            a, b = predict(t_engage), predict(t_engage + 1.0)
-            v = math.dist(a, b) if a is not None and b is not None else 0.0
-            if v > 1e-3:
-                t = min(t, t_engage - (self.cfg.range_m + self.cfg.record_margin_m) / v)
-        return t
+    def record_now(self, t: float, own: Vec3, t_engage: float, predict) -> bool:
+        """Record the objects in range as job-mates now?  Once the threat is predicted within range +
+        margin of us (before it can be in range), and at the latest at arming."""
+        if t >= t_engage - self.cfg.window_s:
+            return True
+        p = predict(t) if predict is not None else None
+        return p is not None and math.dist(p, own) <= self.cfg.range_m + self.cfg.record_margin_m
 
     def in_window(self, t: float, t_engage: float) -> bool:
         return t_engage - self.cfg.window_s <= t <= t_engage + self.cfg.window_s
@@ -156,7 +156,7 @@ class Fuze:
         if self.done:
             return None
         self._associate(t, own, contacts)
-        if not self.recorded and t >= self.record_time(t_engage, predict):
+        if not self.recorded and self.record_now(t, own, t_engage, predict):
             self.recorded = True
             for tr in self.tracks:
                 tr.known = True

@@ -91,6 +91,53 @@ Measured at K = 3 with 8 drones:
 - A sweep run takes 87 s instead of 201 s.
 - Results match real-time runs: decision latency 1030 vs 1015 ms with no impairment, and 1440 vs 1445 ms at 200 ms delay.
 
+### Unattended runs and sweeps
+
+`tools/comms/degradation_sweep.py` runs complete experiments without anyone at the dashboard. For each run it:
+1. launches the swarm (`run_swarm.sh`);
+2. waits for every drone to join;
+3. starts the stand-in operator (`operator_bot.py`), which approves every feasible threat, most urgent first;
+4. waits until every threat is resolved;
+5. saves `/api/summary`, the dashboard state and the logs, and tears the swarm down.
+
+```bash
+# one scenario, 3 runs: 12 drones, 6 threats, every other threat manoeuvres, 3x real time
+python3 tools/comms/degradation_sweep.py --rtf 3 --drones 12 --threats 6 --maneuver-p 0.5 \
+    --profiles default --conditions baseline= --repeats 3
+
+# the same under radio impairments, 2 runs at a time on separate instances
+python3 tools/comms/degradation_sweep.py --rtf 3 --drones 12 --threats 6 --maneuver-p 0.5 \
+    --profiles default --conditions baseline= loss30="loss 30%" delay200="delay 200ms 50ms" --parallel 2
+
+# any other swarm setting through --env, e.g. clocks and the fuze
+python3 tools/comms/degradation_sweep.py --rtf 3 --drones 8 --threats 4 --profiles default --conditions baseline= \
+    --env CLOCK_DRIFT_SPREAD_PPM=500 CLOCK_OFFSET_SPREAD_S=1.5 CLOCK_SYNC=consensus FUZE=0
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--rtf K` | 1 | simulation speed-up; operator reaction, timeouts and radio impairments are scaled to it |
+| `--drones N` | 8 | number of drones |
+| `--threats K` | 4 | threats the radar generates |
+| `--maneuver-p P` | 0 | probability that a threat turns once mid-flight |
+| `--interval S`, `--first S`, `--seed S` | 30, 25, 42 | mean sim seconds between detections, before the first, scenario seed |
+| `--repeats N` | 1 | runs per cell |
+| `--conditions NAME=NETEM ...` | built-in matrix | radio impairments (`NAME=` for none) |
+| `--profiles ...` | `default tuned` | radio QoS profiles |
+| `--env KEY=VALUE ...` | | any other swarm environment (clocks, fuze, radar) |
+| `--reaction S`, `--timeout S` | 3, 360 | operator reaction and time allowed per run, sim seconds |
+| `--parallel P`, `--instance K` | 1, 0 | runs at once on separate instances; which instance for a single run |
+| `--out DIR` | `results/sweep_<time>` | results: `results.csv`, `results.md` (mean ± sd per cell), and per run `swarm.log`, `operator.log`, `summary.json`, `state.json` |
+
+`scaling_sweep.py` takes the same `--maneuver-p` and `--env`, with swarm sizes as `--sizes N:RTF ...` and N/2 threats per size.
+
+For a single interactive run with the stand-in operator instead of a person: start the swarm, then the bot.
+
+```bash
+bash scripts/run_swarm.sh 12 --threats 6 --rtf 3 --maneuver-p 0.5
+python3 tools/comms/operator_bot.py 1 400 0.5      # reaction s, duration s, poll s (wall time)
+```
+
 ### Several swarms at once
 
 `--instance K` runs an independent swarm next to others on the same host, for example sweep cells in parallel on a cluster node. `scripts/swarm_instance.py` maps K to the instance's settings; instance 0 is the default and keeps the original names, ports and subnets.
@@ -254,7 +301,7 @@ Timed detonation depends on every drone's clock and on the drone sitting exactly
 
 - **Sensor** (simulator, `drone/{id}/fuze`). Unlabelled 3D positions, relative to the drone, of every object within `FUZE_RANGE_M` (10 m): threats, other drones, the nearest point of the ship's hull. Gaussian noise `FUZE_NOISE_M` (0.1 m per axis), rate `FUZE_HZ` (50), latency `FUZE_LATENCY_S` (0). The planar lidar is not used: it only sees at the drone's own altitude. What each contact really was is known only to the evaluation.
 - **Tracking.** Contacts are associated from scan to scan (nearest neighbour in world coordinates).
-- **Job-mates.** Objects already in range are recorded as known: the spatial queue keeps non-job drones more than 12 m away, so these are job-mates (or the ship). The record is taken while the job's track still puts the threat beyond range + 2 m, at `t_engage − (range + 2) / v`, or at arming if that is earlier. At the simulation's threat speeds (2.5–4.5 m/s), the threat is already 5–9 m away when the window opens, inside the 10 m range, and would otherwise be taken for a job-mate.
+- **Job-mates.** Objects already in range are recorded as known: the spatial queue keeps non-job drones more than 12 m away, so these are job-mates (or the ship). The record is taken at the first scan at which the job's track puts the threat within range + 2 m of the drone itself, or at arming if that is earlier. At the simulation's threat speeds (2.5–4.5 m/s), the threat is already 5–9 m away when the window opens, inside the 10 m range, and would otherwise be taken for a job-mate. A first version timed the record on the threat's distance to the engagement point; after a manoeuvre a drone had stopped 3 m short of the new point on the threat's side, took the threat for a mate, and held.
 - **Arming.** The fuze fires only during `t_engage ± FUZE_WINDOW_S` (2 s), in the drone's synchronized time.
 - **Trigger.** A *new* track that lies within `FUZE_GATE_M` (5 m) of the threat position predicted from the job's track (`ship/jobs`, so a manoeuvre updates it) fires the fuze:
   - `FUZE_FIRE=cpa` (default): at its closest approach, if that is within the kill radius (8 m). The closest approach is when the track starts moving away, its velocity fitted to its positions over the last 0.3 s. Range alone grows only quadratically there; a range threshold fired 0.2–0.3 s late.
@@ -514,7 +561,7 @@ All sizes: no re-announces, no conflicts, full agreement on assignments, decisio
 | `chaos.py <compose log> [disconnect\|netem]` | during a live run: cuts an idle drone, then the first drone that engages, then restores the idle one |
 | `operator_bot.py [reaction_s] [duration_s] [poll_s]` | stand-in operator: approves feasible threats through the dashboard API, most urgent first |
 | `degrade_radio.sh apply "<netem args>" \| clear [container...]` | impairs the radio (UDP only) of every drone and the ship: loss, delay, rate, combinable |
-| `degradation_sweep.py [--rtf K] [--repeats N] [--profiles ...] [--conditions NAME=NETEM ...]` | the seeded scenario under each impairment and QoS profile; writes `results/<sweep>/results.{csv,md}` with mean ± sd per cell |
+| `degradation_sweep.py [--rtf K] [--drones N] [--threats K] [--maneuver-p P] [--repeats N] [--profiles ...] [--conditions NAME=NETEM ...] [--env KEY=VALUE ...]` | the seeded scenario under each impairment and QoS profile, with the stand-in operator; writes `results/<sweep>/results.{csv,md}` with mean ± sd per cell (see [Unattended runs and sweeps](#unattended-runs-and-sweeps)) |
 
 All probes accept `IMAGE=...` to test another Zenoh build and pass through the radio settings (`RADIO_PROTO`, `RADIO_PROCESS`, `RADIO_LEASE_MS`, `RADIO_OPEN_TIMEOUT_MS`, `RADIO_ZENOH_CONFIG`, `RADIO_DEBUG`). `radio_probe.sh` takes `PEERS=N`.
 

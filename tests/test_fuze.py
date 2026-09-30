@@ -10,10 +10,11 @@ MATES = [(0.0, 0.0, 23.0), (0.0, 0.0, 17.0)]           # stacked +-3 m (vertical
 
 
 def run(cfg=FuzeConfig(), speed=2.5, t_engage=30.0, arrive_late=1.1, lateral=1.0, noise=0.1, true_track=None,
-        extra=lambda t: [], seed=1, until=None, predict_track=None):
+        extra=lambda t: [], seed=1, until=None, predict_track=None, own=OWN):
     """Threat passes over the engagement point; it reaches OWN's x at t_engage + arrive_late
     (drones stop short of the point, so threats arrive ~1.1 s late), `lateral` m to the side.
     Returns (decision, protocol time of the decision)."""
+    OWN = own
     rng = random.Random(seed)
     t_pass = t_engage + arrive_late
     track = true_track or (lambda t: (speed * (t - t_pass), lateral, 20.0))
@@ -50,6 +51,15 @@ class TestFuze(unittest.TestCase):
         self.assertEqual(len(known), 2)                                      # the two mates only
         d, _, _ = run(speed=2.5)
         self.assertEqual(d.reason, "fuze")
+
+    def test_drone_short_on_the_threat_side(self):
+        # Seen live after a manoeuvre: the drone flew to the new point from the threat's side and
+        # stopped 3 m short of it, towards the threat.  A mate record timed on the threat's distance
+        # to the *point* (12 m) put the threat 9 m from the drone, inside range: taken for a mate.
+        for speed in (2.5, 3.5, 4.5):
+            d, t, fz = run(speed=speed, own=(-3.0, 0.0, 20.0), arrive_late=0.0, lateral=0.5)
+            self.assertEqual(d.reason, "fuze", speed)
+            self.assertAlmostEqual(t, 30.0 - 3.0 / speed, delta=0.12)
 
     def test_mates_never_trigger(self):
         # no threat at all: the mates stay known, the window closes, hold

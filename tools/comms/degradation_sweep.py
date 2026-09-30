@@ -14,6 +14,7 @@ unchanged. Timings in the results are in simulated time.
     python3 tools/comms/degradation_sweep.py --rtf 3 --repeats 3
     python3 tools/comms/degradation_sweep.py --profiles tuned --conditions baseline= loss10="loss 10%"
     python3 tools/comms/degradation_sweep.py --env CLOCK_OFFSET_SPREAD_S=2 CLOCK_SYNC=none   # any swarm env
+    python3 tools/comms/degradation_sweep.py --rtf 3 --drones 12 --threats 6 --maneuver-p 0.5 --profiles default --conditions baseline= --repeats 3
 
 Results: <out>/results.csv (one row per run), <out>/results.md (runs, then mean ± sd per cell),
 <out>/<run>/{swarm.log,operator.log,summary.json,state.json}
@@ -59,7 +60,7 @@ DEFAULT_CONDITIONS = {
     "bw64k": "rate 64kbit",
     "bw24k": "rate 24kbit",
 }
-COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "drones", "threats", "approved", "destroyed", "failed", "leaked_or_impact",
+COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "drones", "threats", "maneuver_p", "approved", "destroyed", "failed", "leaked_or_impact",
            "kill_ratio", "award_latency_ms_mean", "award_latency_ms_max", "never_fully_assigned", "reannounces",
            "over_assigned", "missed_slots", "rejected_awards", "friendly_fire", "detonations_with_intruders",
            "intercept_range_m_mean", "legacy_range_m_mean", "drones_with_holds", "hold_s_max",
@@ -306,7 +307,8 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
     swarm = subprocess.Popen(
         ["bash", "scripts/run_swarm.sh", str(args.drones), "--threats", str(args.threats),
          "--threat-interval", str(args.interval), "--first-threat", str(args.first), "--seed", str(args.seed),
-         "--algorithm", getattr(args, "algorithm", "orca")],
+         "--algorithm", getattr(args, "algorithm", "orca"),
+         "--maneuver-p", f"{getattr(args, 'maneuver_p', 0.0):g}"],
         cwd=REPO, env=env, stdout=swarm_log, stderr=subprocess.STDOUT)
     bot = None
     summary = {}
@@ -353,7 +355,7 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
     if sampler:
         row.update(sampler.summary(), startup_s=startup_s)
     row.update(profile=profile, condition=cond, netem=netem or "-", rep=rep, rtf=rtf, drones=args.drones,
-               threats=args.threats, instance=inst.k,
+               threats=args.threats, instance=inst.k, maneuver_p=getattr(args, "maneuver_p", 0.0),
                env=" ".join(f"{k}={v}" for k, v in sorted((extra_env or {}).items())) or "-",
                hb_rx_per_s_at_ship=summary.get("radio_rx_at_ship", {}).get("swarm/heartbeat", {}).get("msgs_per_s"),
                wall_s=round(time.time() - t0))
@@ -391,6 +393,8 @@ def main():
     ap.add_argument("--rtf", type=float, default=1.0, help="simulation speed-up (real-time factor)")
     ap.add_argument("--drones", type=int, default=8)
     ap.add_argument("--threats", type=int, default=4)
+    ap.add_argument("--maneuver-p", type=float, default=0.0,
+                    help="probability that a threat turns once mid-flight (THREAT_MANEUVER_P)")
     ap.add_argument("--interval", type=float, default=30)
     ap.add_argument("--first", type=float, default=25)
     ap.add_argument("--seed", type=int, default=42)
