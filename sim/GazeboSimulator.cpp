@@ -106,6 +106,7 @@ void GazeboSimulator::init() {
     ));
 
     load_spawn_config();
+    configure_fuze();
 
     std::cout << "[GazeboSimulator] Ready. Waiting for agents..." << std::endl;
 }
@@ -700,6 +701,75 @@ json GazeboSimulator::simulate_lidar(const std::string& agent_id) {
     return {{"angle_step", 2.0 * M_PI / num_rays}, {"ranges", ranges}, {"hits", hits}};
 }
 
+namespace {
+double env_double(const char* name, double fallback) {
+    const char* v = std::getenv(name);
+    return (v != nullptr && std::strlen(v) > 0) ? std::atof(v) : fallback;
+}
+}  // namespace
+
+void GazeboSimulator::configure_fuze() {
+    const char* on = std::getenv("FUZE");
+    _fuze_on = !(on != nullptr && (std::strcmp(on, "0") == 0 || std::strcmp(on, "off") == 0));
+    _fuze_period = 1.0 / std::max(1.0, env_double("FUZE_HZ", 50.0));
+    _fuze_range = env_double("FUZE_RANGE_M", 10.0);
+    _fuze_noise = std::max(0.0, env_double("FUZE_NOISE_M", 0.1));
+    _fuze_latency = std::max(0.0, env_double("FUZE_LATENCY_S", 0.0));
+    _fuze_rng.seed(static_cast<unsigned>(env_double("FUZE_SEED", 0.0)));
+    std::cout << "[GazeboSimulator] Proximity fuze " << (_fuze_on ? "on" : "off") << ": range " << _fuze_range
+              << " m, " << 1.0 / _fuze_period << " Hz, noise " << _fuze_noise << " m, latency " << _fuze_latency
+              << " s" << std::endl;
+}
+
+void GazeboSimulator::publish_fuze(double sim_time, const std::vector<std::string>& agents) {
+    // Truth snapshot: drones and threats (the markers move along the ship's truth tracks).
+    std::map<std::string, ignition::math::Vector3d> drones;
+    std::vector<ignition::math::Vector3d> threats;
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        for (const auto& [id, st] : _drone_states) drones[id] = st.position;
+        for (const auto& [id, m] : _threat_markers) threats.push_back(m.p0 + m.v * (sim_time - m.t0));
+    }
+    const double ship_radius = 16.0;   // the ship is a vertical cylinder at the origin (as for the lidar)
+    std::normal_distribution<double> noise(0.0, _fuze_noise > 0.0 ? _fuze_noise : 1.0);
+    auto round_mm = [](double v) { return std::round(v * 1000.0) / 1000.0; };
+    for (const auto& agent_id : agents) {
+        auto self = drones.find(agent_id);
+        if (self == drones.end()) continue;
+        const ignition::math::Vector3d me = self->second;
+        std::vector<ignition::math::Vector3d> seen;
+        for (const auto& [id, pos] : drones)
+            if (id != agent_id && (pos - me).Length() <= _fuze_range) seen.push_back(pos - me);
+        for (const auto& pos : threats)
+            if ((pos - me).Length() <= _fuze_range) seen.push_back(pos - me);
+        const double r_xy = std::hypot(me.X(), me.Y());
+        if (r_xy > 1e-6 && r_xy - ship_radius <= _fuze_range) {
+            // nearest point of the hull, at the drone's altitude
+            const double k = ship_radius / r_xy;
+            seen.push_back(ignition::math::Vector3d(me.X() * k, me.Y() * k, me.Z()) - me);
+        }
+        json objects = json::array();
+        for (const auto& rel : seen) {
+            const double nx = _fuze_noise > 0.0 ? noise(_fuze_rng) : 0.0;
+            const double ny = _fuze_noise > 0.0 ? noise(_fuze_rng) : 0.0;
+            const double nz = _fuze_noise > 0.0 ? noise(_fuze_rng) : 0.0;
+            objects.push_back({round_mm(rel.X() + nx), round_mm(rel.Y() + ny), round_mm(rel.Z() + nz)});
+        }
+        _fuze_queue.push_back({sim_time + _fuze_latency, "drone/" + agent_id + "/fuze",
+                               json{{"sim_time", sim_time}, {"objects", objects}}.dump()});
+    }
+}
+
+void GazeboSimulator::flush_fuze(double sim_time) {
+    while (!_fuze_queue.empty() && _fuze_queue.front().release <= sim_time + 1e-9) {
+        if (_session) {
+            _session->put(zenoh::KeyExpr(_fuze_queue.front().topic), zenoh::Bytes(_fuze_queue.front().payload),
+                          zenoh::Session::PutOptions::create_default());
+        }
+        _fuze_queue.pop_front();
+    }
+}
+
 json GazeboSimulator::get_drone_pose(const std::string& agent_id) {
     std::lock_guard<std::mutex> lock(_state_mtx);
     if (_drone_states.find(agent_id) != _drone_states.end()) {
@@ -797,6 +867,12 @@ void GazeboSimulator::step() {
             publish_sensor_data(agent_id, sensor_data);
         }
     }
+
+    if (_fuze_on && current_sim_time - _last_fuze_pub_time >= _fuze_period - 1e-3) {
+        _last_fuze_pub_time = current_sim_time;
+        publish_fuze(current_sim_time, active_agents);
+    }
+    flush_fuze(current_sim_time);
 
     if (current_sim_time - _last_clock_pub_time >= 0.1 && _pub_clock) {
         _last_clock_pub_time = current_sim_time;

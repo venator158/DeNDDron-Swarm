@@ -14,7 +14,8 @@ from timing import TimingManager, TimingState
 from auction import AuctionManager
 from telemetry import Telemetry
 from threats import ETA_MARGIN, ORDER_SLACK_S, Threat, slot_point
-from deconflict import BLAST_TOL_S, SLOT_RADIUS_M, Blast, plan_route
+from deconflict import SLOT_RADIUS_M, Blast, plan_route
+import fuze as fuzelib
 from links import open_onboard
 from radio_process import RadioProcess
 import localclock
@@ -40,6 +41,8 @@ class DenddronAgent:
     GIVE_BACK_CUTOFF_S = 10.0  # s before t_engage after which a drone keeps its job (no time to clear the zone)
     # Experiment switch: ZONE_KEEPOUT=0 turns prevention off (friendly fire and the final check stay on).
     KEEPOUT = os.environ.get("ZONE_KEEPOUT", "1") != "0"
+    # Proximity fuze (fuze.py): on by default; FUZE=0 restores timed detonation at t_engage.
+    FUZE_ON = fuzelib.enabled()
 
     def __init__(self, agent_id: str, sim_bus_locator: str = None):
         self.agent_id = agent_id
@@ -258,7 +261,9 @@ class DenddronAgent:
         # Engagement zones: keep clear of other jobs' detonations (_service_zones, _keepout).
         self.zones = {}                # threat_id -> (zone, simclock time received)
         self._zones_sig = None
-        self._aborted_job = None       # (threat_id, t_engage) of a job we aborted at its detonation time
+        self._last_job = None          # threat_id of our current or most recent job: its blasts never hurt us
+        self.fuze_cfg = fuzelib.FuzeConfig.from_env(kill_radius_m=self.KILL_RADIUS)
+        self._detonate_lock = threading.Lock()
         self._progress_logged = -1e9
         self._route_planned = -1e9     # simclock time of the last route re-plan
         self.sub_zones     = self.radio.declare_subscriber("ship/zones", self._on_zones)
@@ -268,6 +273,8 @@ class DenddronAgent:
             self.sub_clock = self.radio.declare_subscriber("swarm/clock/*", self._on_clock_beacon)
         # Physics: detonations of other jobs within KILL_RADIUS destroy this drone (friendly fire).
         self.sub_blasts    = self.onboard.declare_subscriber("sim/detonation", self._on_blast)
+        if self.FUZE_ON:
+            self.sub_fuze  = self.onboard.declare_subscriber(f"drone/{self.agent_id}/fuze", self._on_fuze)
         self.pub_damage    = self.onboard.declare_publisher("sim/damage")
         # Evaluation only: truth vs our estimate of ship time, on the onboard bus so it is measured
         # during radio cuts too (the radio telemetry carries only what a real drone could report).
@@ -898,10 +905,12 @@ class DenddronAgent:
             loc = t.location
             with self._eng_lock:
                 self.engaged_threat = t
+                self._last_job = t.threat_id
                 self._set_engagement({
                     "threat": t, "wave_id": r.wave_id, "confirmed": False, "since": simclock.now(), "seq": -1,
                     "point": (loc["x"], loc["y"], loc["z"]), "t_engage": t.t_engage,
                     "slot": slot, "n_slots": len(winners),
+                    "fuze": fuzelib.Fuze(self.fuze_cfg) if self.FUZE_ON else None, "track": None,
                 })
                 self._job_sub = self.radio.declare_subscriber(f"ship/jobs/{t.threat_id}", self._on_job)
             sp = self.engagement["slot_point"]
@@ -1020,6 +1029,8 @@ class DenddronAgent:
         p = job["point"]
         new.update(point=(p["x"], p["y"], p["z"]), t_engage=float(job["t_engage"]),
                    seq=int(job.get("seq", eng["seq"])), intruders=job.get("intruders", []))
+        if isinstance(job.get("track"), dict):
+            new["track"] = job["track"]            # threat track, t0 in the protocol timebase (fuze gate)
         if me is not None:
             new.update(slot=int(me), n_slots=int(job.get("n_slots", eng["n_slots"])))
         if confirm and not eng["confirmed"]:
@@ -1194,10 +1205,10 @@ class DenddronAgent:
             return
         eng = self.engagement
         if eng is not None and eng["threat"].threat_id == b.get("threat_id"):
-            return                                   # job-mates detonate together by design
-        ab = self._aborted_job
-        if ab and ab[0] == b.get("threat_id") and abs(float(b.get("sync_time") or self.sync.to_ship(ab[1])) - self.sync.to_ship(ab[1])) <= BLAST_TOL_S:
-            return                                   # our own job's blast, the instant we aborted it
+            self._on_mate_blast(eng, b)
+            return                                   # a job's own blast never hurts its drones
+        if b.get("threat_id") == self._last_job:
+            return                                   # our last job's blast (we aborted or gave it back)
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
         if pose is None:
@@ -1225,6 +1236,77 @@ class DenddronAgent:
         self.destroyed = True
         self._send_heartbeat()
         threading.Timer(1.0, self.radio.close).start()
+
+    def _on_mate_blast(self, eng, b):
+        """Chain fire: a job-mate detonated.  We fire at once if our fuze is armed and we are on station;
+        otherwise we do not fire, and survive.  The detonation topic is an idealized, job-selective
+        trigger; its delivery delay (not physical) is measured and reported."""
+        truth = simclock.truth_now()
+        delay = None if truth is None or b.get("truth_time") is None else round(truth - float(b["truth_time"]), 4)
+        fz = eng.get("fuze")
+        if fz is None or not eng["confirmed"]:
+            return
+        now = self._proto_now()
+        with self.state_lock:
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+        if now is None or pose is None:
+            return
+        sp = eng["slot_point"]
+        on_slot = math.dist((pose["x"], pose["y"], pose["z"]), (sp["x"], sp["y"], sp["z"]))
+        if fz.chain_ready(now, eng["t_engage"], on_slot, self.DETONATE_RADIUS):
+            fz.done = True
+            self._detonate(eng, "chain", chain_delay=delay, by=b.get("agent_id"))
+        else:
+            logger.info(f"[{self.agent_id}] Job-mate {b.get('agent_id')} detonated on {b.get('threat_id')}; not "
+                        f"chain firing ({'fuze not armed' if not fz.in_window(now, eng['t_engage']) else f'{on_slot:.1f} m from slot'}), "
+                        f"topic delay {delay} s")
+
+    def _track_predictor(self, eng):
+        """Threat position at protocol time t from the job's track (None without a track)."""
+        tr = eng.get("track")
+        if not tr or tr.get("t0") is None:
+            return None
+        p0, v, t0 = tr["p0"], tr["v"], float(tr["t0"])
+        return lambda t: (p0["x"] + v["x"] * (t - t0), p0["y"] + v["y"] * (t - t0), p0["z"] + v["z"] * (t - t0))
+
+    def _on_fuze(self, sample):
+        """A fuze scan (onboard sensor): unlabelled contacts relative to us.  The fuze decides."""
+        if self.destroyed:
+            return
+        eng = self.engagement
+        if eng is None or not eng["confirmed"] or eng.get("fuze") is None:
+            return
+        try:
+            scan = self._parse(sample)
+            contacts = [tuple(float(c) for c in o) for o in scan.get("objects", [])]
+            truth = float(scan["sim_time"])
+        except Exception as e:
+            logger.debug(f"[{self.agent_id}] Bad fuze scan: {e}")
+            return
+        with self.state_lock:
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+        if pose is None:
+            return
+        t = self.sync.proto_time(self.clock.read(truth))      # the scan's time on our clock
+        d = eng["fuze"].update(t, (pose["x"], pose["y"], pose["z"]), contacts, eng["t_engage"],
+                               self._track_predictor(eng))
+        if d is not None:
+            self._fuze_decision(eng, d)
+
+    def _fuze_decision(self, eng, d):
+        tid = eng["threat"].threat_id
+        if d.action == "fire":
+            if d.reason == "fuze":
+                logger.info(f"[{self.agent_id}] FUZE fired on {tid}: contact at {d.range_m:.1f} m")
+            else:
+                logger.warning(f"[{self.agent_id}] Fuze window closed on {tid} with no detection; timed fallback")
+            self._detonate(eng, d.reason, trigger=d.trigger)
+            return
+        logger.warning(f"[{self.agent_id}] Fuze window closed on {tid} with no detection; holding (not detonating)")
+        with self._eng_lock:
+            cur = self.engagement
+            if cur is not None and cur["threat"].threat_id == tid and not self.destroyed:
+                self._abandon(tid, "no_detection")
 
     def _drop_job_sub(self):
         if self._job_sub is not None:
@@ -1299,15 +1381,46 @@ class DenddronAgent:
         threat = eng["threat"]
         sp = eng["slot_point"]
         miss = float(np.linalg.norm([pose["x"] - sp["x"], pose["y"] - sp["y"], pose["z"] - sp["z"]]))
-        if miss > self.DETONATE_RADIUS:
+        fz = eng.get("fuze")
+        if miss > self.DETONATE_RADIUS and not eng.get("off_slot_checked"):
             logger.warning(f"[{self.agent_id}] MISSED {threat.threat_id}: {miss:.1f} m from slot at "
                            f"t_engage; aborting and holding position")
-            # Still on this job for its own blast: job-mates detonate in the same instant.
-            self._aborted_job = (threat.threat_id, eng["t_engage"])
             with self._auction_lock:
                 self.auction.release()
-            self._disengage(threat.threat_id, "missed")
+            self._disengage(threat.threat_id, "missed")    # its blasts cannot hurt us (_last_job)
             return
+        if fz is not None:
+            # The fuze decides (_on_fuze).  Watchdog: no scans past the window (no sensor) -> fallback.
+            eng["off_slot_checked"] = True
+            if not fz.done and now > eng["t_engage"] + fz.cfg.window_s + 0.5:
+                fz.done = True
+                fb = fz.cfg.fallback
+                logger.warning(f"[{self.agent_id}] No fuze scans for {threat.threat_id}; {fb} fallback")
+                self._fuze_decision(eng, fuzelib.Decision("fire" if fb == "timed" else "hold", f"fallback_{fb}"))
+            return
+        self._detonate(eng, "timed")
+
+    def _detonate(self, eng, reason: str, trigger=None, chain_delay=None, by=None):
+        """Detonate on eng's threat now (once).  reason: timed | fuze | chain | fallback_timed."""
+        with self._detonate_lock:
+            cur = self.engagement
+            # Compare the job, not the dict: job updates (2 Hz) replace the dict, and a decision made
+            # on the previous one must not be lost (the fuze fires only once).
+            if self.destroyed or cur is None or cur["threat"].threat_id != eng["threat"].threat_id:
+                return
+            self._detonate_now(cur, reason, trigger, chain_delay, by)
+
+    def _detonate_now(self, eng, reason, trigger, chain_delay, by):
+        with self.state_lock:
+            truth = self.current_time
+            pose = dict(self.current_pose) if self.current_pose is not None else None
+        if truth is None or pose is None:
+            return
+        local = self.clock.read(truth)
+        now = self.sync.proto_time(local)
+        threat = eng["threat"]
+        sp = eng["slot_point"]
+        miss = float(np.linalg.norm([pose["x"] - sp["x"], pose["y"] - sp["y"], pose["z"] - sp["z"]]))
 
         # Final check: non-job drones within CLEARANCE_M (positions from the ship's job topic).  The
         # target comes first: detonate anyway, at the risk of friendly fire.
@@ -1323,7 +1436,8 @@ class DenddronAgent:
         self.pub_detonation.put(json.dumps({
             "agent_id": self.agent_id, "threat_id": threat.threat_id, "truth_time": truth,
             "local_time": local, "sync_time": self.sync.to_ship(now), "t_engage": self.sync.to_ship(eng["t_engage"]),
-            "chain": False,
+            "reason": reason, "chain": reason == "chain", "chain_delay_s": chain_delay, "chain_by": by,
+            "trigger": None if trigger is None else [round(c, 3) for c in trigger],
             "x": pose["x"], "y": pose["y"], "z": pose["z"], "intruders": intruders,
         }))
         self.pub_cmd_vel.put(json.dumps({
@@ -1343,7 +1457,7 @@ class DenddronAgent:
         # An expended drone has nothing left to say: close the radio (it cost ~1.6% of a core and
         # kept the drone in the radio mesh).  Delayed so the queued final heartbeat goes out first.
         threading.Timer(1.0, self.radio.close).start()
-        logger.info(f"[{self.agent_id}] DETONATED on {threat.threat_id} ({threat.type}) at t={now:.2f}, "
+        logger.info(f"[{self.agent_id}] DETONATED ({reason}) on {threat.threat_id} ({threat.type}) at t={now:.2f}, "
                     f"{miss:.1f} m from slot; drone expended")
 
     # ==========================================

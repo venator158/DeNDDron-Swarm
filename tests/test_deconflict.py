@@ -124,13 +124,13 @@ class TestPlanRoute(unittest.TestCase):
 
     def test_too_close_to_escape_is_reported(self):
         # Heading through the centre; getting clear sideways (11 m) takes 6.6 s, the window opens at 4.5 s.
-        b = Blast("T9", (0.0, 3.0, 20.0), blast_radius(1), t=6.0)
+        b = Blast("T9", (0.0, 3.0, 20.0), blast_radius(1), t=4.5 + BLAST_TOL_S)   # window opens at 4.5 s
         r = plan_route((0, 0, 20), (0, 60, 20), 0.0, [b], V, A, t_goal=100.0)
         self.assertEqual(r.exposed, ["T9"])
 
     def test_no_exit_when_straight_path_leaves_in_time(self):
         # Inside now, but flying away: out of the sphere (9 m, 4.2 s) before the window opens (4.5 s).
-        b = Blast("T9", (0.0, 3.0, 20.0), blast_radius(1), t=6.0)
+        b = Blast("T9", (0.0, 3.0, 20.0), blast_radius(1), t=4.5 + BLAST_TOL_S)   # window opens at 4.5 s
         r = plan_route((0, 0, 20), (0, -60, 20), 0.0, [b], V, A, t_goal=100.0)
         self.assertEqual((r.exposed, len(r.legs), r.hold_s), ([], 1, 0.0))
 

@@ -45,6 +45,13 @@ services:
     environment:
       ZENOH_ROUTER_IP: tcp/${SIM_BUS_IP:-172.20.0.2}:7447
       SIM_RTF: ${SIM_RTF:-1}
+      # Proximity fuze sensor (drone/{id}/fuze); FUZE=0 turns it off
+      FUZE: ${FUZE:-1}
+      FUZE_HZ: ${FUZE_HZ:-50}
+      FUZE_RANGE_M: ${FUZE_RANGE_M:-10}
+      FUZE_NOISE_M: ${FUZE_NOISE_M:-0.1}
+      FUZE_LATENCY_S: ${FUZE_LATENCY_S:-0}
+      FUZE_SEED: ${FUZE_SEED:-0}
       GAZEBO_RESOURCE_PATH: /usr/share/gazebo-11:/home/app/sim
       SWARM_RUNTIME_CONFIG: /home/app/config/swarm_runtime.json
       DISPLAY: ${DISPLAY:-:0}
@@ -94,6 +101,13 @@ services:
       CLOCK_LEADER_SHARE: ${CLOCK_LEADER_SHARE:-0.5}
       CLOCK_AGGREGATE: ${CLOCK_AGGREGATE:-mean}
       CLOCK_STEP_S: ${CLOCK_STEP_S:-0.05}
+      # Proximity fuze (src/agent/fuze.py); FUZE=0 = timed detonation at t_engage
+      FUZE: ${FUZE:-1}
+      FUZE_WINDOW_S: ${FUZE_WINDOW_S:-2}
+      FUZE_GATE_M: ${FUZE_GATE_M:-5}
+      FUZE_FIRE: ${FUZE_FIRE:-cpa}
+      FUZE_FALLBACK: ${FUZE_FALLBACK:-hold}
+      FUZE_RANGE_M: ${FUZE_RANGE_M:-10}
       SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
       AGENT_ID_REGISTRY: /app/config/agent_registry.json
     # exec so SIGTERM reaches python and the agent shuts down cleanly
@@ -145,6 +159,8 @@ services:
       SHIP_CLOCK_DRIFT_PPM: ${SHIP_CLOCK_DRIFT_PPM:-0}
       SHIP_CLOCK_OFFSET_S: ${SHIP_CLOCK_OFFSET_S:-0}
       SHIP_CLOCK_JITTER_S: ${SHIP_CLOCK_JITTER_S:-0}
+      FUZE: ${FUZE:-1}                        # blast reservations cover the fuze window
+      FUZE_WINDOW_S: ${FUZE_WINDOW_S:-2}
       CLOCK_SEED: ${CLOCK_SEED:-0}
       CLOCK_SYNC: ${CLOCK_SYNC:-none}
     command: >

@@ -112,6 +112,7 @@ class Track:
         self.intruded = 0               # detonations with non-job drones within CLEARANCE_M
         self.hits = set()               # detonations within kill radius
         self.missed = set()             # drones that aborted
+        self.no_detection = set()       # drones whose fuze window closed with no detection (hold fallback)
         self.announces = 0
         self.orders = []                # order (wave) ids sent for this threat
         self.last_announce = None
@@ -358,6 +359,8 @@ class Ship:
                 tr.mismatch.pop(agent, None)
                 if status == "missed":
                     tr.missed.add(agent)
+                elif status == "no_detection":
+                    tr.no_detection.add(agent)
                 if first:
                     self.event(status, threat=tr.threat_id, drone=agent)
 
@@ -569,7 +572,13 @@ class Ship:
                "ideal_t": round(ideal_t, 3), "timing_err_s": round(truth - ideal_t, 3),
                "ordered_err_s": round(truth - self.clock.to_truth(ordered), 3),
                "miss_m": round(miss, 2), "ideal_miss_m": round(ideal_miss, 2), "chain": bool(d.get("chain")),
-               "threat_speed": round(math.hypot(*tr.true_v), 2)}
+               "threat_speed": round(math.hypot(*tr.true_v), 2),
+               "reason": d.get("reason", "timed"), "chain_delay_s": d.get("chain_delay_s"), "chain_by": d.get("chain_by")}
+        if d.get("trigger"):
+            # Ground-truth label of what the fuze fired on (evaluation only): was the contact the threat?
+            trig = tuple(here[k] + float(d["trigger"][k]) for k in range(3))
+            rec["trigger_to_threat_m"] = round(math.dist(trig, tr.true_position(truth)), 2)
+            rec["trigger_is_threat"] = rec["trigger_to_threat_m"] <= 1.0
         tr.det_eval.append(rec)
         self.log_only("detonation_eval", **rec)
 
@@ -777,6 +786,10 @@ class Ship:
         with self.lock:
             evals = [e for t in self.tracks.values() for e in t.det_eval]
         timing = _stats([e["timing_err_s"] for e in evals])
+        chain_delays = _stats([e["chain_delay_s"] for e in evals if e.get("chain_delay_s") is not None], 4)
+        reasons = defaultdict(int)
+        for e in evals:
+            reasons[e.get("reason", "timed")] += 1
         ordered = _stats([e["ordered_err_s"] for e in evals])
         miss = _stats([e["miss_m"] for e in evals], 2)
         with self.lock:
@@ -817,6 +830,11 @@ class Ship:
             "det_ordered_err_s_absmax": ordered[2],
             "det_miss_m_mean": miss[0], "det_miss_m_sd": miss[1], "det_miss_m_max": miss[2],
             "chain_fires": sum(1 for e in evals if e["chain"]),
+            # Proximity fuze: what fired each detonation, false triggers (ground truth), holds.
+            "det_reasons": dict(reasons),
+            "fuze_false_triggers": sum(1 for e in evals if e.get("trigger_is_threat") is False),
+            "fuze_no_detection": sum(len(t["no_detection"]) for t in s["threats"]),
+            "chain_delay_s_mean": chain_delays[0], "chain_delay_s_max": chain_delays[2],
             # Clock sync (drone telemetry, 1 Hz per live drone): |true error| and the drones' own bounds.
             "sync_mode": self.sync_mode,
             "sync_err_s_mean": sync_err[0], "sync_err_s_sd": sync_err[1], "sync_err_s_max": sync_err[2],
@@ -843,7 +861,7 @@ class Ship:
                     "point": _xyz(tr.point),
                     "t_to_engage_s": None if now is None else round(tr.t_engage - now, 1),
                     "holders": sorted(tr.holders), "hits": sorted(tr.hits), "detonated": tr.detonated,
-                    "missed": sorted(tr.missed), "announces": tr.announces,
+                    "missed": sorted(tr.missed), "no_detection": sorted(tr.no_detection), "announces": tr.announces,
                     "pending": sorted(tr.pending), "rejected": len(tr.rejected), "maneuvers": tr.maneuvers,
                     "friendly_fire": list(tr.friendly_fire), "intruded": tr.intruded,
                     "intercept_range_m": tr.intercept_range, "legacy_range_m": tr.legacy_range,

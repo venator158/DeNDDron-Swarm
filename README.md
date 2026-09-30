@@ -1,6 +1,6 @@
 # DeNDDron Swarm
 
-**De**centralized **N**aval **D**efence **Dron**e swarm. Expendable drones hold station around a ship. The ship's radar reports incoming threats, and the operator approves each interception on a live dashboard. The drones then decide among themselves which of them engage. The assigned drones fly to the engagement point, wait there, and detonate at the allocated time.
+**De**centralized **N**aval **D**efence **Dron**e swarm. Expendable drones hold station around a ship. The ship's radar reports incoming threats, and the operator approves each interception on a live dashboard. The drones then decide among themselves which of them engage. The assigned drones fly to the engagement point, wait there, and detonate when their proximity fuze sees the threat pass (or, with the fuze off, at the allocated time).
 
 The simulation runs in Gazebo. Every drone is its own Python agent in its own container. The drones and the ship talk peer-to-peer over Zenoh, with no central router.
 
@@ -11,6 +11,7 @@ This README is the project's only documentation. Keep it up to date when behavio
 - [Operator workflow](#operator-workflow)
 - [Architecture](#architecture)
 - [Engagement protocol](#engagement-protocol)
+- [Proximity fuze](#proximity-fuze)
 - [Distributed clock](#distributed-clock)
 - [Degraded communications](#degraded-communications)
 - [Instrumentation](#instrumentation)
@@ -57,6 +58,9 @@ The first run builds the images, which takes several minutes. Add `--build` afte
 | `--clock-drift PPM`, `--clock-drift-spread PPM` | 0, 0 | drones' clock drift: fixed + uniform ±spread per drone (see [Distributed clock](#distributed-clock)) |
 | `--clock-offset S`, `--clock-offset-spread S` | 0, 0 | drones' clock offset, the same way |
 | `--clock-jitter S`, `--clock-seed N`, `--clock-sync MODE` | 0, 0, `none` | timestamp noise on sync exchanges, seed of the per-drone draw, sync mode |
+| `--fuze on\|off` | `on` | proximity fuze; `off` = timed detonation at the allocated time (see [Proximity fuze](#proximity-fuze)) |
+| `--fuze-fallback hold\|timed`, `--fuze-fire cpa\|radius`, `--fuze-window S` | `hold`, `cpa`, 2 | what happens when the window closes with no detection; firing rule; window half-width |
+| `--fuze-noise M`, `--fuze-latency S` | 0.1, 0 | fuze sensor noise (per axis) and latency |
 | `--ship-clock-drift PPM`, `--ship-clock-offset S` | 0, 0 | the ship's own oscillator |
 | `--build` | off | rebuild the images |
 
@@ -148,7 +152,7 @@ The latest acceptable point, used as a fallback, is the old rule:
 - the CPA, if the threat passes outside the defended radius (45 m);
 - otherwise, the point where the track first crosses the defended radius.
 
-The assigned drones take up slots **stacked vertically** through that point (within ±3 m) and **detonate at the allocated time**, the moment the threat arrives. Vertical stacking matters: the lidar is planar, so job-mates stacked 3 m apart don't repel each other off their slots (a horizontal ring did). The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
+The assigned drones take up slots **stacked vertically** through that point (within ±3 m). Around the allocated time, the moment the threat should arrive, their **proximity fuze** arms, and each drone detonates as the threat passes closest; its job-mates fire with it (chain fire). With `--fuze off`, they detonate at the allocated time instead. Vertical stacking matters: the lidar is planar, so job-mates stacked 3 m apart don't repel each other off their slots (a horizontal ring did). The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
 
 ## Architecture
 
@@ -173,6 +177,7 @@ The assigned drones take up slots **stacked vertically** through that point (wit
 - **Simulator** (`sim/GazeboSimulator.cpp`).
   - Integrates the drones' motion from `cmd_vel`.
   - Publishes pose at 50 Hz and a compact 32-ray planar lidar at 10 Hz.
+  - Publishes each drone's proximity-fuze scan (`drone/{id}/fuze`): unlabelled relative positions of every object within 10 m, with noise and optional latency.
   - Publishes the sim clock at 10 Hz.
   - Moves threat models along the ship's tracks, nose along the direction of flight: a fixed-wing UAV (yellow), a finned missile (orange), a longer winged cruise missile (red). Drones are quadcopters in their swarm colour. All shapes are visual-only primitives, so they add no physics load.
   - Despawns drones for good when they detonate.
@@ -185,10 +190,11 @@ The assigned drones take up slots **stacked vertically** through that point (wit
 | Topic | Link | Direction | Payload |
 |---|---|---|---|
 | `drone/{id}/sensors` | onboard | sim → drone, metrics | `{sim_time, pose, lidar?{angle_step, ranges[], hits[]}}` |
+| `drone/{id}/fuze` | onboard | sim → drone | `{sim_time, objects[[dx, dy, dz], ...]}` at `FUZE_HZ` (50): every threat, other drone and the ship's hull within `FUZE_RANGE_M` (10), relative, unlabelled, with noise |
 | `swarm/{id}/cmd_vel` | onboard | drone → sim | `{linear, angular}` |
 | `swarm/agents/join`, `swarm/agents/despawn` | onboard | drone → sim, metrics | spawn / remove this drone |
 | `sim/clock` | onboard | sim → ship | `{sim_time}` at 10 Hz |
-| `sim/detonation` | onboard | drone → ship, drones | `{agent_id, threat_id, truth_time, local_time, sync_time, t_engage, chain, x, y, z, intruders[]}` (physical event, observed by radar; drones within 8 m of another job's blast are destroyed). `truth_time` is the drone's sensor-frame sim time, for kill assessment and evaluation only. |
+| `sim/detonation` | onboard | drone → ship, drones | `{agent_id, threat_id, truth_time, local_time, sync_time, t_engage, reason, chain, chain_delay_s, chain_by, trigger, x, y, z, intruders[]}` (physical event, observed by radar; drones within 8 m of another job's blast are destroyed). `truth_time` is the drone's sensor-frame sim time, for kill assessment and evaluation only. |
 | `sim/damage` | onboard | drone → ship | `{agent_id, cause: friendly_fire, by, by_threat, job, distance, truth_time}` |
 | `ship/zones` | radio | ship → drones | `{zones[{threat_id, point, radius, t_engage}]}` at 1 Hz: every job's reserved blast |
 | `sim/threat_tracks` | onboard | ship → sim | `{threat_id, type, level, status, t0, p0, v}` for Gazebo markers, in **truth** (the only track message not in ship time) |
@@ -201,7 +207,7 @@ The assigned drones take up slots **stacked vertically** through that point (wit
 | `ship/roster` | radio | ship → drones | `{time, count, members[], relayed[], sync?{drone: [t1, t2, t3]}, beacon?}` at 1 Hz (`sync` with `master` or `consensus`, `beacon` with `consensus`): drones the ship hears, and which of them only through relays |
 | `swarm/threats` | radio | ship → drones | engagement order `{wave_id, threats[{threat_id, type, level, required, location, t_engage}]}` |
 | `swarm/bids` | radio | drone → all | `{agent_id, wave_id, costs{threat_id: ETA s}}` |
-| `swarm/awards` | radio | drone → all, ship | `{threat_id, agent_id, wave_id, cost, status: engaged\|withdrawn\|missed\|released, slot, t_engage}` |
+| `swarm/awards` | radio | drone → all, ship | `{threat_id, agent_id, wave_id, cost, status: engaged\|withdrawn\|missed\|released\|no_detection, slot, t_engage}` |
 | `ship/ack/{id}` | radio | ship → drone | `{threat_id, wave_id, accepted, job}`, plus the job state when accepted |
 | `ship/jobs/{threat_id}` | radio | ship → the job's drones | `{status, seq, point, t_engage, cpa, t_cpa, track, holders{drone: slot}, n_slots}` at 2 Hz |
 | `ship/threat_status` | radio | ship → all | `{threat_id, status}` |
@@ -228,12 +234,12 @@ The allocation is decentralized (`src/agent/auction.py`).
    - When the threat is resolved, the job says so (3 times), and drones that have not detonated become free again.
    - A confirmed drone that is not listed any more has been released, and becomes free. The ship drops a confirmed drone whose heartbeat shows no job for 2 s, which covers a lost withdrawal.
 7. **Re-announcement.** If a threat is left short, the ship re-announces it for the missing drones, at most 3 times and only while there is still time. It counts confirmed, pending and detonated drones, and drones whose latest heartbeat says they are engaged, so a lost award never sends a second drone.
-8. At the detonation time, a confirmed drone within 8 m of its slot (the kill radius) detonates:
-   - it publishes `sim/detonation`;
-   - it despawns;
-   - its container stays up but idle, so it is never respawned.
+8. **Detonation** (see [Proximity fuze](#proximity-fuze)). A confirmed drone's fuze arms at the detonation time ± 2 s and fires as the threat passes; a job-mate's detonation fires it too (chain fire). With `--fuze off`, a confirmed drone within 8 m of its slot (the kill radius) detonates at the detonation time. Either way it:
+   - publishes `sim/detonation`;
+   - despawns;
+   - stays up as an idle container, so it is never respawned.
 
-   A drone that is not in position aborts, publishes `missed`, and holds position.
+   A drone that is not within 8 m of its slot at the detonation time aborts, publishes `missed`, and holds position. With the fuze, a drone whose window closes with no detection holds and publishes `no_detection` (`--fuze-fallback timed`: detonates then instead).
 
 Decision latency, from approval until every drone the threat needs is confirmed, is about 1.4 s: the 1 s bid window, the 0.3 s confirmation window, and radio round trips.
 
@@ -242,9 +248,40 @@ Measured (8 drones, `--rtf 3`):
 - **Manoeuvres:** 3 two-drone threats, each turning once, moved their engagement points by 18, 10 and 22 m. The first two were destroyed. For the third, the point moved 22 m with only 1.7 s more time, so its drones could not reach it; they aborted and stayed alive instead of detonating 25 m away.
 - **The same manoeuvre scenario in real time** (with the Gazebo window) gave an identical result: same drones, slots, point shifts and miss distances as the `--rtf 3` run.
 
+## Proximity fuze
+
+Timed detonation depends on every drone's clock and on the drone sitting exactly on the threat's path. The proximity fuze (`src/agent/fuze.py`, pure and unit-tested, driven by `agent.py`'s `_on_fuze`) detonates when the threat actually passes. It is on by default; `--fuze off` (`FUZE=0`) restores timed detonation.
+
+- **Sensor** (simulator, `drone/{id}/fuze`). Unlabelled 3D positions, relative to the drone, of every object within `FUZE_RANGE_M` (10 m): threats, other drones, the nearest point of the ship's hull. Gaussian noise `FUZE_NOISE_M` (0.1 m per axis), rate `FUZE_HZ` (50), latency `FUZE_LATENCY_S` (0). The planar lidar is not used: it only sees at the drone's own altitude. What each contact really was is known only to the evaluation.
+- **Tracking.** Contacts are associated from scan to scan (nearest neighbour in world coordinates).
+- **Job-mates.** Objects already in range are recorded as known: the spatial queue keeps non-job drones more than 12 m away, so these are job-mates (or the ship). The record is taken while the job's track still puts the threat beyond range + 2 m, at `t_engage − (range + 2) / v`, or at arming if that is earlier. At the simulation's threat speeds (2.5–4.5 m/s), the threat is already 5–9 m away when the window opens, inside the 10 m range, and would otherwise be taken for a job-mate.
+- **Arming.** The fuze fires only during `t_engage ± FUZE_WINDOW_S` (2 s), in the drone's synchronized time.
+- **Trigger.** A *new* track that lies within `FUZE_GATE_M` (5 m) of the threat position predicted from the job's track (`ship/jobs`, so a manoeuvre updates it) fires the fuze:
+  - `FUZE_FIRE=cpa` (default): at its closest approach, if that is within the kill radius (8 m). The closest approach is when the track starts moving away, its velocity fitted to its positions over the last 0.3 s. Range alone grows only quadratically there; a range threshold fired 0.2–0.3 s late.
+  - `FUZE_FIRE=radius`: as soon as it is within the kill radius.
+  - Closing speed (Doppler) is not used to tell threats from drones: at the simulation's scaled speeds they overlap.
+- **Fallback** when the window closes with no detection (`FUZE_FALLBACK`): `hold` (default) does not detonate; the drone reports `no_detection`, holds position and becomes free. `timed` detonates at the window's close. If no scans arrive at all (sensor off), the same fallback applies half a second after the window.
+- **Chain fire** (`_on_blast`). A detonation from the same job fires this drone at once if its fuze is armed and it is within 8 m of its slot; otherwise it does not fire, and survives. The detonation topic stands in for a job-selective trigger, and its delivery delay is logged (`chain_delay_s`), not hidden.
+- **Evaluation.** Each `detonation_eval` also records the reason (`fuze`, `chain`, `timed`, `fallback_timed`), the chain delay and who fired first, and, for fuze fires, how far the contact that fired it was from the true threat (`trigger_to_threat_m`, `trigger_is_threat` within 1 m). `/api/summary` adds `det_reasons`, `chain_fires`, `chain_delay_s_*`, `fuze_false_triggers` and `fuze_no_detection`.
+
+Measured (`--rtf 3`, one run each; timing error is the geometric one, see [Distributed clock](#distributed-clock)):
+
+| Scenario | Fuze | Destroyed | What fired | Timing error (mean ± sd) | Miss mean / max | Other |
+|---|---|---|---|---|---|---|
+| 8 drones, 4 uav (level 1) | off | 4/4 | 4 timed | −1.13 ± 0.007 s | 2.84 / 2.86 m | |
+| same | **on** | 4/4 | 4 fuze | **+0.001 ± 0.088 s** | **0.52 / 1.35 m** | no false triggers, no holds |
+| 10 drones, 4 two-drone missiles | off | 4/4 | 8 timed | −0.41 ± 0.49 s | 3.96 / 4.42 m | |
+| same | **on** | 4/4 | 4 fuze + 4 chain | −0.37 ± 0.47 s | 3.80 / 6.09 m | chain delay 1.5–32 ms (mean 14 ms); fuze triggers 0.07–0.25 m from the true threat |
+| 8 drones, ±1.5 s clock offsets, no sync | off | 4/4 | 4 timed | −1.40 ± 0.53 s | 3.52 / 5.28 m | |
+| same | **on** | 3/4 | 3 fuze | +0.05 ± 0.05 s | **0.25 / 0.38 m** | 1 held (no detection) |
+
+- **The fuze removes the constant 2.8 m miss.** Drones stop about 2.8 m short of the point, so a timed blast comes 1.1 s early. The fuze fires when the threat passes, whatever the timing.
+- **Two-drone jobs**: the fuze-fired drone's miss equals its best possible (3.2–4.2 m, set by the ±3 m vertical stack). The chain-fired mate goes off with it, not at its own closest approach: one fired 1.5 s before its own and missed by 6.1 m, still within the kill radius.
+- **Clocks.** When the fuze fires, its aim no longer depends on the clock (0.25 m misses with ±1.5 s offsets and no sync). But its *window* does: one drone whose clock ran 1 s ahead closed its window at `t_engage` + 1.0 s, just before the threat arrived at + 1.1 s, and held. Because threats arrive about 1.1 s late, the effective margin on the late side is about W − 1.1 = 0.9 s of clock error, not 2 s. With any sync mode this does not arise; centring the window on the predicted arrival would widen the margin (not implemented).
+
 ## Distributed clock
 
-Detonation is timed, so every drone must agree with the ship on what time it is. The simulation keeps three notions of time strictly apart:
+Engagement times are absolute (the fuze's window, and detonation itself with the fuze off), so every drone must agree with the ship on what time it is. The simulation keeps three notions of time strictly apart:
 
 - **Truth**: simulator time (the sensor frames' `sim_time`, the ship's `sim/clock`). Only physics (control-loop dt, sensor freshness), the ship's radar world (threat motion, manoeuvres, leaks) and evaluation logging read it.
 - **Local clock**: every node has its own oscillator (`src/common/localclock.py`), `local = (1 + ρ)·truth + θ`. The drift ρ (ppm) and offset θ are fixed values plus an optional uniform spread per node, drawn reproducibly from `CLOCK_SEED` and the node ID. Timestamp jitter applies only to sync exchanges, never to protocol decisions. The ship has its own oscillator too (`SHIP_CLOCK_*`, perfect by default).
@@ -420,13 +457,13 @@ The loss rows are from the run with the award fixes below. The other rows come f
 
 A detonation destroys any drone within 8 m (friendly fire), and the drones have no seeker. The rule: at detonation, every drone not on that job must be more than **12 m** away. `src/common/deconflict.py` is shared by the ship and the drones, and is unit-tested. It enforces the rule in space and time:
 
-- **Reservations.** Each confirmed job reserves its blast: 12 m around each slot, at its detonation time ±1.5 s.
+- **Reservations.** Each confirmed job reserves its blast: 12 m around each slot, at its detonation time ±1.5 s, or ± the fuze window (2 s) with the fuze on: the drone may fire anywhere in it.
 - **Intercept choice (ship).** The ship picks the earliest reachable point on the track that is separated from every other job's slots. It also avoids points whose blast would force a hold on a drone already flying another job, so new jobs yield to committed ones. Only if no such point exists are holds accepted.
 - **Routes with holds (drones).** A drone plans a straight route with its real speed profile, starting from its current speed. If it would be inside another job's blast during that blast's window, it holds just outside, beyond its stopping distance, until the blast has passed. Bids include hold time, and the ship re-checks each drone's route before confirming it. Drones re-plan every second and whenever the zones change.
 - **Giving a job back.** A drone gives its job back only if its slot is inside another job's blast, or it really can't arrive in time. It never does so within 10 s of detonation, because it would be left inside the zone as an outsider.
 - **Idle drones** inside a zone move out of it.
 - **Final check.** At detonation, a drone counts non-job drones within 12 m. If there are any, it detonates anyway: the target comes first.
-- **Friendly fire is modelled.** A detonation of another job within 8 m destroys a drone (`sim/damage`); job-mates detonating together are exempt. `ZONE_KEEPOUT=0` turns prevention off for experiments.
+- **Friendly fire is modelled.** A detonation of another job within 8 m destroys a drone (`sim/damage`). A job's own blasts never hurt its drones, also after a drone has aborted or given the job back (`_last_job`; this replaced a special case for aborts). `ZONE_KEEPOUT=0` turns prevention off for experiments.
 
 Results, 50 drones, 25 threats, real time, APF planner:
 
@@ -542,6 +579,10 @@ Where each implemented feature lives.
 | | drone: protocol time, inbound conversion, exchange stamps, relay holding time, clock beacons, clock telemetry and evaluation | `agent.py` (`_proto_now`, `_inbound_job`, `_stamp`, `_on_roster`, `_relay_unheard_peers`, `_send_clock_beacon`, `_on_clock_beacon`, `_clock_report`) |
 | | ship: `sent` stamps, exchange stamps and leader beacon in heartbeats and roster, true sync error | `ship.py` (`_stamped`, `_on_heartbeat`, `run`, `_on_clock_eval`) |
 | **Metrics** | positions, distance, proximity collisions (spatial hash) | `src/metrics/main.py` |
+| **Fuze** | fuze sensor: unlabelled contacts with noise and latency | `GazeboSimulator.cpp` (`configure_fuze`, `publish_fuze`, `flush_fuze`) |
+| | fuze logic: tracking, mate record, arming, gate, firing rules, fallback | `src/agent/fuze.py` |
+| | drone: fuze scans, detonation (once), chain fire, fallback | `agent.py` (`_on_fuze`, `_fuze_decision`, `_detonate`, `_on_mate_blast`, `_check_engagement`) |
+| | ship: reason, trigger label, chain delay, no-detection count | `ship.py` (`_evaluate_detonation`, `_on_award`, `summary`) |
 | **Tests / tools** | unit tests and validation scripts | `tests/` (see [Testing](#testing)) |
 | | degraded-comms probes, radio cut, chaos, stand-in operator, radio degradation, sweep | `tools/comms/` |
 
@@ -583,6 +624,8 @@ Where each implemented feature lives.
 
 Simulation speed (env): `SIM_RTF` (1), set by `--rtf`.
 
+Proximity fuze (env): `FUZE` (1; 0 = timed detonation), `FUZE_WINDOW_S` (2), `FUZE_GATE_M` (5), `FUZE_FIRE` (`cpa`), `FUZE_FALLBACK` (`hold`), and for the simulator's sensor `FUZE_RANGE_M` (10, drones too), `FUZE_HZ` (50), `FUZE_NOISE_M` (0.1), `FUZE_LATENCY_S` (0), `FUZE_SEED` (0). See [Proximity fuze](#proximity-fuze).
+
 Clocks (env, all default 0 / `none` = perfect shared clock): drones `CLOCK_DRIFT_PPM`, `CLOCK_DRIFT_SPREAD_PPM`, `CLOCK_OFFSET_S`, `CLOCK_OFFSET_SPREAD_S`, `CLOCK_JITTER_S`; ship `SHIP_CLOCK_DRIFT_PPM`, `SHIP_CLOCK_OFFSET_S`, `SHIP_CLOCK_JITTER_S`; both `CLOCK_SEED`, `CLOCK_SYNC`. Consensus (drones): `CLOCK_BEACON_HZ` (0.5, `--clock-beacon-hz`), `CLOCK_GAIN` (0.5), `CLOCK_LEADER_SHARE` (0.5), `CLOCK_STEP_S` (0.05), `CLOCK_AGGREGATE` (`mean`). See [Distributed clock](#distributed-clock).
 
 Radio tuning (env): `RADIO_QOS` (`default`; `tuned` = per-topic priorities, see `QOS_PROFILES` in `links.py`), `RADIO_PROTO` (`udp`), `RADIO_LEASE_MS` (2000), `RADIO_OPEN_TIMEOUT_MS` (1000), `RADIO_SUBNET` (`172.21.0.0/16`), `RADIO_ZENOH_CONFIG` (JSON object of extra Zenoh settings, for experiments).
@@ -602,6 +645,7 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_threats.py` | CPA/TCPA, engagement point (CPA vs. defended-radius crossing), slots, ETA, TTI, serialization |
 | `test_threat_queue.py` | min-heap ordering by TCPA, lazy removal |
 | `test_localclock.py` | perfect default, drift/offset model, jitter only in exchange stamps, reproducible per-node draw |
+| `test_fuze.py` | proximity fuze: fires at closest approach (three threat speeds), threat in range before arming not taken for a mate, mates never trigger, hold and timed fallbacks, closest approach beyond the kill radius, contacts off the predicted track ignored, radius mode, arming window, stale track, chain readiness, config |
 | `test_ship_track.py` | radar track: truth vs ship-time view, true closest approach; ship time attributes set at start (needs zenoh installed) |
 | `test_timesync.py` | exchange arithmetic and asymmetry bias; ship-master filter: convergence under drift and offset, holdover on the rate, jitter and delay spikes, bound covers a constant asymmetry, congested start, corrupt exchange (negative round trip) discarded, re-acquisition after a wrong lock; time-to-go anchoring |
 | `test_consensus.py` | ship-anchored consensus on a simulated network: converges to ship time with ±500 ppm / ±3 s, learns rates, works through a chain of peers, keeps agreeing and holds ship time with the ship lost (bound grows with time only), congested start then ship loss, fast start by stepping, late unsynced joiner, echoes measure link delay, anchors count hops, bad ship exchanges filtered, pluggable aggregator |
@@ -629,6 +673,10 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 ```
 
 ## Known limitations
+- **Chain-fire delay.** A real mate-to-mate trigger such as a barometric shock travels at about the speed of sound: ~17 ms across a 6 m stack, which lets a fast threat escape. A barometric trigger would also respond to unrelated blasts. The simulation uses the detonation topic as an idealized, job-selective trigger (measured delivery 1.5–32 ms at `--rtf 3`).
+- **Closing-speed discrimination.** Closing speed would separate threats from drones only at real speeds, not at the simulation's scaled ones, so the fuze does not use it.
+- **Fuze window and clocks.** The window is centred on `t_engage`, but threats arrive ~1.1 s late (drones stop short), so without clock sync a clock ~1 s ahead closes the window too early (see [Proximity fuze](#proximity-fuze)).
+- **Late job-mates.** A job-mate that enters fuze range after the mates were recorded (still flying in) is a new track; if it passes within the gate of the predicted threat position it could trigger the fuze. The evaluation labels every trigger; none was false in the runs so far.
 - **Best-effort radio.** The radio runs over UDP, so messages can be lost under packet loss; see [Degraded communications](#degraded-communications).
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
 - **Clock synchronization.** `ttg` and `master` need the ship's messages; a drone that stops hearing the ship keeps its last estimate (with `master`, its last offset and rate). `consensus` keeps drones agreeing without the ship, but:
