@@ -160,6 +160,28 @@ class TestConsensus(unittest.TestCase):
         for d in net.ids:
             self.assertLess(abs(net.sync[d].alpha * net.clocks[d].rate - 1.0), 1e-4)
 
+    def test_bad_ship_exchanges_are_filtered(self):
+        # Seen at 100 drones: drones 190 ms off while claiming a 5 ms bound, after bad exchanges.
+        # A negative round trip (wrong stamps) is discarded; a lopsided, delayed one loses to the
+        # lowest round trip of the last 10 s.
+        drone, ship = LocalClock(drift_ppm=200, offset_s=2.0), LocalClock()
+        c = Consensus(node_id="d0")
+        errs = []
+        for k in range(60):
+            t = 1.0 + k
+            up, down = 0.005, 0.005
+            if k in (30, 31):
+                up = 0.4                                   # lopsided queueing spike
+            t1, t2 = drone.read(t - 0.5), ship.read(t - 0.5 + up)
+            t3, t4 = ship.read(t), drone.read(t + down)
+            if k == 40:
+                t4 -= 0.1                                  # corrupt stamp: negative round trip
+            c.on_leader(t3, t4, (t1, t2))
+            c.step(drone.read(t + 0.2))
+            errs.append(c.proto_time(drone.read(t + 0.3)) - ship.read(t + 0.3))
+        self.assertLess(max(abs(e) for e in errs[10:]), 0.01)
+        self.assertEqual(c.invalid, 1)
+
     def test_anchor_hops_through_peers(self):
         chain = {("ship", "d0"), ("d0", "d1"), ("d1", "d2"), ("d2", "d3")}
         net = Net(n=4, links=lambda t: chain).run(60.0)

@@ -315,6 +315,31 @@ Measured (8 drones, 4 level-1 threats, `--rtf 3`; skewed = ±500 ppm drift and �
 - **Startup.** The first exchanges come in a congested start, when round trips are long. A version that weighed samples only against the recent minimum round trip trusted lopsided ones and lost the rate for a minute (errors to 129 ms). Samples are now weighed by their absolute round trip and gated once the filter has settled; `test_timesync.py` covers this case.
 - **Radio cost of `master`**: the same number of messages. Heartbeat bytes at the ship rose from 1445 to 1636 B/s for 8 drones, about 24 B/s per drone, and each roster grows by about 45 B per drone. With a sync mode, telemetry carries a few tens of bytes more per drone per second (`clock`).
 
+### Stress test: 50 and 100 drones
+
+Setup: `scaling_sweep.py` at 1× (N drones, N/2 threats), skewed = ±500 ppm and ±3 s per drone. Results are in `results/stress_*` (git-ignored); sync error is each drone's true error after its first 20 s.
+
+| Drones, sync | Destroyed | Error vs ordered time (mean) | Miss mean / max | Sync error p50 / p95 / max | Bound covers | Sim speed | Host CPU | Msgs/s received per drone |
+|---|---|---|---|---|---|---|---|---|
+| 50, `none` (perfect clocks) | 25/25 | 12 ms | 3.71 / 6.89 m | – | – | 0.98× | 2.4 cores | 3.8 |
+| 50, `ttg` | 25/25 | 14 ms | 3.65 / 5.42 m | 4.9 / 14.5 / 236 ms | – | 0.95× | 2.2 | 3.6 |
+| 50, `master` (before fix) | 25/25 | 35 ms | 3.66 / 6.96 m | 2.6 / 230 / 425 ms | 27% | 0.99× | 2.0 | 4.1 |
+| 50, `master` (fixed) | 25/25 | 11 ms | 3.69 m | 2.2 / 4.5 / 27 ms | 36% | 0.97× | 2.5 | 4.2 |
+| 50, `consensus` (fixed) | 25/25 | 14 ms | 3.74 m | 2.2 / 6.2 / 22 ms | 99% | 0.98× | 2.5 | 24.5 |
+| 100, `none` (perfect clocks) | 50/50 | 17 ms | 3.81 / 7.65 m | – | – | 0.65× | 4.3 | 8.5 |
+| 100, `consensus` (before fix) | 50/50 | 23 ms | 3.87 / 6.07 m | 7.8 / 23.5 / 192 ms | 91% | 0.55× | 4.6 | 45.5 |
+| 100, `consensus` (fixed) | 31 of 41 detected (run cut short, see below) | 29 ms | 3.77 m | 5.6 / 20.2 / 51 ms | 89% | 0.25× | 5.3 | 50.7 |
+
+No run had friendly fire, leaks or missed slots.
+
+- **The bug the stress test found.** At 50 drones, each process's timestamps (truth extrapolated from onboard messages that arrive tens of ms late) occasionally gave an exchange an impossible, negative round trip. Both filters clamped it to 0, so it looked like the best exchange of all.
+  - In `master` a single one threw the rate 5,000 ppm off, and the outlier gate then rejected every good sample for the rest of the run: 5 of 50 drones drifted to 425–720 ms (125 of 133 samples rejected). The clamped zeros also made the bound too tight.
+  - Fixes: exchanges with a round trip below −5 ms are discarded (about 5% of them at 50 drones); after 5 gate rejections in a row the `master` filter re-acquires; consensus uses, per source, the exchange with the lowest round trip of the last 10 s (NTP's clock filter) instead of the newest.
+  - `test_timesync.py` and `test_consensus.py` reproduce all three cases, and they fail without the fix.
+- **The bound in `master`** still covers only about a third of reports at 50 drones. The filter's statistics give 1–2 ms, but the simulation's timestamps carry 2–4 ms of error at this load that no exchange can see. An explicit timestamp-uncertainty term, as a real node would take from its datasheet, is the proposed fix; it is not implemented yet.
+- **100 drones is the limit of this host** (6 cores). The same configuration ran at 0.55× once and 0.25× the next time (load average 63). The protocol clock follows the simulator, so results stay valid, but the fixed 100-drone consensus run ran out of wall time at sim t = 136 s with 10 threats still in flight. It lost none: 31 of the 39 approved were destroyed, and nothing failed or leaked.
+- **Consensus radio load** reached 45–51 messages per second per drone at 100 drones, 6× the load without it. Each link is also measured only about every 2·(N − 1) s (one echo per beacon, rotating), so at 100 drones a peer's two-way offset can be minutes old. Median error rose from 2.2 ms at 50 drones to 5.6–7.8 ms at 100. Beaconing to a subset of neighbours would bound both; it is not implemented.
+
 **What each drone reports.** With a sync mode or an imperfect clock, radio telemetry carries what a real drone could report: `clock{mode, offset, bound}` (the estimated offset ship − local and the drone's own error bound; with `consensus` also `hops` and `ship`). For evaluation only, the drone also publishes a (truth, estimate) pair taken at the same instant on the onboard bus (`sim/clock_eval`, 1 Hz), so the error is measured during radio cuts too. The ship turns that pair into the true error (the drone cannot know it), shows offset, bound and true error in the dashboard's instrumentation table, logs a `clock_eval` record per report, and adds `sync_err_s_*`, `sync_bound_s_mean` and `sync_bound_coverage` (how often the true error was within the bound) to `/api/summary`.
 
 **Kill assessment uses truth.** The radar observes a blast physically, whatever any clock says: a detonation carries the drone's sensor-frame sim time (`truth_time`) along with its local and synchronized stamps.
@@ -578,8 +603,8 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_threat_queue.py` | min-heap ordering by TCPA, lazy removal |
 | `test_localclock.py` | perfect default, drift/offset model, jitter only in exchange stamps, reproducible per-node draw |
 | `test_ship_track.py` | radar track: truth vs ship-time view, true closest approach; ship time attributes set at start (needs zenoh installed) |
-| `test_timesync.py` | exchange arithmetic and asymmetry bias; ship-master filter: convergence under drift and offset, holdover on the rate, jitter and delay spikes, bound covers a constant asymmetry, congested start; time-to-go anchoring |
-| `test_consensus.py` | ship-anchored consensus on a simulated network: converges to ship time with ±500 ppm / ±3 s, learns rates, works through a chain of peers, keeps agreeing and holds ship time with the ship lost (bound grows with time only), congested start then ship loss, fast start by stepping, late unsynced joiner, echoes measure link delay, anchors count hops, pluggable aggregator |
+| `test_timesync.py` | exchange arithmetic and asymmetry bias; ship-master filter: convergence under drift and offset, holdover on the rate, jitter and delay spikes, bound covers a constant asymmetry, congested start, corrupt exchange (negative round trip) discarded, re-acquisition after a wrong lock; time-to-go anchoring |
+| `test_consensus.py` | ship-anchored consensus on a simulated network: converges to ship time with ±500 ppm / ±3 s, learns rates, works through a chain of peers, keeps agreeing and holds ship time with the ship lost (bound grows with time only), congested start then ship loss, fast start by stepping, late unsynced joiner, echoes measure link delay, anchors count hops, bad ship exchanges filtered, pluggable aggregator |
 | `test_voxel_map_batch.py` | batched ray tracing, occupied index vs. brute force, incremental expiry, clock reset |
 | `test_apf.py`, `test_orca_vertical_filter.py` | planner force bounds, ORCA vertical envelope |
 | `test_timing_manager.py`, `test_time_handling.py` | timing states |
@@ -609,7 +634,10 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 - **Clock synchronization.** `ttg` and `master` need the ship's messages; a drone that stops hearing the ship keeps its last estimate (with `master`, its last offset and rate). `consensus` keeps drones agreeing without the ship, but:
   - a path asymmetry (one direction slower than the other) is an error of half of it that no exchange can observe, and without the ship to anchor them drones then drift together by about gain × that per beacon;
   - beacons go from every drone to every drone, so their radio load grows with the square of the swarm;
-  - the aggregation trusts every neighbour: a single drone lying about its clock pulls everyone (a trimmed-mean or MSR aggregator is the planned fix).
+  - the aggregation trusts every neighbour: a single drone lying about its clock pulls everyone (a trimmed-mean or MSR aggregator is the planned fix);
+  - every drone beacons to every drone and measures each link only every ~2·(N − 1) s: at 100 drones, ~50 beacons/s per drone and offsets minutes old (see [Stress test](#stress-test-50-and-100-drones)).
+- **Self-reported clock bounds** don't include timestamping uncertainty, so with `master` they cover only a third of reports at 50 drones.
+- **100 drones exceeds a 6-core host** at 1×: the simulator runs at 0.25–0.65× real time.
 - **Idealized threats.** They fly straight lines at constant speed, apart from at most one optional turn, and a detonation within the kill radius always kills (no kill probability).
 - **Re-planning after a manoeuvre uses the job's own drones only.** The ship re-picks the intercept point for them (falling back to the legacy point if none fits). It doesn't bring in closer free drones.
 - **Greedy assignment.** Orders are assigned per order, highest level first, not globally optimized. A drone waiting on one order's result skips any other order that arrives before that result.

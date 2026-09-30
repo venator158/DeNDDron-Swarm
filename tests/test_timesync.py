@@ -100,6 +100,37 @@ class TestShipMaster(unittest.TestCase):
         self.assertLess(abs(true_error(sync, drone, ship, t)), 0.005)
         self.assertLess(abs(true_error(sync, drone, ship, t + 30.0)), 0.01)   # rate still right
 
+    def test_corrupt_exchange_does_not_lock_the_filter(self):
+        # Seen live at 50 drones: one exchange with an impossible, negative round trip (-69 ms, from
+        # timestamp error) was clamped to 0, trusted fully, threw the rate 5000 ppm off, and the gate
+        # then rejected every good sample for the rest of the run (errors grew to 700 ms).
+        drone, ship = LocalClock(drift_ppm=137, offset_s=-0.72), LocalClock()
+        sync = ShipMaster()
+        rng = random.Random(4)
+        for k in range(120):
+            t = 1.0 + k
+            d_up, d_down = rng.uniform(0.001, 0.01), rng.uniform(0.001, 0.01)
+            t1, t2 = drone.read(t), ship.read(t + d_up)
+            t3, t4 = ship.read(t + d_up + 0.5), drone.read(t + d_up + 0.5 + d_down)
+            if k == 5:
+                t4 -= 0.08                   # corrupt stamp: round trip about -70 ms
+            sync.on_exchange(t1, t2, t3, t4)
+        t = 121.0
+        self.assertLess(abs(true_error(sync, drone, ship, t)), 0.005)
+        self.assertGreaterEqual(sync.filter.invalid, 1)
+
+    def test_filter_reacquires_after_a_wrong_lock(self):
+        # Whatever put it there, a filter sure of a wrong offset and rate must not stay locked out.
+        drone, ship = LocalClock(drift_ppm=100, offset_s=1.0), LocalClock()
+        sync, t = run_master(drone, ship, seconds=30.0)
+        sync.filter.x = [sync.filter.x[0] + 0.2, sync.filter.x[1] + 3e-3]    # 200 ms, 3000 ppm off
+        for k in range(40):
+            tt = t + k
+            t1, t2 = drone.read(tt), ship.read(tt + 0.005)
+            t3, t4 = ship.read(tt + 0.505), drone.read(tt + 0.51)
+            sync.on_exchange(t1, t2, t3, t4)
+        self.assertLess(abs(true_error(sync, drone, ship, t + 40)), 0.005)
+
     def test_repeated_exchange_ignored(self):
         sync = ShipMaster()
         self.assertTrue(sync.on_exchange(1.0, 1.1, 1.5, 1.6))

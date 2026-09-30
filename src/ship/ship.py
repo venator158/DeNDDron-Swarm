@@ -316,7 +316,9 @@ class Ship:
             d["clock_bound_ms"] = None if bound is None else round(bound * 1000.0, 2)
             self.log_only("clock_eval", drone=c["agent_id"], mode=c.get("mode"), err_s=round(err, 6),
                           bound_s=bound, offset_s=c.get("offset"), truth=c["truth"], hops=c.get("hops"),
-                          ship=c.get("ship"))
+                          ship=c.get("ship"), **{k: c[k] for k in ("exch", "rtt_min", "samples", "rejected",
+                                                                   "invalid", "relocks", "steps", "radio_q")
+                                                          if k in c})
             if c["agent_id"] not in self.expended:
                 self.sync_evals.append((c["agent_id"], abs(err), bound))
 

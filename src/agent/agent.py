@@ -1409,7 +1409,8 @@ class DenddronAgent:
                     clock = self._clock_report()
                     if clock:
                         snap["clock"] = {k: v for k, v in clock.items() if k not in ("truth", "ship_est")}
-                        self.pub_clock_eval.put(json.dumps({"agent_id": self.agent_id, **clock}))
+                        self.pub_clock_eval.put(json.dumps({"agent_id": self.agent_id, **clock,
+                                                            **self._clock_diagnostics()}))
                     self._radio_put(self.pub_telemetry, "swarm/telemetry", snap)
                 self._send_clock_beacon()
                 link = self._link_up()
@@ -1467,6 +1468,18 @@ class DenddronAgent:
             rep["hops"] = None if self.sync.anchor is None else self.sync.anchor[1]
             rep["ship"] = self.sync.hears_leader(local)
         return rep
+
+    def _clock_diagnostics(self) -> dict:
+        """Evaluation only (sim/clock_eval): the last exchange's raw stamps and the filter's state,
+        and this drone's radio send backlog, to tell clock error from queueing."""
+        out = {"radio_q": self.radio._out.qsize()}
+        if self.sync.mode == "master":
+            f = self.sync.filter
+            out.update(exch=self.sync.last_exchange, rtt_min=min(f.delays) if f.delays else None,
+                       samples=f.samples, rejected=f.rejected, invalid=f.invalid, relocks=f.relocks)
+        elif self.sync.mode == "consensus":
+            out.update(invalid=self.sync.invalid, steps=self.sync.steps)
+        return out
 
     def _fresh_peers(self):
         now = simclock.now()

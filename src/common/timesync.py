@@ -98,15 +98,25 @@ class OffsetRateFilter:
     Judging a sample only against the recent minimum round trip is not enough: at startup every
     round trip was long, and lopsided ones with the same total were trusted fully and corrupted the
     rate for a minute.  Once settled (`settle` samples), a sample more than `gate` standard
-    deviations from the prediction is rejected as an outlier.  An asymmetry common to all samples
-    cannot be observed; the self-reported error bound includes half the best round trip for it.
+    deviations from the prediction is rejected as an outlier; after `relock` rejections in a row
+    the filter re-acquires from scratch (a wrong lock otherwise rejects every good sample forever:
+    seen at 50 drones, errors grew to 700 ms).  An exchange whose round trip is clearly negative
+    (below -neg_tol_s) is impossible, so its stamps are wrong: it is discarded, not clamped to 0,
+    which made it the most trusted sample of all.  An asymmetry common to all samples cannot be
+    observed; the self-reported error bound includes half the best round trip for it.
     """
 
     def __init__(self, floor_s: float = 1e-3, q_offset: float = 1e-8, q_rate: float = 1e-12,
-                 p0_rate: float = 1e-6, window: int = 32, gate: float = 5.0, settle: int = 8):
+                 p0_rate: float = 1e-6, window: int = 32, gate: float = 5.0, settle: int = 8,
+                 relock: int = 5, neg_tol_s: float = 0.005):
         self.floor_s, self.q_offset, self.q_rate, self.p0_rate = floor_s, q_offset, q_rate, p0_rate
         self.window, self.gate, self.settle = window, gate, settle
-        self.rejected = 0
+        self.relock, self.neg_tol_s = relock, neg_tol_s
+        self.rejected = 0            # gate rejections, all time
+        self.invalid = 0             # impossible (negative round trip) exchanges discarded
+        self.relocks = 0
+        self._run = 0                # gate rejections in a row
+        self._since_lock = 0         # samples since the last (re)acquisition
         self.x = None                # [offset at t_ref, rate]
         self.P = None                # 2x2 covariance
         self.t_ref = None
@@ -126,9 +136,13 @@ class OffsetRateFilter:
         self.t_ref = t
 
     def update(self, t_local: float, offset: float, delay: float) -> None:
+        if delay < -self.neg_tol_s:
+            self.invalid += 1
+            return
         delay = max(0.0, delay)
         self.delays = (self.delays + [delay])[-self.window:]
         self.samples += 1
+        self._since_lock += 1
         if self.x is None:
             self.x, self.t_ref = [offset, 0.0], t_local
             r0 = self.floor_s ** 2 + (delay / 2.0) ** 2
@@ -139,9 +153,18 @@ class OffsetRateFilter:
         (p00, p01), (p10, p11) = self.P
         s = p00 + r
         innov = offset - self.x[0]
-        if self.samples > self.settle and innov * innov > self.gate * self.gate * s:
+        if self._since_lock > self.settle and innov * innov > self.gate * self.gate * s:
             self.rejected += 1
+            self._run += 1
+            if self._run >= self.relock:
+                # Consistently far from what we believe: our lock is wrong, not the samples.
+                self.relocks += 1
+                self.x, self.P, self.t_ref, self._run, self._since_lock = None, None, None, 0, 0
+                self.delays = []
+                self.samples -= 1
+                self.update(t_local, offset, delay)
             return
+        self._run = 0
         k0, k1 = p00 / s, p10 / s
         self.x = [self.x[0] + k0 * innov, self.x[1] + k1 * innov]
         self.P = [[(1 - k0) * p00, (1 - k0) * p01], [p10 - k1 * p00, p11 - k1 * p01]]
@@ -171,12 +194,14 @@ class ShipMaster(NoSync):
     def __init__(self, **filter_kw):
         self.filter = OffsetRateFilter(**filter_kw)
         self._last_t1 = None
+        self.last_exchange = None            # (t1, t2, t3, t4), for evaluation logging
 
     def on_exchange(self, t1: float, t2: float, t3: float, t4: float) -> bool:
         """Feed one exchange; a repeat of the last one (no newer heartbeat reached the ship) is ignored."""
         if t1 == self._last_t1:
             return False
         self._last_t1 = t1
+        self.last_exchange = (t1, t2, t3, t4)
         offset, delay = exchange(t1, t2, t3, t4)
         self.filter.update(t4, offset, delay)
         return True
@@ -214,12 +239,22 @@ class _Source:
         self.anchor = None                   # (ship time its chain last touched the ship, hops)
         self.last = None                     # (its send stamp, our receive stamp): echoed back to it
         self.rtts = deque(maxlen=16)         # (our local time, round trip) through echoes / exchanges
-        self.hw = None                       # (our local t4, its local - ours) from the latest two-way exchange
+        self.hw_hist = deque(maxlen=12)      # (our local t4, its local - ours, round trip) per two-way exchange
         self.echoed_at = -math.inf
 
     @property
     def last_rx(self) -> float:
         return self.last[1]
+
+    def hw(self, filter_age_s: float = 10.0):
+        """(t4, offset) of the exchange to trust: the lowest round trip among the last filter_age_s
+        (NTP's clock filter; a lopsided, delayed exchange has a long round trip), else the newest."""
+        if not self.hw_hist:
+            return None
+        newest = self.hw_hist[-1][0]
+        recent = [h for h in self.hw_hist if newest - h[0] <= filter_age_s] or [self.hw_hist[-1]]
+        t4, theta, _ = min(recent, key=lambda h: h[2])
+        return t4, theta
 
     def delay(self, max_age_s: float = 20.0, newest_n: int = 5) -> float:
         """One-way delay estimate: half the median of the newest_n round trips of the last max_age_s
@@ -266,8 +301,9 @@ class Consensus(NoSync):
     off the ship.  So offsets come from two-way exchanges: every beacon echoes the last beacon
     heard from one neighbour (rotating), and the neighbour's next beacon completes a four-timestamp
     exchange whose offset ((t2 - t1) + (t3 - t4)) / 2 needs no delay estimate (exact for symmetric
-    delays; an asymmetry is still an error of half of it).  Between exchanges the fitted rate
-    carries it forward.  The ship link uses the heartbeat/roster exchange (as in master mode).  A
+    delays; an asymmetry is still an error of half of it).  Per source, the exchange with the lowest
+    round trip of the last 10 s is used (NTP's clock filter), and one with a clearly negative round
+    trip is discarded as wrong stamps.  Between exchanges the fitted rate carries it forward.  The ship link uses the heartbeat/roster exchange (as in master mode).  A
     source with no exchange yet is used, one-way, only if no exchanged source is fresh.
 
     Error bound (heuristic, self-reported).  Every node carries an anchor: the ship time at which
@@ -281,13 +317,15 @@ class Consensus(NoSync):
     def __init__(self, node_id: str = "", gain: float = 0.5, leader_share: float = 0.5,
                  stale_s: float = 6.0, leader_stale_s: float = 3.0, window: int = 30,
                  min_span_s: float = 10.0, delay_bound_s: float = 0.005, rate_unc: float = 5e-5,
-                 step_s: float = 0.05, max_rate_se: float = 1e-4, aggregate="mean"):
+                 step_s: float = 0.05, max_rate_se: float = 1e-4, neg_tol_s: float = 0.005,
+                 aggregate="mean"):
         self.node_id = node_id
         self.gain, self.leader_share = gain, leader_share
         self.stale_s, self.leader_stale_s = stale_s, leader_stale_s
         self.window, self.min_span_s = window, min_span_s
         self.delay_bound_s, self.rate_unc, self.step_s = delay_bound_s, rate_unc, step_s
-        self.max_rate_se = max_rate_se
+        self.max_rate_se, self.neg_tol_s = max_rate_se, neg_tol_s
+        self.invalid = 0                     # impossible (negative round trip) exchanges discarded
         self.steps = 0
         self.aggregate = AGGREGATORS[aggregate] if isinstance(aggregate, str) else aggregate
         self.alpha, self.o = 1.0, 0.0
@@ -346,12 +384,21 @@ class Consensus(NoSync):
             # to our clock with the fitted rate.
             t1, t2, t3, t4 = float(echo[1]), float(echo[2]), float(tau), float(local_rx)
             eta = self._eta(s) or 1.0
-            s.rtts.append((t4, max(0.0, (t4 - t1) - (t3 - t2) / eta)))
-            s.hw = (t4, exchange(t1, t2, t3, t4)[0])
+            self._exchange(s, t4, exchange(t1, t2, t3, t4)[0], (t4 - t1) - (t3 - t2) / eta)
         s.last = (float(tau), float(local_rx))
         s.samples.append((float(local_rx), float(tau)))
         s.alpha, s.o = float(alpha), float(o)
         s.anchor = None if anchor is None else (float(anchor[0]), int(anchor[1]) + 1)
+
+    def _exchange(self, s: _Source, t4: float, offset: float, rtt: float) -> None:
+        """Record one two-way exchange.  A clearly negative round trip means wrong stamps: discard it
+        (clamped to 0 it would look like the best exchange of all)."""
+        if rtt < -self.neg_tol_s:
+            self.invalid += 1
+            return
+        rtt = max(0.0, rtt)
+        s.rtts.append((t4, rtt))
+        s.hw_hist.append((t4, offset, rtt))
 
     def on_leader(self, t3: float, t4: float, exchange_=None) -> None:
         """The ship's roster: sent at t3 (ship clock), received at t4 (ours).  exchange_ = (t1, t2)
@@ -360,8 +407,7 @@ class Consensus(NoSync):
         if exchange_ is not None:
             t1, t2 = exchange_
             offset, rtt = exchange(t1, t2, t3, t4)
-            s.rtts.append((float(t4), max(0.0, rtt)))
-            s.hw = (float(t4), offset)
+            self._exchange(s, float(t4), offset, rtt)
         self.on_beacon("ship", t3, 1.0, 0.0, (t3, 0), t4, leader=True)
 
     @staticmethod
@@ -405,8 +451,9 @@ class Consensus(NoSync):
         """(its virtual time now, in our local time; its virtual rate per our local second, or None)."""
         eta = self._eta(s)
         k = eta if eta is not None else 1.0
-        if s.hw is not None:
-            t4, theta = s.hw                       # its clock read t4 + theta when ours read t4
+        hw = s.hw()
+        if hw is not None:
+            t4, theta = hw                         # its clock read t4 + theta when ours read t4
             tau_now = t4 + theta + k * (local - t4)
         else:
             rx, tau = s.samples[-1]                # one-way, until the first exchange
@@ -426,8 +473,8 @@ class Consensus(NoSync):
         if not fresh:
             return
         own_v = self.proto_time(local)
-        if any(s.hw is not None for s in fresh):
-            fresh = [s for s in fresh if s.hw is not None]    # two-way estimates only, once there are any
+        if any(s.hw_hist for s in fresh):
+            fresh = [s for s in fresh if s.hw_hist]           # two-way estimates only, once there are any
         est = [(s, *self._estimate(s, local)) for s in fresh]
         anchored = [e for e in est if e[0].anchor is not None]
         used = anchored or est                              # sources with a chain to the ship outrank the rest
