@@ -131,6 +131,18 @@ python3 tools/comms/degradation_sweep.py --rtf 3 --drones 8 --threats 4 --profil
 
 `scaling_sweep.py` takes the same `--maneuver-p` and `--env`, with swarm sizes as `--sizes N:RTF ...` and N/2 threats per size.
 
+**50 drones, watched in Gazebo.** The full-size unattended test: 50 drones, 25 threats detected every 4.8 s (the per-drone load of the scaling runs), half of them turning once, at real time (50 drones plus the Gazebo window is about what a 6-core host sustains at 1×). Raise the [ARP limit](#quick-start) first.
+
+```bash
+xhost +local:docker                                   # let the container open a window
+python3 tools/comms/degradation_sweep.py --rtf 1 --drones 50 --threats 25 --interval 4.8 --maneuver-p 0.5 \
+    --timeout 480 --profiles default --conditions baseline= --out results/n50_gui &
+# once the simulator container is up (about 10 s after launch):
+docker exec -d gazebo_simulator gzclient              # the 3D view; it closes when the sweep tears the swarm down
+```
+
+The dashboard at `http://localhost:8080` shows the same run live; results land in `results/n50_gui/`.
+
 For a single interactive run with the stand-in operator instead of a person: start the swarm, then the bot.
 
 ```bash
