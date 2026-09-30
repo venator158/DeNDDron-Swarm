@@ -63,6 +63,34 @@ while [[ $# -gt 0 ]]; do
       export SIM_RTF="$2"
       shift 2
       ;;
+    --clock-drift|--clock-drift-spread|--clock-offset|--clock-offset-spread|--clock-jitter|--clock-seed|--clock-sync|--clock-beacon-hz|--ship-clock-drift|--ship-clock-offset)
+      # Distributed clock (README "Distributed clock"): drift in ppm, offsets/jitter in s, sync mode.
+      case "$1" in
+        --clock-drift) export CLOCK_DRIFT_PPM="$2" ;;
+        --clock-drift-spread) export CLOCK_DRIFT_SPREAD_PPM="$2" ;;
+        --clock-offset) export CLOCK_OFFSET_S="$2" ;;
+        --clock-offset-spread) export CLOCK_OFFSET_SPREAD_S="$2" ;;
+        --clock-jitter) export CLOCK_JITTER_S="$2" ;;
+        --clock-seed) export CLOCK_SEED="$2" ;;
+        --clock-sync) export CLOCK_SYNC="$2" ;;
+        --clock-beacon-hz) export CLOCK_BEACON_HZ="$2" ;;
+        --ship-clock-drift) export SHIP_CLOCK_DRIFT_PPM="$2" ;;
+        --ship-clock-offset) export SHIP_CLOCK_OFFSET_S="$2" ;;
+      esac
+      shift 2
+      ;;
+    --fuze|--fuze-fallback|--fuze-fire|--fuze-window|--fuze-noise|--fuze-latency)
+      # Proximity fuze (README "Proximity fuze"): on|off, hold|timed, cpa|radius, window s, noise m, latency s.
+      case "$1" in
+        --fuze) [[ "$2" == off || "$2" == 0 ]] && export FUZE=0 || export FUZE=1 ;;
+        --fuze-fallback) export FUZE_FALLBACK="$2" ;;
+        --fuze-fire) export FUZE_FIRE="$2" ;;
+        --fuze-window) export FUZE_WINDOW_S="$2" ;;
+        --fuze-noise) export FUZE_NOISE_M="$2" ;;
+        --fuze-latency) export FUZE_LATENCY_S="$2" ;;
+      esac
+      shift 2
+      ;;
     --build)
       BUILD_FLAG="--build"
       COMPOSE_ARGS+=("$1")
@@ -122,6 +150,14 @@ if [[ "$MAX_THREATS" -gt 0 ]]; then
 fi
 if [[ -n "${SIM_RTF:-}" && "${SIM_RTF}" != "1" ]]; then
   echo "Simulation runs at ${SIM_RTF}x real time"
+fi
+if [[ -n "${CLOCK_DRIFT_PPM:-}${CLOCK_DRIFT_SPREAD_PPM:-}${CLOCK_OFFSET_S:-}${CLOCK_OFFSET_SPREAD_S:-}${CLOCK_JITTER_S:-}${SHIP_CLOCK_DRIFT_PPM:-}${SHIP_CLOCK_OFFSET_S:-}" || "${CLOCK_SYNC:-none}" != "none" ]]; then
+  echo "Clocks: drift ${CLOCK_DRIFT_PPM:-0}±${CLOCK_DRIFT_SPREAD_PPM:-0} ppm, offset ${CLOCK_OFFSET_S:-0}±${CLOCK_OFFSET_SPREAD_S:-0} s, jitter ${CLOCK_JITTER_S:-0} s, ship ${SHIP_CLOCK_DRIFT_PPM:-0} ppm / ${SHIP_CLOCK_OFFSET_S:-0} s, sync ${CLOCK_SYNC:-none}, seed ${CLOCK_SEED:-0}"
+fi
+if [[ "${FUZE:-1}" == "0" ]]; then
+  echo "Proximity fuze off: timed detonation at t_engage"
+else
+  echo "Proximity fuze on: window +-${FUZE_WINDOW_S:-2} s, fire ${FUZE_FIRE:-cpa}, fallback ${FUZE_FALLBACK:-hold}"
 fi
 if [[ "$INSTANCE" != "0" ]]; then
   echo "Instance ${INSTANCE}: project ${COMPOSE_PROJECT_NAME}, env file ${ENV_FILE}"

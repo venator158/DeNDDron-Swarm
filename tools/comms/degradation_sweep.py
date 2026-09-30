@@ -13,6 +13,8 @@ unchanged. Timings in the results are in simulated time.
     python3 tools/comms/degradation_sweep.py                                  # default matrix, 1 run each
     python3 tools/comms/degradation_sweep.py --rtf 3 --repeats 3
     python3 tools/comms/degradation_sweep.py --profiles tuned --conditions baseline= loss10="loss 10%"
+    python3 tools/comms/degradation_sweep.py --env CLOCK_OFFSET_SPREAD_S=2 CLOCK_SYNC=none   # any swarm env
+    python3 tools/comms/degradation_sweep.py --rtf 3 --drones 12 --threats 6 --maneuver-p 0.5 --profiles default --conditions baseline= --repeats 3
 
 Results: <out>/results.csv (one row per run), <out>/results.md (runs, then mean ± sd per cell),
 <out>/<run>/{swarm.log,operator.log,summary.json,state.json}
@@ -58,18 +60,23 @@ DEFAULT_CONDITIONS = {
     "bw64k": "rate 64kbit",
     "bw24k": "rate 24kbit",
 }
-COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "drones", "threats", "approved", "destroyed", "failed", "leaked_or_impact",
+COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "drones", "threats", "maneuver_p", "approved", "destroyed", "failed", "leaked_or_impact",
            "kill_ratio", "award_latency_ms_mean", "award_latency_ms_max", "never_fully_assigned", "reannounces",
            "over_assigned", "missed_slots", "rejected_awards", "friendly_fire", "detonations_with_intruders",
            "intercept_range_m_mean", "legacy_range_m_mean", "drones_with_holds", "hold_s_max",
            "agreement_mean", "drones_expended",
-           "hb_rx_per_s_at_ship", "wall_s"]
+           "detonations", "det_timing_err_s_mean", "det_timing_err_s_sd", "det_timing_err_s_absmax",
+           "det_ordered_err_s_mean", "det_miss_m_mean", "det_miss_m_max",
+           "sync_mode", "sync_err_s_mean", "sync_err_s_max", "sync_bound_s_mean", "sync_bound_coverage",
+           "det_reasons", "chain_fires", "chain_delay_s_mean", "chain_delay_s_max", "fuze_false_triggers",
+           "fuze_no_detection",
+           "hb_rx_per_s_at_ship", "env", "wall_s"]
 # Resource columns, sampled during the run (Sampler); see scaling_sweep.py.
 RESOURCE_COLUMNS = ["rtf_measured", "startup_s", "host_cpu_pct", "drone_cpu_pct", "drone_mem_mb", "gazebo_cpu_pct",
                     "sim_bus_cpu_pct", "ship_cpu_pct", "loop_p99_ms_max", "overruns", "sensor_age_max_ms",
                     "drone_rx_msgs_per_s", "drone_tx_bytes_per_s", "ship_rx_msgs_per_s"]
 AGGREGATE = ["destroyed", "kill_ratio", "award_latency_ms_mean", "reannounces", "over_assigned", "missed_slots",
-             "agreement_mean", "drones_expended"]
+             "agreement_mean", "drones_expended", "det_timing_err_s_mean", "det_miss_m_mean"]
 
 _TIME = re.compile(r"^(\d+(?:\.\d+)?)(us|usec|ms|msec|s|sec)$")
 _RATE = re.compile(r"^(\d+(?:\.\d+)?)(bit|kbit|mbit|gbit|bps|kbps|mbps|gbps)$")
@@ -86,6 +93,17 @@ def scale_netem(netem, rtf):
             tok = f"{float(m[1]) * rtf:g}{m[2]}"
         out.append(tok)
     return " ".join(out)
+
+
+def parse_env(pairs):
+    """["KEY=VALUE", ...] -> dict (swarm environment passed to run_swarm.sh and compose)."""
+    out = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise SystemExit(f"--env expects KEY=VALUE, got {pair!r}")
+        out[key] = value
+    return out
 
 
 def log(msg, inst=None):
@@ -289,7 +307,8 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
     swarm = subprocess.Popen(
         ["bash", "scripts/run_swarm.sh", str(args.drones), "--threats", str(args.threats),
          "--threat-interval", str(args.interval), "--first-threat", str(args.first), "--seed", str(args.seed),
-         "--algorithm", getattr(args, "algorithm", "orca")],
+         "--algorithm", getattr(args, "algorithm", "orca"),
+         "--maneuver-p", f"{getattr(args, 'maneuver_p', 0.0):g}"],
         cwd=REPO, env=env, stdout=swarm_log, stderr=subprocess.STDOUT)
     bot = None
     summary = {}
@@ -336,7 +355,8 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
     if sampler:
         row.update(sampler.summary(), startup_s=startup_s)
     row.update(profile=profile, condition=cond, netem=netem or "-", rep=rep, rtf=rtf, drones=args.drones,
-               threats=args.threats, instance=inst.k,
+               threats=args.threats, instance=inst.k, maneuver_p=getattr(args, "maneuver_p", 0.0),
+               env=" ".join(f"{k}={v}" for k, v in sorted((extra_env or {}).items())) or "-",
                hb_rx_per_s_at_ship=summary.get("radio_rx_at_ship", {}).get("swarm/heartbeat", {}).get("msgs_per_s"),
                wall_s=round(time.time() - t0))
     log("    " + " ".join(f"{k}={row.get(k)}" for k in COLUMNS[7:] + (RESOURCE_COLUMNS if sampler else [])), inst)
@@ -373,6 +393,8 @@ def main():
     ap.add_argument("--rtf", type=float, default=1.0, help="simulation speed-up (real-time factor)")
     ap.add_argument("--drones", type=int, default=8)
     ap.add_argument("--threats", type=int, default=4)
+    ap.add_argument("--maneuver-p", type=float, default=0.0,
+                    help="probability that a threat turns once mid-flight (THREAT_MANEUVER_P)")
     ap.add_argument("--interval", type=float, default=30)
     ap.add_argument("--first", type=float, default=25)
     ap.add_argument("--seed", type=int, default=42)
@@ -382,8 +404,11 @@ def main():
     ap.add_argument("--instance", type=int, default=0, help="swarm instance to use (0 = default)")
     ap.add_argument("--parallel", type=int, default=1,
                     help="runs at once, each on its own swarm instance (instances 1..P)")
+    ap.add_argument("--env", nargs="+", default=[], metavar="KEY=VALUE",
+                    help="extra swarm environment for every run, e.g. CLOCK_OFFSET_SPREAD_S=2")
     ap.add_argument("--out", default=str(REPO / "results" / time.strftime("sweep_%Y%m%d_%H%M%S")))
     args = ap.parse_args()
+    extra_env = parse_env(args.env)
 
     conditions = DEFAULT_CONDITIONS if not args.conditions else dict(
         (c.split("=", 1) + [""])[:2] for c in args.conditions)
@@ -396,7 +421,7 @@ def main():
         def run(inst):
             compose_down(inst)
             try:
-                row = run_one(args, profile, cond, netem, rep, outdir, inst=inst)
+                row = run_one(args, profile, cond, netem, rep, outdir, extra_env=extra_env, inst=inst)
             except Exception as e:
                 log(f"run failed: {e}", inst)
                 row = {"profile": profile, "condition": cond, "netem": netem or "-", "rep": rep, "rtf": args.rtf}

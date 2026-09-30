@@ -20,7 +20,8 @@ import threading
 import time
 from pathlib import Path
 
-from degradation_sweep import COLUMNS, REPO, RESOURCE_COLUMNS, arp_check, compose_down, log, run_jobs, run_one
+from degradation_sweep import (COLUMNS, REPO, RESOURCE_COLUMNS, arp_check, compose_down, log, parse_env, run_jobs,
+                               run_one)
 
 SCALE_COLUMNS = ["drones", "threats", "rtf", "condition", "profile", "rep", "instance"] + [
     c for c in COLUMNS + RESOURCE_COLUMNS if c not in ("drones", "threats", "rtf", "condition", "profile", "rep")]
@@ -37,6 +38,8 @@ def main():
     ap.add_argument("--load-s", type=float, default=240.0,
                     help="detection interval = load_s / N sim seconds (30 s at 8 drones)")
     ap.add_argument("--first", type=float, default=25)
+    ap.add_argument("--maneuver-p", type=float, default=0.0,
+                    help="probability that a threat turns once mid-flight (THREAT_MANEUVER_P)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--reaction", type=float, default=3.0)
     ap.add_argument("--timeout", type=float, default=420, help="sim seconds per run after the swarm is up")
@@ -47,8 +50,11 @@ def main():
     ap.add_argument("--instance", type=int, default=0, help="swarm instance to use (0 = default)")
     ap.add_argument("--parallel", type=int, default=1,
                     help="runs at once, each on its own swarm instance (instances 1..P); mind host CPU")
+    ap.add_argument("--env", nargs="+", default=[], metavar="KEY=VALUE",
+                    help="extra swarm environment for every run, e.g. CLOCK_DRIFT_SPREAD_PPM=20")
     ap.add_argument("--out", default=str(REPO / "results" / time.strftime("scaling_%Y%m%d_%H%M%S")))
     args = ap.parse_args()
+    extra_env = parse_env(args.env)
 
     conditions = dict((c.split("=", 1) + [""])[:2] for c in args.conditions)
     outdir = Path(args.out)
@@ -68,7 +74,8 @@ def main():
             compose_down(inst)
             name = f"n{run.drones}_{cond}_r{rep}"
             try:
-                row = run_one(run, args.profile, cond, netem, rep, outdir, name=name, inst=inst)
+                row = run_one(run, args.profile, cond, netem, rep, outdir, name=name, extra_env=extra_env,
+                              inst=inst)
             except Exception as e:
                 log(f"run failed: {e}", inst)
                 row = {"profile": args.profile, "condition": cond, "rep": rep, "rtf": run.rtf,

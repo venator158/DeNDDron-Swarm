@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <deque>
+#include <random>
 
 using json = nlohmann::json;
 
@@ -109,6 +111,22 @@ private:
     void update_drone_velocity(const std::string& agent_id, const json& cmd_msg);
     
     json simulate_lidar(const std::string& agent_id);
+
+    // Proximity fuze (drone/{id}/fuze): unlabelled 3D positions, relative to the drone, of every
+    // object within range (threats, other drones, the ship's hull), with noise and latency.
+    // Env: FUZE (1), FUZE_HZ (50), FUZE_RANGE_M (10), FUZE_NOISE_M (0.1), FUZE_LATENCY_S (0), FUZE_SEED (0).
+    bool _fuze_on = true;
+    double _fuze_period = 0.02;              // sim seconds between scans
+    double _fuze_range = 10.0;
+    double _fuze_noise = 0.1;                // sd per axis, m
+    double _fuze_latency = 0.0;              // sim seconds between measurement and delivery
+    double _last_fuze_pub_time = 0.0;
+    std::mt19937 _fuze_rng{0};
+    struct PendingFuze { double release; std::string topic; std::string payload; };
+    std::deque<PendingFuze> _fuze_queue;     // scans held back by the latency (step() thread only)
+    void configure_fuze();
+    void publish_fuze(double sim_time, const std::vector<std::string>& agents);
+    void flush_fuze(double sim_time);
     json get_drone_pose(const std::string& agent_id);
     void publish_sensor_data(const std::string& agent_id, const json& sensor_data);
 };

@@ -4,7 +4,7 @@ No zenoh dependency, so it is unit-tested; drones and the ship share it.
 
 A detonation destroys any drone within the kill radius (8 m).  Every confirmed job therefore
 *reserves* a blast: a sphere of CLEARANCE_M around each of its slots (blast_radius) at its
-detonation time, +- BLAST_TOL_S for timing error.  Drones not on that job must be outside it
+detonation time, +- BLAST_TOL_S for timing error (and the fuze window).  Drones not on that job must be outside it
 during that window:
 
 - plan_route(): a straight route to the goal with the trapezoidal speed profile.  If the drone
@@ -19,6 +19,7 @@ during that window:
 """
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
@@ -28,7 +29,14 @@ Vec3 = Tuple[float, float, float]
 
 CLEARANCE_M = 12.0         # non-job drones are kept this far from a detonation (kill radius 8 m + margin)
 SLOT_RADIUS_M = 3.0        # job-mates are stacked within +-this of the engagement point (multi-drone jobs)
-BLAST_TOL_S = 1.5          # detonation time uncertainty: a blast is dangerous for t_engage +- this
+def _blast_tol() -> float:
+    """Detonation time uncertainty: 1.5 s for timed detonation; with the proximity fuze (FUZE, on by
+    default) a drone may fire anywhere in its window, t_engage +- FUZE_WINDOW_S, so at least that."""
+    fuze_on = (os.environ.get("FUZE") or "1").strip().lower() not in ("0", "off", "false", "no")
+    return max(1.5, float(os.environ.get("FUZE_WINDOW_S") or 2.0)) if fuze_on else 1.5
+
+
+BLAST_TOL_S = _blast_tol()  # a blast is dangerous for t_engage +- this
 HOLD_MARGIN_M = 2.0        # holds stop this far before a blast sphere
 INTERCEPT_SLACK_S = 4.0    # time kept free before an intercept (orders, bids, confirmation, errors)
 SAMPLE_S = 0.1             # route sampling step inside a blast window
