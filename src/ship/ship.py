@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from links import open_onboard
+import localclock
 import simclock
 from radio_process import RadioProcess
 from deconflict import Reservation, blast_radius, choose_intercept, plan_route
@@ -64,17 +65,34 @@ def _mean(xs):
     return round(sum(xs) / len(xs), 1) if xs else None
 
 
+def _stats(xs, nd=3):
+    """(mean, sd, max |x|) of the non-None values, or Nones."""
+    xs = [x for x in xs if x is not None]
+    if not xs:
+        return None, None, None
+    m = sum(xs) / len(xs)
+    sd = math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) if len(xs) > 1 else 0.0
+    return round(m, nd), round(sd, nd), round(max(abs(x) for x in xs), nd)
+
+
 def _xyz(p):
     return {"x": round(p[0], 2), "y": round(p[1], 2), "z": round(p[2], 2)}
 
 
 class Track:
-    """One radar track plus its engagement bookkeeping."""
+    """One radar track plus its engagement bookkeeping.
 
-    def __init__(self, threat_id, kind, level, p0, v, t0, defended_radius):
+    The threat moves in truth (true_p0, true_v, true_t0): Gazebo markers and kill assessment use
+    that.  The radar measures it in ship time, so C2 sees p0, v, t0 (and CPA, engagement point)
+    in the ship's timebase: t0 = clock.read(true_t0), v = true_v / clock.rate.  The positions are
+    the same; only the timebase differs, and with a perfect ship clock the two are identical.
+    """
+
+    def __init__(self, threat_id, kind, level, p0, v, t0_truth, defended_radius, clock):
         self.threat_id, self.type, self.level = threat_id, kind, level
         self.defended_radius = defended_radius
-        self.retrack(p0, v, t0)
+        self.clock = clock
+        self.retrack(p0, v, t0_truth)
         self.status = "tracking"        # tracking | approved | destroyed | leaked | impact | failed
         self.confirmed = {}             # drone -> slot: engagements the ship has ACKed (the job's holders)
         self.pending = {}               # drone -> (bid cost, order id): awards awaiting arbitration
@@ -90,6 +108,7 @@ class Track:
         self.holds = {}                 # drone -> planned hold time (s) reported with its award
         self.detonated = {}             # drone -> miss distance (m)
         self.friendly_fire = []         # drones destroyed by this threat's detonations
+        self.det_eval = []              # per detonation: timing evaluation against truth (_on_detonation)
         self.intruded = 0               # detonations with non-job drones within CLEARANCE_M
         self.hits = set()               # detonations within kill radius
         self.missed = set()             # drones that aborted
@@ -101,21 +120,35 @@ class Track:
         self.first_award_ms = None
         self.full_award_ms = None
 
-    def retrack(self, p0, v, t0):
-        """New track segment (detection or manoeuvre): recompute CPA and the fallback engagement point.
+    def retrack(self, p0, v, t0_truth):
+        """New track segment (detection or manoeuvre, in truth): recompute the ship-time view, CPA
+        and the fallback engagement point.
 
         The legacy point (defended radius crossing, or CPA) is the latest acceptable intercept; the
         ship normally engages earlier and farther out (choose_intercept) and overwrites point/t_engage.
         """
-        self.p0, self.v, self.t0 = p0, v, t0
-        self.cpa, self.t_cpa = closest_point_of_approach(p0, v, t0)
+        self.true_p0, self.true_v, self.true_t0 = p0, v, t0_truth
+        r = self.clock.rate
+        self.p0, self.v, self.t0 = p0, (v[0] / r, v[1] / r, v[2] / r), self.clock.read(t0_truth)
+        self.cpa, self.t_cpa = closest_point_of_approach(self.p0, self.v, self.t0)
         self.cpa_dist = math.hypot(self.cpa[0], self.cpa[1])
-        self.legacy_point, self.legacy_t = engagement_point(p0, v, t0, self.defended_radius)
+        self.legacy_point, self.legacy_t = engagement_point(self.p0, self.v, self.t0, self.defended_radius)
         self.point, self.t_engage = self.legacy_point, self.legacy_t
-        self.plan_cache = None          # (sim time, Intercept or None)
+        self.plan_cache = None          # (ship time, Intercept or None)
 
     def position(self, t):
+        """Position at ship time t."""
         return position_at(self.p0, self.v, self.t0, t)
+
+    def true_position(self, t_truth):
+        return position_at(self.true_p0, self.true_v, self.true_t0, t_truth)
+
+    def true_closest_approach(self, p):
+        """(truth time, distance) of the threat's true closest approach to point p (this segment)."""
+        v, d = self.true_v, [p[i] - self.true_p0[i] for i in range(3)]
+        vv = v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
+        t = self.true_t0 + (0.0 if vv < 1e-12 else (d[0] * v[0] + d[1] * v[1] + d[2] * v[2]) / vv)
+        return t, math.dist(self.true_position(t), p)
 
     @property
     def holders(self):
@@ -125,10 +158,12 @@ class Track:
     def active(self):
         return self.status in ("tracking", "approved")
 
-    def track_msg(self):
+    def track_msg(self, truth=False):
+        """The track as C2 knows it (ship time), or in truth for the simulator's markers."""
+        p0, v, t0 = (self.true_p0, self.true_v, self.true_t0) if truth else (self.p0, self.v, self.t0)
         return {"threat_id": self.threat_id, "type": self.type, "level": self.level,
-                "status": "active" if self.active else self.status, "t0": self.t0,
-                "p0": _xyz(self.p0), "v": _xyz(self.v)}
+                "status": "active" if self.active else self.status, "t0": t0,
+                "p0": _xyz(p0), "v": _xyz(v)}
 
 
 class Ship:
@@ -139,7 +174,11 @@ class Ship:
         self.maneuver_rng = random.Random(args.seed + 1)   # separate, so the scenario is unchanged
         self.lock = threading.RLock()
 
-        self.sim_time = None
+        # Truth (sim/clock) is for the radar's world and evaluation; C2 runs on ship_time, the ship's
+        # own clock (SHIP_CLOCK_*, perfect by default), which is the protocol's timebase.
+        self.clock = localclock.from_env("ship", prefix="SHIP_CLOCK_")
+        self.truth_time = None
+        self.ship_time = None
         self.tracks = {}                 # threat_id -> Track
         self.queue = ThreatQueue()       # active tracks by t_cpa
         self.next_detection = None
@@ -187,11 +226,18 @@ class Ship:
 
     # ------------------------------------------------------------------ util
     def event(self, kind, **fields):
-        e = {"wall": time.strftime("%H:%M:%S"), "sim_time": self.sim_time, "kind": kind, **fields}
+        e = {"wall": time.strftime("%H:%M:%S"), "sim_time": self.truth_time, "ship_time": self.ship_time,
+             "kind": kind, **fields}
         self.events.append(e)
         if self.log_file:
             self.log_file.write(json.dumps(e) + "\n")
         log.info("%s %s", kind, " ".join(f"{k}={v}" for k, v in fields.items()))
+
+    def log_only(self, kind, **fields):
+        """Evaluation record: to the log file, not the dashboard's event list."""
+        if self.log_file:
+            self.log_file.write(json.dumps({"sim_time": self.truth_time, "ship_time": self.ship_time,
+                                            "kind": kind, **fields}) + "\n")
 
     def _count_rx(self, topic, sample):
         self.rx_counts[topic] += 1
@@ -203,9 +249,10 @@ class Ship:
 
     # ------------------------------------------------------------- callbacks
     def _on_clock(self, sample):
+        truth = float(self._parse(sample)["sim_time"])
         with self.lock:
-            self.sim_time = float(self._parse(sample)["sim_time"])
-        simclock.observe(self.sim_time)
+            self.truth_time, self.ship_time = truth, self.clock.read(truth)
+        simclock.observe(truth)
 
     def _on_heartbeat(self, sample):
         self._count_rx("swarm/heartbeat", sample)
@@ -347,7 +394,7 @@ class Ship:
             need = tr.level - len(tr.hits) - len(tr.confirmed) if tr.status == "approved" else 0
             # The ship sees every job: re-check each candidate's route around the other jobs' blasts
             # from its reported position before confirming it.
-            now = self.sim_time or 0.0
+            now = self.ship_time or 0.0
             blasts = [r.blast() for r in self._reservations(exclude=tr.threat_id)]
             unfit = set()
             for d in tr.pending:
@@ -408,11 +455,11 @@ class Ship:
             if not tr.active or tr.maneuver_at is None or now < tr.maneuver_at:
                 continue
             tr.maneuver_at = None
-            p = position_at(tr.p0, tr.v, tr.t0, now)
-            speed = math.hypot(tr.v[0], tr.v[1])
+            p = tr.true_position(self.truth_time)          # the threat turns in truth
+            speed = math.hypot(tr.true_v[0], tr.true_v[1])
             miss = self.maneuver_rng.uniform(-self.args.max_miss, self.args.max_miss)
             old_point, old_t = tr.point, tr.t_engage
-            tr.retrack(p, aim_velocity(p, speed, miss), now)
+            tr.retrack(p, aim_velocity(p, speed, miss), self.truth_time)
             if tr.status == "approved":
                 # Re-plan the intercept for the drones already on the job (legacy point if none fits).
                 crew = [q for q in (self._pose(d) for d in set(tr.confirmed) | set(tr.pending)) if q]
@@ -421,7 +468,7 @@ class Ship:
                     tr.point, tr.t_engage = ic.point, ic.t
             tr.maneuvers += 1
             self.queue.update(tr.threat_id, tr.t_cpa)
-            self.pub_tracks.put(json.dumps(tr.track_msg()))
+            self.pub_tracks.put(json.dumps(tr.track_msg(truth=True)))
             self.event("maneuver", threat=tr.threat_id, point_shift_m=round(math.dist(old_point, tr.point), 1),
                        t_engage_shift_s=round(tr.t_engage - old_t, 1))
             if tr.status == "approved":
@@ -443,14 +490,18 @@ class Ship:
                        job=d.get("job"), distance_m=d.get("distance"))
 
     def _on_detonation(self, sample):
+        """Kill assessment.  The radar observes the blast physically, so this uses truth (the
+        drone's sensor-frame time at detonation), whatever any clock says."""
         d = self._parse(sample)
         with self.lock:
             self.expended.add(d["agent_id"])
             tr = self.tracks.get(d["threat_id"])
             if tr is None:
                 return
-            tp = position_at(tr.p0, tr.v, tr.t0, float(d["sim_time"]))
-            miss = math.dist(tp, (d["x"], d["y"], d["z"]))
+            truth = float(d["truth_time"])
+            here = (d["x"], d["y"], d["z"])
+            miss = math.dist(tr.true_position(truth), here)
+            self._evaluate_detonation(tr, d, truth, here, miss)
             tr.detonated[d["agent_id"]] = round(miss, 2)
             tr.confirmed.pop(d["agent_id"], None)
             if d.get("intruders"):
@@ -462,6 +513,22 @@ class Ship:
                        hit=miss <= self.args.kill_radius)
             if tr.active and len(tr.hits) >= tr.level:
                 self._close(tr, "destroyed")
+
+    def _evaluate_detonation(self, tr, d, truth, here, miss):
+        """Timing against truth (evaluation only).  Primary: the geometric error, detonation truth
+        time minus the moment the threat truly passes closest to the detonation point; it holds at
+        any threat speed.  Secondary: the error against the ordered t_engage (ship time, mapped to
+        truth through the ship's clock)."""
+        ideal_t, ideal_miss = tr.true_closest_approach(here)
+        ordered = d.get("t_engage")
+        rec = {"threat": tr.threat_id, "drone": d["agent_id"], "truth_t": round(truth, 3),
+               "local_t": d.get("local_time"), "sync_t": d.get("sync_time"), "t_engage": ordered,
+               "ideal_t": round(ideal_t, 3), "timing_err_s": round(truth - ideal_t, 3),
+               "ordered_err_s": None if ordered is None else round(truth - self.clock.to_truth(float(ordered)), 3),
+               "miss_m": round(miss, 2), "ideal_miss_m": round(ideal_miss, 2), "chain": bool(d.get("chain")),
+               "threat_speed": round(math.hypot(*tr.true_v), 2)}
+        tr.det_eval.append(rec)
+        self.log_only("detonation_eval", **rec)
 
     # ------------------------------------------------------------- radar
     def _maybe_detect(self, now):
@@ -486,12 +553,12 @@ class Ship:
         miss = self.rng.uniform(-a.max_miss, a.max_miss)
         v = aim_velocity(p0, tt.speed, miss)
 
-        tr = Track(f"T{self.detected}", kind, tt.level, p0, v, now, a.defended_radius)
+        tr = Track(f"T{self.detected}", kind, tt.level, p0, v, self.truth_time, a.defended_radius, self.clock)
         if a.maneuver_p > 0 and self.maneuver_rng.random() < a.maneuver_p:
             tr.maneuver_at = now + self.maneuver_rng.uniform(0.3, 0.6) * (tr.t_engage - now)
         self.tracks[tr.threat_id] = tr
         self.queue.push(tr.threat_id, tr.t_cpa)
-        self.pub_tracks.put(json.dumps(tr.track_msg()))
+        self.pub_tracks.put(json.dumps(tr.track_msg(truth=True)))
         self.event("detected", threat=tr.threat_id, type=kind, level=tt.level,
                    tcpa_s=round(tr.t_cpa - now, 1), cpa_m=round(tr.cpa_dist, 1),
                    t_to_engage_s=round(tr.t_engage - now, 1))
@@ -504,7 +571,7 @@ class Ship:
             tr.close_repeats = JOB_CLOSE_REPEATS
             self._publish_job(tr)
         self.queue.remove(tr.threat_id)
-        self.pub_tracks.put(json.dumps(tr.track_msg()))
+        self.pub_tracks.put(json.dumps(tr.track_msg(truth=True)))
         self.pub_status.put(json.dumps({"threat_id": tr.threat_id, "status": status}))
         self.event(status, threat=tr.threat_id, type=tr.type, level=tr.level, hits=len(tr.hits),
                    detonations=len(tr.detonated))
@@ -547,7 +614,7 @@ class Ship:
     def approve(self, threat_id):
         with self.lock:
             tr = self.tracks.get(threat_id)
-            now = self.sim_time
+            now = self.ship_time
             if tr is None or now is None:
                 return False, "unknown threat"
             if tr.status != "tracking":
@@ -604,7 +671,7 @@ class Ship:
         last_roster = last_job = 0.0
         while True:
             with self.lock:
-                now = self.sim_time
+                now = self.ship_time
                 if now is not None:
                     if self.args.max_threats != 0:
                         self._maybe_detect(now)
@@ -621,7 +688,7 @@ class Ship:
                     last_roster = wall
                     members = self.members()
                     relayed = [d for d in members if self.drones[d].get("relayed")]
-                    self.pub_roster.put(json.dumps({"sim_time": now, "count": len(members), "members": members,
+                    self.pub_roster.put(json.dumps({"time": now, "count": len(members), "members": members,
                                                     "relayed": relayed}))
                     self._publish_zones()
                     span = wall - self._rx_window_start
@@ -655,6 +722,11 @@ class Ship:
         lat = [t["full_award_ms"] for t in engaged if t["full_award_ms"] is not None]
         agree = [t["agreement"] for t in engaged if t["agreement"] is not None]
         counts = s["threat_counts"]
+        with self.lock:
+            evals = [e for t in self.tracks.values() for e in t.det_eval]
+        timing = _stats([e["timing_err_s"] for e in evals])
+        ordered = _stats([e["ordered_err_s"] for e in evals])
+        miss = _stats([e["miss_m"] for e in evals], 2)
         return {
             "sim_time": s["sim_time"],
             "threats_detected": len(self.tracks),
@@ -681,11 +753,20 @@ class Ship:
             "agreement_mean": round(sum(agree) / len(agree), 3) if agree else None,
             "drones_expended": s["roster"]["expended"],
             "radio_rx_at_ship": s["radio_rx_at_ship"],
+            # Detonation timing against truth (_evaluate_detonation): geometric error (primary),
+            # error against the ordered t_engage, and miss distance.
+            "detonations": len(evals),
+            "det_timing_err_s_mean": timing[0], "det_timing_err_s_sd": timing[1], "det_timing_err_s_absmax": timing[2],
+            "det_ordered_err_s_mean": ordered[0], "det_ordered_err_s_sd": ordered[1],
+            "det_ordered_err_s_absmax": ordered[2],
+            "det_miss_m_mean": miss[0], "det_miss_m_sd": miss[1], "det_miss_m_max": miss[2],
+            "chain_fires": sum(1 for e in evals if e["chain"]),
+            "ship_clock": self.clock.describe(),
         }
 
     def snapshot(self, all_threats=False):
         with self.lock:
-            now = self.sim_time
+            now = self.ship_time
             wall = simclock.now()
             threats = []
             order = self.queue.ordered()
@@ -727,7 +808,7 @@ class Ship:
             for t in self.tracks.values():
                 counts[t.status] += 1
             return {
-                "sim_time": now,
+                "sim_time": self.truth_time, "ship_time": now, "ship_clock": self.clock.describe(),
                 "params": {"defended_radius": self.args.defended_radius, "kill_radius": self.args.kill_radius,
                            "ship_radius": SHIP_RADIUS, "v_max": self.v_max, "a_max": self.a_max},
                 "roster": {"count": len(members), "free": len(self.free_drones()), "members": members,

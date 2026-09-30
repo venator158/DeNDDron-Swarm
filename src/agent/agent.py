@@ -16,7 +16,9 @@ from threats import ETA_MARGIN, ORDER_SLACK_S, Threat, slot_point
 from deconflict import BLAST_TOL_S, SLOT_RADIUS_M, Blast, plan_route
 from links import open_onboard
 from radio_process import RadioProcess
+import localclock
 import simclock
+import timesync
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
@@ -203,6 +205,12 @@ class DenddronAgent:
 
         # --- Radio link and membership ---
         self.telemetry = Telemetry(1.0 / (self.control_rate_hz * simclock.RTF))
+        # Clocks: this drone's hardware clock (drift and offset, localclock.py) and its estimate of
+        # ship time (timesync.py).  Protocol times (t_engage, zones, holds) are ship time
+        # (_proto_now); truth (current_time) is for physics and evaluation only.
+        self.clock = localclock.from_env(self.agent_id)
+        self.sync = timesync.make()
+        logger.info(f"[{self.agent_id}] Clock {self.clock.describe()}, sync {self.sync.mode}")
         self._last_radio_rx = None     # simclock time of the last message from the ship or a peer
         self.peers = {}                # peer drone id -> simclock time any message from it was last heard
         self._peer_help = {}           # peer drone id -> (heartbeat payload, simclock time) it asked us to relay
@@ -249,7 +257,7 @@ class DenddronAgent:
         self._zones_sig = None
         self._aborted_job = None       # (threat_id, t_engage) of a job we aborted at its detonation time
         self._progress_logged = -1e9
-        self._route_planned = -1e9     # sim time of the last route re-plan
+        self._route_planned = -1e9     # simclock time of the last route re-plan
         self.sub_zones     = self.radio.declare_subscriber("ship/zones", self._on_zones)
         # Physics: detonations of other jobs within KILL_RADIUS destroy this drone (friendly fire).
         self.sub_blasts    = self.onboard.declare_subscriber("sim/detonation", self._on_blast)
@@ -717,10 +725,15 @@ class DenddronAgent:
     # PILLAR 3: THREAT HANDLER
     # ==========================================
     def _auction_now(self) -> float:
-        """Sim-time when available (auction windows must track the simulator), else wall time."""
+        """Bid windows are a local duration (from when this drone got the order): simclock."""
+        return simclock.now()
+
+    def _proto_now(self):
+        """Protocol time: this drone's estimate of ship time, from its local clock at the latest
+        sensor frame (so decisions stay on the frame grid, as before).  None before the first frame."""
         with self.state_lock:
             t = self.current_time
-        return float(t) if t is not None else simclock.now()
+        return None if t is None else self.sync.ship_time(self.clock.read(t))
 
     def _link_up(self) -> bool:
         """Heard the ship or another drone recently."""
@@ -778,7 +791,7 @@ class DenddronAgent:
         """Bid our ETA (s) to each engagement point we can reach before its engagement time."""
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
-            now = self.current_time
+        now = self._proto_now()
         if pose is None or now is None:
             return {}
         v_max = float(self.kinematics["max_velocity"])
@@ -852,12 +865,10 @@ class DenddronAgent:
             winners = sorted(r.assignment[t.threat_id])
             slot = winners.index(self.agent_id)
             loc = t.location
-            with self.state_lock:
-                now = self.current_time
             with self._eng_lock:
                 self.engaged_threat = t
                 self._set_engagement({
-                    "threat": t, "wave_id": r.wave_id, "confirmed": False, "since": now, "seq": -1,
+                    "threat": t, "wave_id": r.wave_id, "confirmed": False, "since": simclock.now(), "seq": -1,
                     "point": (loc["x"], loc["y"], loc["z"]), "t_engage": t.t_engage,
                     "slot": slot, "n_slots": len(winners),
                 })
@@ -880,7 +891,7 @@ class DenddronAgent:
         eng["slot_point"] = {"x": sp[0], "y": sp[1], "z": sp[2]}
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
-            now = self.current_time
+        now = self._proto_now()
         if pose is not None and now is not None:
             blasts = self._blasts(exclude=eng["threat"].threat_id)
             here = (pose["x"], pose["y"], pose["z"])
@@ -943,13 +954,13 @@ class DenddronAgent:
             return
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
-            now = self.current_time
+        now = self._proto_now()
         if pose is None or now is None:
             return
-        if now - self._route_planned >= self.REPLAN_S and now < eng["t_engage"]:
+        if simclock.now() - self._route_planned >= self.REPLAN_S and now < eng["t_engage"]:
             # Re-plan from where we actually are: real flight drifts from the planned schedule, and
             # a drone ahead of plan could reach another job's zone just as it goes off.
-            self._route_planned = now
+            self._route_planned = simclock.now()
             with self._eng_lock:
                 if self.engagement is eng:
                     self._set_engagement(dict(eng))
@@ -1145,7 +1156,7 @@ class DenddronAgent:
         if eng is not None and eng["threat"].threat_id == b.get("threat_id"):
             return                                   # job-mates detonate together by design
         ab = self._aborted_job
-        if ab and ab[0] == b.get("threat_id") and abs(float(b.get("sim_time") or ab[1]) - ab[1]) <= BLAST_TOL_S:
+        if ab and ab[0] == b.get("threat_id") and abs(float(b.get("sync_time") or ab[1]) - ab[1]) <= BLAST_TOL_S:
             return                                   # our own job's blast, the instant we aborted it
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
@@ -1159,7 +1170,7 @@ class DenddronAgent:
                        f"{b.get('threat_id')} {dist:.1f} m away" + (f"; job {threat_id} lost" if threat_id else ""))
         self.pub_damage.put(json.dumps({"agent_id": self.agent_id, "cause": "friendly_fire", "by": b["agent_id"],
                                         "by_threat": b.get("threat_id"), "job": threat_id,
-                                        "distance": round(dist, 2), "sim_time": b.get("sim_time")}))
+                                        "distance": round(dist, 2), "truth_time": b.get("truth_time")}))
         self.pub_cmd_vel.put(json.dumps({"linear": {"x": 0.0, "y": 0.0, "z": 0.0},
                                          "angular": {"x": 0.0, "y": 0.0, "z": 0.0}}))
         pub_leave = self.onboard.declare_publisher("swarm/agents/despawn")
@@ -1219,13 +1230,15 @@ class DenddronAgent:
         if eng is None or self.destroyed:
             return
         with self.state_lock:
-            now = self.current_time
+            truth = self.current_time
             pose = dict(self.current_pose) if self.current_pose is not None else None
-        if now is None or pose is None:
+        if truth is None or pose is None:
             return
-        if now - self._progress_logged >= 2.0 and now < eng["t_engage"]:
-            # Flight trace (sim time): distance to slot, speed, time left, route leg.
-            self._progress_logged = now
+        local = self.clock.read(truth)
+        now = self.sync.ship_time(local)       # protocol time (_proto_now), with its parts for the log
+        if simclock.now() - self._progress_logged >= 2.0 and now < eng["t_engage"]:
+            # Flight trace (protocol time): distance to slot, speed, time left, route leg.
+            self._progress_logged = simclock.now()
             sp = eng["slot_point"]
             with self.state_lock:
                 speed = float(np.linalg.norm(self.last_velocity))
@@ -1234,7 +1247,7 @@ class DenddronAgent:
                         f"(dz {sp['z'] - pose['z']:+.1f}), speed {speed:.1f} m/s, {eng['t_engage'] - now:.1f}s left, "
                         f"legs {len(eng.get('legs') or [])}, state {self._state_name()}")
         if not eng["confirmed"]:
-            if eng["since"] is None or now - eng["since"] > self.ACK_TIMEOUT_S or now >= eng["t_engage"]:
+            if eng["since"] is None or simclock.now() - eng["since"] > self.ACK_TIMEOUT_S or now >= eng["t_engage"]:
                 logger.warning(f"[{self.agent_id}] No ACK from the ship for {eng['threat'].threat_id} within "
                                f"{self.ACK_TIMEOUT_S:.0f}s; abandoning the job")
                 with self._eng_lock:
@@ -1264,9 +1277,12 @@ class DenddronAgent:
         if intruders:
             logger.warning(f"[{self.agent_id}] Detonating on {threat.threat_id} with non-job drones within "
                            f"{self.CLEARANCE_M:.0f} m: {intruders} (risk of friendly fire)")
-        # Physical event: goes on the onboard bus (the ship's radar observes it there).
+        # Physical event: goes on the onboard bus (the ship's radar observes it there).  truth_time
+        # (this sensor frame's sim time) places the blast for kill assessment and evaluation; the
+        # protocol uses sync_time (ship time), local_time is for evaluation.
         self.pub_detonation.put(json.dumps({
-            "agent_id": self.agent_id, "threat_id": threat.threat_id, "sim_time": now,
+            "agent_id": self.agent_id, "threat_id": threat.threat_id, "truth_time": truth,
+            "local_time": local, "sync_time": now, "t_engage": eng["t_engage"], "chain": False,
             "x": pose["x"], "y": pose["y"], "z": pose["z"], "intruders": intruders,
         }))
         self.pub_cmd_vel.put(json.dumps({
@@ -1316,11 +1332,10 @@ class DenddronAgent:
     def _send_heartbeat(self):
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
-            now = self.current_time
         eng = self.engagement
         hb = {
             "agent_id": self.agent_id,
-            "sim_time": now,
+            "time": self._proto_now(),
             "state": self._state_name(),
             "link": self._link_up(),
             "pose": None if pose is None else {k: round(pose[k], 2) for k in ("x", "y", "z")},

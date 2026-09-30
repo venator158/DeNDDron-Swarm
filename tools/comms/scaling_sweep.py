@@ -20,7 +20,8 @@ import threading
 import time
 from pathlib import Path
 
-from degradation_sweep import COLUMNS, REPO, RESOURCE_COLUMNS, arp_check, compose_down, log, run_jobs, run_one
+from degradation_sweep import (COLUMNS, REPO, RESOURCE_COLUMNS, arp_check, compose_down, log, parse_env, run_jobs,
+                               run_one)
 
 SCALE_COLUMNS = ["drones", "threats", "rtf", "condition", "profile", "rep", "instance"] + [
     c for c in COLUMNS + RESOURCE_COLUMNS if c not in ("drones", "threats", "rtf", "condition", "profile", "rep")]
@@ -47,8 +48,11 @@ def main():
     ap.add_argument("--instance", type=int, default=0, help="swarm instance to use (0 = default)")
     ap.add_argument("--parallel", type=int, default=1,
                     help="runs at once, each on its own swarm instance (instances 1..P); mind host CPU")
+    ap.add_argument("--env", nargs="+", default=[], metavar="KEY=VALUE",
+                    help="extra swarm environment for every run, e.g. CLOCK_DRIFT_SPREAD_PPM=20")
     ap.add_argument("--out", default=str(REPO / "results" / time.strftime("scaling_%Y%m%d_%H%M%S")))
     args = ap.parse_args()
+    extra_env = parse_env(args.env)
 
     conditions = dict((c.split("=", 1) + [""])[:2] for c in args.conditions)
     outdir = Path(args.out)
@@ -68,7 +72,8 @@ def main():
             compose_down(inst)
             name = f"n{run.drones}_{cond}_r{rep}"
             try:
-                row = run_one(run, args.profile, cond, netem, rep, outdir, name=name, inst=inst)
+                row = run_one(run, args.profile, cond, netem, rep, outdir, name=name, extra_env=extra_env,
+                              inst=inst)
             except Exception as e:
                 log(f"run failed: {e}", inst)
                 row = {"profile": args.profile, "condition": cond, "rep": rep, "rtf": run.rtf,

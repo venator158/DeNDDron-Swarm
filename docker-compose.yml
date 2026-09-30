@@ -81,6 +81,14 @@ services:
       RADIO_QOS: ${RADIO_QOS:-default}
       SIM_RTF: ${SIM_RTF:-1}
       ZONE_KEEPOUT: ${ZONE_KEEPOUT:-1}
+      # Distributed clock (src/common/localclock.py, timesync.py); all 0/none = perfect shared clock
+      CLOCK_DRIFT_PPM: ${CLOCK_DRIFT_PPM:-0}
+      CLOCK_DRIFT_SPREAD_PPM: ${CLOCK_DRIFT_SPREAD_PPM:-0}
+      CLOCK_OFFSET_S: ${CLOCK_OFFSET_S:-0}
+      CLOCK_OFFSET_SPREAD_S: ${CLOCK_OFFSET_SPREAD_S:-0}
+      CLOCK_JITTER_S: ${CLOCK_JITTER_S:-0}
+      CLOCK_SEED: ${CLOCK_SEED:-0}
+      CLOCK_SYNC: ${CLOCK_SYNC:-none}
       SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
       AGENT_ID_REGISTRY: /app/config/agent_registry.json
     # exec so SIGTERM reaches python and the agent shuts down cleanly
@@ -129,6 +137,11 @@ services:
       THREAT_TYPES: ${THREAT_TYPES:-}
       THREAT_MANEUVER_P: ${THREAT_MANEUVER_P:-0}
       INTERCEPT_MAX_RANGE_M: ${INTERCEPT_MAX_RANGE_M:-140}
+      SHIP_CLOCK_DRIFT_PPM: ${SHIP_CLOCK_DRIFT_PPM:-0}
+      SHIP_CLOCK_OFFSET_S: ${SHIP_CLOCK_OFFSET_S:-0}
+      SHIP_CLOCK_JITTER_S: ${SHIP_CLOCK_JITTER_S:-0}
+      CLOCK_SEED: ${CLOCK_SEED:-0}
+      CLOCK_SYNC: ${CLOCK_SYNC:-none}
     command: >
       sh -c 'exec python -u ship.py --sim-bus "$${SIM_BUS}"'
     networks:
