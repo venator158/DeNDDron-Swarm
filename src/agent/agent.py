@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import json
 import math
@@ -729,11 +730,29 @@ class DenddronAgent:
         return simclock.now()
 
     def _proto_now(self):
-        """Protocol time: this drone's estimate of ship time, from its local clock at the latest
-        sensor frame (so decisions stay on the frame grid, as before).  None before the first frame."""
+        """Protocol time (timesync.py: the estimate of ship time, or the local clock with ttg), from
+        the local clock at the latest sensor frame, so decisions stay on the frame grid as before.
+        None before the first frame."""
         with self.state_lock:
             t = self.current_time
-        return None if t is None else self.sync.ship_time(self.clock.read(t))
+        return None if t is None else self.sync.proto_time(self.clock.read(t))
+
+    def _stamp(self):
+        """Local timestamp for a sync exchange: extrapolated between frames (frames are 20 ms apart),
+        with the clock's jitter.  None before the first frame."""
+        t = simclock.truth_now()
+        return None if t is None else self.clock.stamp(t)
+
+    def _inbound_job(self, job: dict, local_rx) -> dict:
+        """Job/ACK times (ship time) into the protocol timebase."""
+        sent = job.get("sent")
+        self.sync.on_sent(sent, local_rx)
+        for key in ("t_engage", "t_cpa"):
+            if job.get(key) is not None:
+                job[key] = self.sync.inbound(float(job[key]), sent, local_rx)
+        if isinstance(job.get("track"), dict) and job["track"].get("t0") is not None:
+            job["track"]["t0"] = self.sync.inbound(float(job["track"]["t0"]), sent, local_rx)
+        return job
 
     def _link_up(self) -> bool:
         """Heard the ship or another drone recently."""
@@ -758,12 +777,15 @@ class DenddronAgent:
         return json.loads(bytes(sample.payload).decode("utf-8"))
 
     def _on_threat_wave(self, sample):
+        local_rx = self._stamp()
         self._radio_heard()
         self.telemetry.rx("swarm/threats")
         try:
             msg = self._parse(sample)
             wave_id = str(msg["wave_id"])
             threats = [Threat.from_dict(t) for t in msg["threats"]]
+            threats = [dataclasses.replace(t, t_engage=self.sync.inbound(t.t_engage, msg.get("sent"), local_rx))
+                       for t in threats]
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed threat order: {e}")
             return
@@ -1001,10 +1023,11 @@ class DenddronAgent:
         self._set_engagement(new)
 
     def _on_ack(self, sample):
+        local_rx = self._stamp()
         self._radio_heard()
         self.telemetry.rx("ship/ack")
         try:
-            ack = self._parse(sample)
+            ack = self._inbound_job(self._parse(sample), local_rx)
             threat_id, accepted = str(ack["threat_id"]), bool(ack["accepted"])
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed ACK: {e}")
@@ -1023,10 +1046,11 @@ class DenddronAgent:
                 self._abandon(threat_id, "withdrawn")
 
     def _on_job(self, sample):
+        local_rx = self._stamp()
         self._radio_heard()
         self.telemetry.rx("ship/jobs")
         try:
-            job = self._parse(sample)
+            job = self._inbound_job(self._parse(sample), local_rx)
             threat_id = str(job["threat_id"])
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed job update: {e}")
@@ -1081,16 +1105,23 @@ class DenddronAgent:
 
     # ---- engagement zones and friendly fire ----
     def _on_zones(self, sample):
+        local_rx = self._stamp()
         self._radio_heard()
         self.telemetry.rx("ship/zones")
         try:
-            zones = self._parse(sample)["zones"]
+            msg = self._parse(sample)
+            zones = msg["zones"]
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed zones: {e}")
             return
         now = simclock.now()
+        # Signature from the ship's own times: with ttg every message re-anchors, which must not
+        # count as a change.
         sig = tuple(sorted((str(z["threat_id"]), round(z["point"]["x"]), round(z["point"]["y"]),
                             round(float(z["t_engage"]), 1)) for z in zones))
+        self.sync.on_sent(msg.get("sent"), local_rx)
+        for z in zones:
+            z["t_engage"] = self.sync.inbound(float(z["t_engage"]), msg.get("sent"), local_rx)
         self.zones = {str(z["threat_id"]): (z, now) for z in zones}
         if sig != self._zones_sig:
             self._zones_sig = sig
@@ -1156,7 +1187,7 @@ class DenddronAgent:
         if eng is not None and eng["threat"].threat_id == b.get("threat_id"):
             return                                   # job-mates detonate together by design
         ab = self._aborted_job
-        if ab and ab[0] == b.get("threat_id") and abs(float(b.get("sync_time") or ab[1]) - ab[1]) <= BLAST_TOL_S:
+        if ab and ab[0] == b.get("threat_id") and abs(float(b.get("sync_time") or self.sync.to_ship(ab[1])) - self.sync.to_ship(ab[1])) <= BLAST_TOL_S:
             return                                   # our own job's blast, the instant we aborted it
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
@@ -1235,7 +1266,7 @@ class DenddronAgent:
         if truth is None or pose is None:
             return
         local = self.clock.read(truth)
-        now = self.sync.ship_time(local)       # protocol time (_proto_now), with its parts for the log
+        now = self.sync.proto_time(local)      # protocol time (_proto_now), with its parts for the log
         if simclock.now() - self._progress_logged >= 2.0 and now < eng["t_engage"]:
             # Flight trace (protocol time): distance to slot, speed, time left, route leg.
             self._progress_logged = simclock.now()
@@ -1282,7 +1313,8 @@ class DenddronAgent:
         # protocol uses sync_time (ship time), local_time is for evaluation.
         self.pub_detonation.put(json.dumps({
             "agent_id": self.agent_id, "threat_id": threat.threat_id, "truth_time": truth,
-            "local_time": local, "sync_time": now, "t_engage": eng["t_engage"], "chain": False,
+            "local_time": local, "sync_time": self.sync.to_ship(now), "t_engage": self.sync.to_ship(eng["t_engage"]),
+            "chain": False,
             "x": pose["x"], "y": pose["y"], "z": pose["z"], "intruders": intruders,
         }))
         self.pub_cmd_vel.put(json.dumps({
@@ -1333,9 +1365,10 @@ class DenddronAgent:
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
         eng = self.engagement
+        now = self._proto_now()
         hb = {
             "agent_id": self.agent_id,
-            "time": self._proto_now(),
+            "time": None if now is None else self.sync.to_ship(now),
             "state": self._state_name(),
             "link": self._link_up(),
             "pose": None if pose is None else {k: round(pose[k], 2) for k in ("x", "y", "z")},
@@ -1343,6 +1376,8 @@ class DenddronAgent:
             "t_engage": eng["t_engage"] if eng else None,
             "confirmed": eng["confirmed"] if eng else None,
         }
+        if self.sync.mode == "master":
+            hb["t1"] = self._stamp()               # two-way exchange: echoed by the ship's roster
         self._radio_put(self.pub_heartbeat, "swarm/heartbeat", hb)
         if self._needs_help():
             self._radio_put(self.pub_help, "swarm/heartbeat_help", hb)
@@ -1362,6 +1397,9 @@ class DenddronAgent:
                     snap.update({"agent_id": self.agent_id, "peers_heard": len(self._fresh_peers()),
                                  "assignments": dict(self._assign_hashes),
                                  "voxels": self.voxel_map.get_stats().get("total_voxels", 0)})
+                    clock = self._clock_report()
+                    if clock:
+                        snap["clock"] = clock
                     self._radio_put(self.pub_telemetry, "swarm/telemetry", snap)
                 link = self._link_up()
                 if link != self._link_was_up:
@@ -1372,6 +1410,22 @@ class DenddronAgent:
             except Exception as e:
                 logger.warning(f"[{self.agent_id}] heartbeat error: {e}")
             simclock.sleep(period)
+
+    def _clock_report(self):
+        """Sync state for telemetry (only with imperfect clocks or a sync mode).  truth and ship_est
+        are taken at the same instant so the ship can compute the true error (evaluation only:
+        a drone cannot know its own error)."""
+        if self.sync.mode == "none" and self.clock.perfect:
+            return None
+        truth = simclock.truth_now()
+        if truth is None:
+            return None
+        local = self.clock.read(truth)
+        offset, bound = self.sync.offset(local), self.sync.error_bound(local)
+        return {"mode": self.sync.mode, "truth": round(truth, 6),
+                "ship_est": round(self.sync.to_ship(self.sync.proto_time(local)), 6),
+                "offset": None if offset is None else round(offset, 6),
+                "bound": None if bound is None else round(bound, 6)}
 
     def _fresh_peers(self):
         now = simclock.now()
@@ -1387,7 +1441,7 @@ class DenddronAgent:
             return
         self.telemetry.rx("swarm/heartbeat_help")
         self._peer_heard(peer)
-        self._peer_help[peer] = (bytes(sample.payload), simclock.now())
+        self._peer_help[peer] = (bytes(sample.payload), simclock.now(), self._stamp())
         self._radio_heard()
 
     def _relay_unheard_peers(self):
@@ -1403,18 +1457,29 @@ class DenddronAgent:
         if self.agent_id not in self.roster:
             return
         now = simclock.now()
-        for peer, (payload, t) in list(self._peer_help.items()):
+        for peer, (payload, t, local_rx) in list(self._peer_help.items()):
             if now - t > self.LINK_TIMEOUT_S:
                 del self._peer_help[peer]
             elif peer not in self.roster or peer in self.roster_relayed:
+                if self.sync.mode == "master" and local_rx is not None:
+                    # Transparent clock: add how long we held the heartbeat, so the ship's receive
+                    # stamp (t2) can be corrected; otherwise up to 1 s of holding biases the exchange.
+                    hb = json.loads(payload)
+                    if hb.get("t1") is not None:
+                        hb["relay_resid"] = round(self._stamp() - local_rx, 6)
+                        payload = json.dumps(hb).encode()
                 self.pub_relay.put(f"swarm/heartbeat_relay/{peer}", payload)
                 self.telemetry.tx("swarm/heartbeat_relay", len(payload))
 
     def _on_roster(self, sample):
+        t4 = self._stamp()
         self._radio_heard()
         self.telemetry.rx("ship/roster")
         try:
             msg = self._parse(sample)
+            mine = (msg.get("sync") or {}).get(self.agent_id)
+            if mine and t4 is not None and self.sync.mode == "master":
+                self.sync.on_exchange(*mine, t4)
             self.roster = list(msg.get("members", []))
             self.roster_relayed = set(msg.get("relayed", []))
             self._roster_time = simclock.now()

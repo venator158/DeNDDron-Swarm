@@ -40,5 +40,19 @@ class TestTrackTimebases(unittest.TestCase):
         self.assertAlmostEqual(d, 3.0, places=6)
 
 
+@unittest.skipIf(Track is None, "zenoh not installed")
+class TestShipInitState(unittest.TestCase):
+    def test_time_attributes_exist_before_the_first_clock(self):
+        # The ship stamps messages (ttg) before sim/clock has arrived; every time attribute must exist.
+        import ast
+        import inspect
+        import ship
+        init = next(n for n in ast.walk(ast.parse(inspect.getsource(ship.Ship)))
+                    if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+        assigned = {t.attr for n in ast.walk(init) if isinstance(n, ast.Assign)
+                    for t in n.targets if isinstance(t, ast.Attribute)}
+        self.assertTrue({"truth_time", "ship_time", "clock", "sync_mode"} <= assigned)
+
+
 if __name__ == "__main__":
     unittest.main()

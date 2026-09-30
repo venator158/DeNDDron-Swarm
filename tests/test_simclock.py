@@ -74,6 +74,13 @@ class TestSimClock(unittest.TestCase):
         simclock.observe(0.0)                     # world reset
         self.assertAlmostEqual(simclock.now() - a, 0.06, delta=0.01)
 
+    def test_truth_now_extrapolates_without_shift(self):
+        self.assertIsNone(simclock.truth_now())
+        sim = self.feed(2.0, 3.0, sim_start=50.0)
+        self.assertAlmostEqual(simclock.truth_now(), sim, delta=1e-6)
+        self.clock.t += 0.01
+        self.assertAlmostEqual(simclock.truth_now(), sim + 0.03, delta=0.002)
+
 
 if __name__ == "__main__":
     unittest.main()

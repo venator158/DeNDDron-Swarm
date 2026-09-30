@@ -192,11 +192,11 @@ The assigned drones take up slots **stacked vertically** through that point (wit
 | `sim/damage` | onboard | drone → ship | `{agent_id, cause: friendly_fire, by, by_threat, job, distance, truth_time}` |
 | `ship/zones` | radio | ship → drones | `{zones[{threat_id, point, radius, t_engage}]}` at 1 Hz: every job's reserved blast |
 | `sim/threat_tracks` | onboard | ship → sim | `{threat_id, type, level, status, t0, p0, v}` for Gazebo markers, in **truth** (the only track message not in ship time) |
-| `swarm/heartbeat/{id}` | radio | drone → ship | `{time, state, link, pose, threat_id, t_engage, confirmed}` at 2 Hz (drones do not subscribe) |
+| `swarm/heartbeat/{id}` | radio | drone → ship | `{time, state, link, pose, threat_id, t_engage, confirmed, t1?}` at 2 Hz (drones do not subscribe); `t1` (local send stamp) only with `CLOCK_SYNC=master` |
 | `swarm/heartbeat_help/{id}` | radio | drone → drones | the same heartbeat, only while the ship does not hear this drone directly |
-| `swarm/heartbeat_relay/{id}` | radio | drone → ship | a peer's help heartbeat, forwarded by drones in the roster |
+| `swarm/heartbeat_relay/{id}` | radio | drone → ship | a peer's help heartbeat, forwarded by drones in the roster; with `master`, plus `relay_resid` (how long the relay held it) |
 | `swarm/telemetry/{id}` | radio | drone → ship | instrumentation, 1 Hz |
-| `ship/roster` | radio | ship → drones | `{time, count, members[], relayed[]}` at 1 Hz: drones the ship hears, and which of them only through relays |
+| `ship/roster` | radio | ship → drones | `{time, count, members[], relayed[], sync?{drone: [t1, t2, t3]}}` at 1 Hz (`sync` only with `master`): drones the ship hears, and which of them only through relays |
 | `swarm/threats` | radio | ship → drones | engagement order `{wave_id, threats[{threat_id, type, level, required, location, t_engage}]}` |
 | `swarm/bids` | radio | drone → all | `{agent_id, wave_id, costs{threat_id: ETA s}}` |
 | `swarm/awards` | radio | drone → all, ship | `{threat_id, agent_id, wave_id, cost, status: engaged\|withdrawn\|missed\|released, slot, t_engage}` |
@@ -204,7 +204,7 @@ The assigned drones take up slots **stacked vertically** through that point (wit
 | `ship/jobs/{threat_id}` | radio | ship → the job's drones | `{status, seq, point, t_engage, cpa, t_cpa, track, holders{drone: slot}, n_slots}` at 2 Hz |
 | `ship/threat_status` | radio | ship → all | `{threat_id, status}` |
 
-Every absolute time on the radio (`t_engage`, `t_cpa`, `track.t0`, `time`, `sync_time`) is in the **ship's timebase** (see [Distributed clock](#distributed-clock)).
+Every absolute time on the radio (`t_engage`, `t_cpa`, `track.t0`, `time`, `sync_time`) is in the **ship's timebase** (see [Distributed clock](#distributed-clock)). With `CLOCK_SYNC=ttg`, orders, ACKs, jobs and zones also carry `sent`, the ship's send time.
 
 ## Engagement protocol
 
@@ -254,9 +254,33 @@ Durations (heartbeats, timeouts, bid window, ACK timeout, re-plan interval) stay
 
 Protocol decisions read the clock at the latest sensor frame (50 Hz), as before, so with the defaults (no drift, no offset, `CLOCK_SYNC=none`) behaviour is exactly the same as with the shared simulation clock.
 
-| Sync mode | Status |
-|---|---|
-| `none` | each drone trusts its local clock as ship time (default) |
+| Sync mode (`CLOCK_SYNC`) | How | Radio cost |
+|---|---|---|
+| `none` (default) | each drone trusts its local clock as ship time | none |
+| `ttg` (time-to-go) | the ship stamps every message that carries absolute times with its send time (`sent`); the drone anchors each time on receipt, `local_rx + (t − sent)`, and keeps its protocol times on its local clock. Every job update (2 Hz) and zone update (1 Hz) re-anchors. The unknown one-way delay becomes error. | one field per message |
+| `master` (ship master) | two-way exchange, NTP-style: the drone's heartbeat carries its send stamp t1; the ship stamps its receipt t2, and its 1 Hz roster echoes `[t1, t2, t3]` for every drone, t3 being the roster's send stamp; the drone stamps the roster's arrival t4. offset = ((t2 − t1) + (t3 − t4)) / 2. A Kalman filter on offset and rate weighs each sample by how much its round trip exceeds the recent minimum, so queueing spikes count for little, and the rate estimate carries the clock through gaps. | no new messages: ~12 B per heartbeat, ~45 B per drone in each roster |
+
+**Relayed drones (`master`).** The ship hears a drone that needs help through a peer, which forwards its heartbeat once a second, so the heartbeat can sit up to 1 s at the relay. The relay adds how long it held it (`relay_resid`, a PTP-style transparent clock) and the ship subtracts that from t2. The roster still reaches the drone directly. A drone that hears no roster keeps its last offset and rate.
+
+**Exchange timestamps** come from `simclock.truth_now()` (sim time extrapolated between frames) through the node's clock with its jitter: sensor frames are 20 ms apart, too coarse for an exchange.
+
+Measured (8 drones, 4 level-1 threats, `--rtf 3`; skewed = ±500 ppm drift and ±3 s offset per drone, `CLOCK_SEED=1`; sync error is the true error of each drone's telemetry report after its first 20 s):
+
+| Clocks, sync | Destroyed | Detonation error vs ordered time (max \|·\|) | Miss (mean, max) | Sync error (mean, max per drone) | Own bound covers true error |
+|---|---|---|---|---|---|
+| perfect, `none` | 4/4 | 18 ms | 2.83 m, 2.86 m | – | – |
+| skewed, `none` | 4/4 | 1.96 s | 4.23 m, 7.74 m | = clock error (0.2–3 s) | – |
+| skewed, `ttg` | 4/4 | 25 ms | 2.82 m, 2.84 m | 2.7–3.2 ms, ≤ 18 ms | no bound |
+| skewed, `master` | 4/4 | 17 ms | 2.82 m, 2.85 m | 0.5–1.4 ms, ≤ 4.8 ms | 82% |
+| perfect, `master` | 4/4 | 22 ms | 2.82 m | 0.6–1.3 ms, ≤ 2.9 ms | 83% |
+
+- Both modes remove the clock error from detonation timing. What remains is the 20 ms sensor-frame step: decisions run on frames.
+- `ttg` is off by the one-way delay of each message, a few ms at this radio load. Every job update re-anchors, so drift never accumulates while a job is live.
+- `master` gives the same result with ±500 ppm and ±3 s as with perfect clocks. The ~1 ms left (median −1.0 ms, 5–95% −2.0 to −0.2 ms) is systematic: path asymmetry between heartbeat and roster, plus the simulation's own floor (each process extrapolates truth from onboard messages that arrive a few ms late at `--rtf 3`). That bias is why the drones' own bound (median about 2.6 ms) covers only 82% of reports.
+- **Startup.** The first exchanges come in a congested start, when round trips are long. A version that weighed samples only against the recent minimum round trip trusted lopsided ones and lost the rate for a minute (errors to 129 ms). Samples are now weighed by their absolute round trip and gated once the filter has settled; `test_timesync.py` covers this case.
+- **Radio cost of `master`**: the same number of messages. Heartbeat bytes at the ship rose from 1445 to 1636 B/s for 8 drones, about 24 B/s per drone, and each roster grows by about 45 B per drone. With a sync mode, telemetry carries about 55 B more per drone per second, but that is instrumentation, not protocol.
+
+**What each drone reports.** With a sync mode or an imperfect clock, telemetry carries `clock{mode, offset, bound, truth, ship_est}`: the estimated offset (ship − local), the drone's own error bound, and a (truth, estimate) pair taken at the same instant. The ship turns that pair into the true error (the drone cannot know it; evaluation only), shows offset, bound and true error in the dashboard's instrumentation table, logs a `clock_eval` record per report, and adds `sync_err_s_*`, `sync_bound_s_mean` and `sync_bound_coverage` (how often the true error was within the bound) to `/api/summary`.
 
 **Kill assessment uses truth.** The radar observes a blast physically, whatever any clock says: a detonation carries the drone's sensor-frame sim time (`truth_time`) along with its local and synchronized stamps.
 
@@ -409,6 +433,7 @@ Every drone sends `swarm/telemetry/{id}` once a second, covering the last second
 | `perception_p99_ms`, `planner_p99_ms` | lidar processing per scan; planner per tick |
 | `rx_per_s`, `tx_per_s`, `tx_bytes_per_s` | radio messages per topic, and bytes sent, per simulated second |
 | `peers_heard`, `voxels` | peers heard from (bids, awards, help) in the last 3 s; voxel map size |
+| `clock` | clock sync state (only with a sync mode or an imperfect clock): mode, estimated offset, own error bound; the ship adds the true error (`clock_err_ms`, see [Distributed clock](#distributed-clock)) |
 
 The ship adds per-topic radio receive rates, per-threat decision latency (approval → first and last award), and an event log. Events also go to `/state/ship_log.jsonl` in the `swarm_state` volume, for offline analysis, with each detonation's timing evaluation (`detonation_eval`, see [Distributed clock](#distributed-clock)). Every event carries truth (`sim_time`) and ship time (`ship_time`). The metrics node logs positions, distance flown and collisions (under 2.5 m).
 
@@ -448,7 +473,9 @@ Where each implemented feature lives.
 | | sim-time / wall-time handling | `src/agent/timing.py` |
 | | protocol clock scaled by the real-time factor (`SIM_RTF`) | `src/common/simclock.py` |
 | **Clocks** | per-node hardware clock: drift, offset, exchange jitter, reproducible per-node draw | `src/common/localclock.py` |
-| | synchronized estimate of ship time (`CLOCK_SYNC`) | `src/common/timesync.py`, `agent.py` (`_proto_now`) |
+| | sync modes (`none`, `ttg`, `master`), exchange filter, error bound | `src/common/timesync.py` |
+| | drone: protocol time, inbound conversion, exchange stamps, relay holding time, clock telemetry | `agent.py` (`_proto_now`, `_inbound_job`, `_stamp`, `_on_roster`, `_relay_unheard_peers`, `_clock_report`) |
+| | ship: `sent` stamps, exchange stamps in heartbeats and roster, true sync error | `ship.py` (`_stamped`, `_on_heartbeat`, `run`, `_on_telemetry`) |
 | | bidding (ETA), engagement, slots, detonation / abort | `agent.py` (`_on_threat_wave`, `_calculate_costs`, `_service_auctions`, `_check_engagement`) |
 | | ACK wait and timeout, job topic updates, release | `agent.py` (`_on_ack`, `_on_job`, `_apply_job`, `_abandon`) |
 | | decentralized all-or-nothing priority assignment, conflict yield | `src/agent/auction.py` |
@@ -515,10 +542,12 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_threats.py` | CPA/TCPA, engagement point (CPA vs. defended-radius crossing), slots, ETA, TTI, serialization |
 | `test_threat_queue.py` | min-heap ordering by TCPA, lazy removal |
 | `test_localclock.py` | perfect default, drift/offset model, jitter only in exchange stamps, reproducible per-node draw |
-| `test_ship_track.py` | radar track: truth vs ship-time view, true closest approach (needs zenoh installed) |
+| `test_ship_track.py` | radar track: truth vs ship-time view, true closest approach; ship time attributes set at start (needs zenoh installed) |
+| `test_timesync.py` | exchange arithmetic and asymmetry bias; ship-master filter: convergence under drift and offset, holdover on the rate, jitter and delay spikes, bound covers a constant asymmetry; time-to-go anchoring |
 | `test_voxel_map_batch.py` | batched ray tracing, occupied index vs. brute force, incremental expiry, clock reset |
 | `test_apf.py`, `test_orca_vertical_filter.py` | planner force bounds, ORCA vertical envelope |
 | `test_timing_manager.py`, `test_time_handling.py` | timing states |
+| `test_simclock.py` | protocol clock follows the measured sim rate, never goes backwards, survives restarts; `truth_now` extrapolation |
 | `test_metrics_spatial_hash.py` | spatial-hash collision check matches brute force |
 | `benchmark_voxelmap.py`, `validate_*.py` | throughput, planner scenarios, timing, metrics overhead, worker lifecycle |
 
@@ -540,7 +569,7 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 ## Known limitations
 - **Best-effort radio.** The radio runs over UDP, so messages can be lost under packet loss; see [Degraded communications](#degraded-communications).
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
-- **Clock synchronization.** Each node has its own clock (see [Distributed clock](#distributed-clock)), but only `CLOCK_SYNC=none` exists so far: with drift or offsets on, drones detonate early or late by their clock error.
+- **Clock synchronization depends on the ship.** `ttg` and `master` both need the ship's messages; a drone that stops hearing the ship keeps its last estimate (with `master`, its last offset and rate). Peer-to-peer consensus is not implemented yet.
 - **Idealized threats.** They fly straight lines at constant speed, apart from at most one optional turn, and a detonation within the kill radius always kills (no kill probability).
 - **Re-planning after a manoeuvre uses the job's own drones only.** The ship re-picks the intercept point for them (falling back to the legacy point if none fits). It doesn't bring in closer free drones.
 - **Greedy assignment.** Orders are assigned per order, highest level first, not globally optimized. A drone waiting on one order's result skips any other order that arrives before that result.

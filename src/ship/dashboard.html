@@ -99,7 +99,10 @@
           <thead><tr><th>drone</th><th>state</th><th>link</th><th class="num">hb age</th><th>threat</th>
             <th class="num">cpu %</th><th class="num">loop Hz</th><th class="num">loop p99</th><th class="num">overruns</th>
             <th class="num">sensor age p50/max</th><th class="num">percep p99</th><th class="num">plan p99</th>
-            <th class="num">tx B/s</th><th class="num">peers</th></tr></thead>
+            <th class="num">tx B/s</th><th class="num">peers</th>
+            <th class="num" title="drone's estimated ship time minus its local clock (s)">clk offset</th>
+            <th class="num" title="drone's own error bound">clk ± ms</th>
+            <th class="num" title="true sync error (evaluation only)">clk err ms</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -227,7 +230,9 @@ function renderDrones(s) {
       <td class="num ${m.overruns > 5 ? "warn" : ""}">${m.overruns ?? "–"}</td>
       <td class="num">${fmt(m.sensor_age_p50_ms, 0)} / ${fmt(m.sensor_age_max_ms, 0)}</td>
       <td class="num">${fmt(m.perception_p99_ms, 2)}</td><td class="num">${fmt(m.planner_p99_ms, 2)}</td>
-      <td class="num">${m.tx_bytes_per_s ?? "–"}</td><td class="num">${m.peers_heard ?? "–"}</td></tr>`;
+      <td class="num">${m.tx_bytes_per_s ?? "–"}</td><td class="num">${m.peers_heard ?? "–"}</td>
+      <td class="num">${fmt(m.clock && m.clock.offset, 3)}</td><td class="num">${fmt(m.clock_bound_ms, 1)}</td>
+      <td class="num ${Math.abs(m.clock_err_ms) > 50 ? "warn" : ""}">${fmt(m.clock_err_ms, 1)}</td></tr>`;
   }).join("");
 }
 

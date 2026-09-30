@@ -177,6 +177,10 @@ class Ship:
         # Truth (sim/clock) is for the radar's world and evaluation; C2 runs on ship_time, the ship's
         # own clock (SHIP_CLOCK_*, perfect by default), which is the protocol's timebase.
         self.clock = localclock.from_env("ship", prefix="SHIP_CLOCK_")
+        # Sync mode (timesync.py): ttg stamps orders/jobs/zones with their send time; master echoes
+        # each drone's heartbeat stamp (t1) with receive/send stamps (t2, t3) in the roster.
+        self.sync_mode = (os.environ.get("CLOCK_SYNC") or "none").lower()
+        self.sync_evals = []             # (drone, |true error| s, own bound s) from clock telemetry
         self.truth_time = None
         self.ship_time = None
         self.tracks = {}                 # threat_id -> Track
@@ -239,6 +243,18 @@ class Ship:
             self.log_file.write(json.dumps({"sim_time": self.truth_time, "ship_time": self.ship_time,
                                             "kind": kind, **fields}) + "\n")
 
+    def _stamp(self):
+        """Ship-clock timestamp for sync exchanges: extrapolated between sim/clock updates (10 Hz),
+        with the clock's jitter."""
+        t = simclock.truth_now()
+        return self.clock.stamp(t if t is not None else (self.truth_time or 0.0))
+
+    def _stamped(self, msg):
+        """With ttg, stamp a message carrying absolute times with its send time."""
+        if self.sync_mode == "ttg":
+            msg["sent"] = round(self._stamp(), 6)
+        return msg
+
     def _count_rx(self, topic, sample):
         self.rx_counts[topic] += 1
         self.rx_bytes[topic] += len(bytes(sample.payload))
@@ -255,11 +271,14 @@ class Ship:
         simclock.observe(truth)
 
     def _on_heartbeat(self, sample):
+        t2 = self._stamp()
         self._count_rx("swarm/heartbeat", sample)
         hb = self._parse(sample)
         with self.lock:
             d = self.drones.setdefault(hb["agent_id"], {"telemetry": {}})
             d["hb"], d["seen"], d["relayed"] = hb, simclock.now(), False
+            if hb.get("t1") is not None:
+                d["sync"] = (hb["t1"], t2)
             if hb.get("state") == "expended":
                 self.expended.add(hb["agent_id"])
 
@@ -272,12 +291,28 @@ class Ship:
             if "seen" in d and simclock.now() - d["seen"] < 1.0 and not d.get("relayed"):
                 return   # heard directly anyway
             d["hb"], d["seen"], d["relayed"] = hb, simclock.now(), True
+            if hb.get("t1") is not None:
+                # The relaying drone held it for relay_resid (transparent clock): take that off t2.
+                d["sync"] = (hb["t1"], self._stamp() - float(hb.get("relay_resid") or 0.0))
 
     def _on_telemetry(self, sample):
         self._count_rx("swarm/telemetry", sample)
         t = self._parse(sample)
+        c = t.get("clock")
+        if c and c.get("truth") is not None and c.get("ship_est") is not None:
+            # True sync error (evaluation only): the drone's estimate of ship time against the
+            # ship's clock at the same truth instant.
+            err = float(c["ship_est"]) - self.clock.read(float(c["truth"]))
+            t["clock_err_ms"] = round(err * 1000.0, 2)
+            t["clock_bound_ms"] = None if c.get("bound") is None else round(c["bound"] * 1000.0, 2)
         with self.lock:
             self.drones.setdefault(t["agent_id"], {"telemetry": {}})["telemetry"] = t
+            if "clock_err_ms" in t:
+                self.log_only("clock_eval", drone=t["agent_id"], mode=c.get("mode"), err_s=round(err, 6),
+                              bound_s=c.get("bound"), offset_s=c.get("offset"), truth=c["truth"])
+            if "clock_err_ms" in t and t["agent_id"] not in self.expended:
+                self.sync_evals.append((t["agent_id"], abs(t["clock_err_ms"]) / 1000.0,
+                                        None if t["clock_bound_ms"] is None else t["clock_bound_ms"] / 1000.0))
 
     def _on_bid(self, sample):
         self._count_rx("swarm/bids", sample)
@@ -324,7 +359,7 @@ class Ship:
                "job": f"ship/jobs/{tr.threat_id}"}
         if accepted:
             msg.update(self._job_msg(tr))
-        self.radio.put(f"ship/ack/{agent}", json.dumps(msg))
+        self.radio.put(f"ship/ack/{agent}", json.dumps(self._stamped(msg)))
 
     def _job_msg(self, tr):
         return {"threat_id": tr.threat_id, "status": "active" if tr.active else tr.status, "seq": tr.job_seq,
@@ -380,11 +415,11 @@ class Ship:
     def _publish_zones(self):
         zones = [{"threat_id": tr.threat_id, "point": _xyz(tr.point), "radius": self.zone_radius(tr),
                   "t_engage": tr.t_engage} for tr in self.tracks.values() if tr.status == "approved"]
-        self.pub_zones.put(json.dumps({"zones": zones}))
+        self.pub_zones.put(json.dumps(self._stamped({"zones": zones})))
 
     def _publish_job(self, tr):
         tr.job_seq += 1
-        self.radio.put(f"ship/jobs/{tr.threat_id}", json.dumps(self._job_msg(tr)))
+        self.radio.put(f"ship/jobs/{tr.threat_id}", json.dumps(self._stamped(self._job_msg(tr))))
 
     def _arbitrate(self):
         """Confirm the best pending awards per threat once the collection window has passed."""
@@ -520,11 +555,11 @@ class Ship:
         any threat speed.  Secondary: the error against the ordered t_engage (ship time, mapped to
         truth through the ship's clock)."""
         ideal_t, ideal_miss = tr.true_closest_approach(here)
-        ordered = d.get("t_engage")
+        ordered = tr.t_engage                   # the ship's latest order (ship time)
         rec = {"threat": tr.threat_id, "drone": d["agent_id"], "truth_t": round(truth, 3),
                "local_t": d.get("local_time"), "sync_t": d.get("sync_time"), "t_engage": ordered,
                "ideal_t": round(ideal_t, 3), "timing_err_s": round(truth - ideal_t, 3),
-               "ordered_err_s": None if ordered is None else round(truth - self.clock.to_truth(float(ordered)), 3),
+               "ordered_err_s": round(truth - self.clock.to_truth(ordered), 3),
                "miss_m": round(miss, 2), "ideal_miss_m": round(ideal_miss, 2), "chain": bool(d.get("chain")),
                "threat_speed": round(math.hypot(*tr.true_v), 2)}
         tr.det_eval.append(rec)
@@ -639,7 +674,7 @@ class Ship:
         self.order_seq += 1
         tr.orders.append(f"O{self.order_seq}")
         order = Threat(tr.threat_id, tr.type, tr.level, required, _xyz(tr.point), tr.t_engage)
-        self.pub_orders.put(json.dumps({"wave_id": f"O{self.order_seq}", "threats": [order.to_dict()]}))
+        self.pub_orders.put(json.dumps(self._stamped({"wave_id": f"O{self.order_seq}", "threats": [order.to_dict()]})))
         tr.announces += 1
         tr.last_announce = simclock.now()
 
@@ -688,8 +723,14 @@ class Ship:
                     last_roster = wall
                     members = self.members()
                     relayed = [d for d in members if self.drones[d].get("relayed")]
-                    self.pub_roster.put(json.dumps({"time": now, "count": len(members), "members": members,
-                                                    "relayed": relayed}))
+                    roster = {"time": now, "count": len(members), "members": members, "relayed": relayed}
+                    if self.sync_mode == "master":
+                        # Two-way exchange: echo each drone's latest t1 with our receive stamp t2 and
+                        # this send stamp t3 (one broadcast for all drones, no extra messages).
+                        t3 = round(self._stamp(), 6)
+                        roster["sync"] = {d: [self.drones[d]["sync"][0], round(self.drones[d]["sync"][1], 6), t3]
+                                          for d in members if self.drones[d].get("sync")}
+                    self.pub_roster.put(json.dumps(roster))
                     self._publish_zones()
                     span = wall - self._rx_window_start
                     if span >= 1.0:
@@ -727,6 +768,10 @@ class Ship:
         timing = _stats([e["timing_err_s"] for e in evals])
         ordered = _stats([e["ordered_err_s"] for e in evals])
         miss = _stats([e["miss_m"] for e in evals], 2)
+        with self.lock:
+            sync_err = _stats([e for _, e, _ in self.sync_evals], 4)
+            bounds = [b for _, _, b in self.sync_evals if b is not None]
+            covered = [e <= b for _, e, b in self.sync_evals if b is not None]
         return {
             "sim_time": s["sim_time"],
             "threats_detected": len(self.tracks),
@@ -761,6 +806,11 @@ class Ship:
             "det_ordered_err_s_absmax": ordered[2],
             "det_miss_m_mean": miss[0], "det_miss_m_sd": miss[1], "det_miss_m_max": miss[2],
             "chain_fires": sum(1 for e in evals if e["chain"]),
+            # Clock sync (drone telemetry, 1 Hz per live drone): |true error| and the drones' own bounds.
+            "sync_mode": self.sync_mode,
+            "sync_err_s_mean": sync_err[0], "sync_err_s_sd": sync_err[1], "sync_err_s_max": sync_err[2],
+            "sync_bound_s_mean": round(sum(bounds) / len(bounds), 4) if bounds else None,
+            "sync_bound_coverage": round(sum(covered) / len(covered), 3) if covered else None,
             "ship_clock": self.clock.describe(),
         }
 

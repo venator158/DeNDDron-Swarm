@@ -63,6 +63,13 @@ def now() -> float:
         return _out
 
 
+def truth_now():
+    """Current sim time, extrapolated from the last observation (no shift), or None before one.
+    For clock-sync timestamps, which need finer resolution than sensor frames (localclock.py)."""
+    with _lock:
+        return None if _sim is None else _sim + (time.monotonic() - _wall) * _rate
+
+
 def rate() -> float:
     """Measured sim seconds per wall second (the target until measured)."""
     with _lock:
