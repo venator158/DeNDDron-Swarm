@@ -54,6 +54,11 @@ JOB_HZ = 2.0               # job topic updates per (sim) second
 JOB_CLOSE_REPEATS = 3      # "closed" job updates sent after a threat is resolved (lossy radio)
 HB_MISMATCH_S = 2.0        # a confirmed drone whose heartbeat shows another job this long is dropped
 INTERCEPT_REPLAN_S = 0.5   # intercept search results are reused this long (dashboard polls several times/s)
+# Slack before a re-planned intercept (after a manoeuvre) for the job's own drones.  A new order needs
+# INTERCEPT_SLACK_S (4 s: order, bids, confirmation); drones already on the job only need the job update.
+# With 4 s, a late turn (threat ~100 m out, drones on station) pushed 1 re-plan in 8 back to the legacy
+# point (45 m) and 1 in 4 inside 60 m; with 1 s, 0 and ~1 in 70 (200 simulated turns).
+MANEUVER_REPLAN_SLACK_S = 1.0
 
 
 def _env(name, default, cast):
@@ -391,8 +396,9 @@ class Ship:
         p = self.drones.get(drone, {}).get("hb", {}).get("pose")
         return (p["x"], p["y"], p["z"]) if p else None
 
-    def plan_intercept(self, tr, now, drones=None, level=None):
-        """Earliest reachable intercept for this track (cached briefly for the free-drone case)."""
+    def plan_intercept(self, tr, now, drones=None, level=None, slack=None):
+        """Earliest reachable intercept for this track (cached briefly for the free-drone case).
+        slack: time kept free before it (default INTERCEPT_SLACK_S, for a new order)."""
         cacheable = drones is None
         if cacheable and tr.plan_cache and abs(tr.plan_cache[0] - now) < INTERCEPT_REPLAN_S:
             return tr.plan_cache[1]
@@ -406,6 +412,8 @@ class Ship:
         args = (tr.position, now, tr.legacy_t, drones, level or tr.level,
                 self._reservations(exclude=tr.threat_id), self.v_max, self.a_max)
         kw = dict(max_range=self.args.intercept_range, z_range=self.z_range)
+        if slack is not None:
+            kw["slack"] = slack
         ic = choose_intercept(*args, committed=committed, **kw) or choose_intercept(*args, **kw)
         if cacheable:
             tr.plan_cache = (now, ic)
@@ -509,14 +517,18 @@ class Ship:
             if tr.status == "approved":
                 # Re-plan the intercept for the drones already on the job (legacy point if none fits).
                 crew = [q for q in (self._pose(d) for d in set(tr.confirmed) | set(tr.pending)) if q]
-                ic = self.plan_intercept(tr, now, drones=crew, level=max(1, len(crew))) if crew else None
+                ic = (self.plan_intercept(tr, now, drones=crew, level=max(1, len(crew)), slack=MANEUVER_REPLAN_SLACK_S)
+                      if crew else None)
                 if ic is not None:
                     tr.point, tr.t_engage = ic.point, ic.t
             tr.maneuvers += 1
             self.queue.update(tr.threat_id, tr.t_cpa)
             self.pub_tracks.put(json.dumps(tr.track_msg(truth=True)))
             self.event("maneuver", threat=tr.threat_id, point_shift_m=round(math.dist(old_point, tr.point), 1),
-                       t_engage_shift_s=round(tr.t_engage - old_t, 1))
+                       t_engage_shift_s=round(tr.t_engage - old_t, 1),
+                       range_m=[round(math.hypot(old_point[0], old_point[1]), 1),
+                                round(math.hypot(tr.point[0], tr.point[1]), 1)],
+                       replanned=tr.status == "approved" and tr.point != tr.legacy_point)
             if tr.status == "approved":
                 self._publish_job(tr)
 
@@ -573,7 +585,8 @@ class Ship:
                "ordered_err_s": round(truth - self.clock.to_truth(ordered), 3),
                "miss_m": round(miss, 2), "ideal_miss_m": round(ideal_miss, 2), "chain": bool(d.get("chain")),
                "threat_speed": round(math.hypot(*tr.true_v), 2),
-               "reason": d.get("reason", "timed"), "chain_delay_s": d.get("chain_delay_s"), "chain_by": d.get("chain_by")}
+               "reason": d.get("reason", "timed"), "chain_delay_s": d.get("chain_delay_s"), "chain_by": d.get("chain_by"),
+               "range_m": round(math.hypot(here[0], here[1]), 1)}      # blast's distance from the ship
         if d.get("trigger"):
             # Ground-truth label of what the fuze fired on (evaluation only): was the contact the threat?
             trig = tuple(here[k] + float(d["trigger"][k]) for k in range(3))

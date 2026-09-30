@@ -3,7 +3,7 @@ import unittest
 
 from deconflict import (BLAST_TOL_S, Blast, Reservation, blast_radius, blast_separation, choose_intercept,
                         plan_route, progress, stop_distance, travel_time)
-from threats import eta, position_at
+from threats import engagement_point, eta, position_at
 
 V, A = 4.0, 1.0
 
@@ -193,6 +193,22 @@ class TestChooseIntercept(unittest.TestCase):
     def test_none_when_out_of_range_or_time(self):
         self.assertIsNone(self.choose([(-150.0, 0.0, 20.0)], t_latest=10.0))
         self.assertIsNone(self.choose([(40.0, 0.0, 20.0)], max_range=5.0))
+
+
+class TestManeuverReplan(unittest.TestCase):
+    def test_late_turn_needs_only_the_job_update_slack(self):
+        # A threat turns ~96 m out while its drone waits on station ~85 m out.  With a new order's
+        # 4 s of slack no point is reachable and the ship fell back to the legacy point (45 m): the
+        # drone flew back towards the ship.  The job's own drones need only ~1 s (ship.py,
+        # MANEUVER_REPLAN_SLACK_S), and then a point ~87 m out is found.
+        pm, v2, tm = (-93.901, 27.372, 20.0), (2.4143, -0.6489, 0.0), 28.887
+        drone = (-81.533, 23.269, 20.0)
+        track = lambda t: position_at(pm, v2, tm, t)
+        _, t_legacy = engagement_point(pm, v2, tm, 45.0)
+        args = (track, tm, t_legacy, [drone], 1, [], 4.0, 1.0, 140.0, (1.0, 50.0))
+        self.assertIsNone(choose_intercept(*args, slack=4.0))
+        ic = choose_intercept(*args, slack=1.0)
+        self.assertGreater(math.hypot(ic.point[0], ic.point[1]), 80.0)
 
 
 if __name__ == "__main__":
