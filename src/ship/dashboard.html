@@ -231,8 +231,8 @@ function renderDrones(s) {
       <td class="num">${fmt(m.sensor_age_p50_ms, 0)} / ${fmt(m.sensor_age_max_ms, 0)}</td>
       <td class="num">${fmt(m.perception_p99_ms, 2)}</td><td class="num">${fmt(m.planner_p99_ms, 2)}</td>
       <td class="num">${m.tx_bytes_per_s ?? "–"}</td><td class="num">${m.peers_heard ?? "–"}</td>
-      <td class="num">${fmt(m.clock && m.clock.offset, 3)}</td><td class="num">${fmt(m.clock_bound_ms, 1)}</td>
-      <td class="num ${Math.abs(m.clock_err_ms) > 50 ? "warn" : ""}">${fmt(m.clock_err_ms, 1)}</td></tr>`;
+      <td class="num">${fmt(m.clock && m.clock.offset, 3)}</td><td class="num">${fmt(m.clock && m.clock.bound != null ? m.clock.bound * 1000 : null, 1)}</td>
+      <td class="num ${Math.abs(d.clock_err_ms) > 50 ? "warn" : ""}">${fmt(d.clock_err_ms, 1)}</td></tr>`;
   }).join("");
 }
 

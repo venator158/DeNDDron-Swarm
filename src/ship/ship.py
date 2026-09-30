@@ -212,6 +212,7 @@ class Ship:
             self.onboard.declare_subscriber("sim/clock", self._on_clock),
             self.onboard.declare_subscriber("sim/detonation", self._on_detonation),
             self.onboard.declare_subscriber("sim/damage", self._on_damage),
+            self.onboard.declare_subscriber("sim/clock_eval", self._on_clock_eval),
             self.radio.declare_subscriber("swarm/heartbeat/*", self._on_heartbeat),
             self.radio.declare_subscriber("swarm/heartbeat_relay/*", self._on_relayed_heartbeat),
             self.radio.declare_subscriber("swarm/telemetry/*", self._on_telemetry),
@@ -298,21 +299,26 @@ class Ship:
     def _on_telemetry(self, sample):
         self._count_rx("swarm/telemetry", sample)
         t = self._parse(sample)
-        c = t.get("clock")
-        if c and c.get("truth") is not None and c.get("ship_est") is not None:
-            # True sync error (evaluation only): the drone's estimate of ship time against the
-            # ship's clock at the same truth instant.
-            err = float(c["ship_est"]) - self.clock.read(float(c["truth"]))
-            t["clock_err_ms"] = round(err * 1000.0, 2)
-            t["clock_bound_ms"] = None if c.get("bound") is None else round(c["bound"] * 1000.0, 2)
         with self.lock:
             self.drones.setdefault(t["agent_id"], {"telemetry": {}})["telemetry"] = t
-            if "clock_err_ms" in t:
-                self.log_only("clock_eval", drone=t["agent_id"], mode=c.get("mode"), err_s=round(err, 6),
-                              bound_s=c.get("bound"), offset_s=c.get("offset"), truth=c["truth"])
-            if "clock_err_ms" in t and t["agent_id"] not in self.expended:
-                self.sync_evals.append((t["agent_id"], abs(t["clock_err_ms"]) / 1000.0,
-                                        None if t["clock_bound_ms"] is None else t["clock_bound_ms"] / 1000.0))
+
+    def _on_clock_eval(self, sample):
+        """True sync error (evaluation only, onboard bus): the drone's estimate of ship time against
+        the ship's clock at the same truth instant.  Measured during radio cuts too."""
+        c = self._parse(sample)
+        if c.get("truth") is None or c.get("ship_est") is None:
+            return
+        err = float(c["ship_est"]) - self.clock.read(float(c["truth"]))
+        bound = c.get("bound")
+        with self.lock:
+            d = self.drones.setdefault(c["agent_id"], {"telemetry": {}})
+            d["clock_err_ms"] = round(err * 1000.0, 2)
+            d["clock_bound_ms"] = None if bound is None else round(bound * 1000.0, 2)
+            self.log_only("clock_eval", drone=c["agent_id"], mode=c.get("mode"), err_s=round(err, 6),
+                          bound_s=bound, offset_s=c.get("offset"), truth=c["truth"], hops=c.get("hops"),
+                          ship=c.get("ship"))
+            if c["agent_id"] not in self.expended:
+                self.sync_evals.append((c["agent_id"], abs(err), bound))
 
     def _on_bid(self, sample):
         self._count_rx("swarm/bids", sample)
@@ -724,12 +730,15 @@ class Ship:
                     members = self.members()
                     relayed = [d for d in members if self.drones[d].get("relayed")]
                     roster = {"time": now, "count": len(members), "members": members, "relayed": relayed}
-                    if self.sync_mode == "master":
+                    if self.sync_mode in ("master", "consensus"):
                         # Two-way exchange: echo each drone's latest t1 with our receive stamp t2 and
-                        # this send stamp t3 (one broadcast for all drones, no extra messages).
+                        # this send stamp t3 (one broadcast for all drones, no extra messages).  With
+                        # consensus, t3 is also the pinned leader's clock beacon.
                         t3 = round(self._stamp(), 6)
                         roster["sync"] = {d: [self.drones[d]["sync"][0], round(self.drones[d]["sync"][1], 6), t3]
                                           for d in members if self.drones[d].get("sync")}
+                        if self.sync_mode == "consensus":
+                            roster["beacon"] = t3
                     self.pub_roster.put(json.dumps(roster))
                     self._publish_zones()
                     span = wall - self._rx_window_start
@@ -852,6 +861,7 @@ class Ship:
                                "link": hb.get("link"), "relayed": v.get("relayed", False),
                                "pose": hb.get("pose"), "threat_id": hb.get("threat_id"),
                                "hb_age_s": None if "seen" not in v else round(wall - v["seen"], 1),
+                               "clock_err_ms": v.get("clock_err_ms"), "clock_bound_ms": v.get("clock_bound_ms"),
                                "telemetry": v.get("telemetry", {})})
             members = self.members()
             counts = defaultdict(int)

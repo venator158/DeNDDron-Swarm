@@ -89,6 +89,11 @@ services:
       CLOCK_JITTER_S: ${CLOCK_JITTER_S:-0}
       CLOCK_SEED: ${CLOCK_SEED:-0}
       CLOCK_SYNC: ${CLOCK_SYNC:-none}
+      CLOCK_BEACON_HZ: ${CLOCK_BEACON_HZ:-0.5}
+      CLOCK_GAIN: ${CLOCK_GAIN:-0.5}
+      CLOCK_LEADER_SHARE: ${CLOCK_LEADER_SHARE:-0.5}
+      CLOCK_AGGREGATE: ${CLOCK_AGGREGATE:-mean}
+      CLOCK_STEP_S: ${CLOCK_STEP_S:-0.05}
       SWARM_RUNTIME_CONFIG: /app/config/swarm_runtime.json
       AGENT_ID_REGISTRY: /app/config/agent_registry.json
     # exec so SIGTERM reaches python and the agent shuts down cleanly

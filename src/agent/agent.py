@@ -210,7 +210,9 @@ class DenddronAgent:
         # ship time (timesync.py).  Protocol times (t_engage, zones, holds) are ship time
         # (_proto_now); truth (current_time) is for physics and evaluation only.
         self.clock = localclock.from_env(self.agent_id)
-        self.sync = timesync.make()
+        self.sync = timesync.make(node_id=self.agent_id)
+        self.beacon_period = 1.0 / float(os.environ.get("CLOCK_BEACON_HZ") or 0.5)   # consensus only
+        self._last_beacon = -1e9
         logger.info(f"[{self.agent_id}] Clock {self.clock.describe()}, sync {self.sync.mode}")
         self._last_radio_rx = None     # simclock time of the last message from the ship or a peer
         self.peers = {}                # peer drone id -> simclock time any message from it was last heard
@@ -260,9 +262,16 @@ class DenddronAgent:
         self._progress_logged = -1e9
         self._route_planned = -1e9     # simclock time of the last route re-plan
         self.sub_zones     = self.radio.declare_subscriber("ship/zones", self._on_zones)
+        if self.sync.mode == "consensus":
+            # Clock beacons between drones (timesync.Consensus); the ship's is in its roster.
+            self.pub_clock = self.radio.declare_publisher(f"swarm/clock/{self.agent_id}")
+            self.sub_clock = self.radio.declare_subscriber("swarm/clock/*", self._on_clock_beacon)
         # Physics: detonations of other jobs within KILL_RADIUS destroy this drone (friendly fire).
         self.sub_blasts    = self.onboard.declare_subscriber("sim/detonation", self._on_blast)
         self.pub_damage    = self.onboard.declare_publisher("sim/damage")
+        # Evaluation only: truth vs our estimate of ship time, on the onboard bus so it is measured
+        # during radio cuts too (the radio telemetry carries only what a real drone could report).
+        self.pub_clock_eval = self.onboard.declare_publisher("sim/clock_eval")
 
         # Start background threads
         self.control_thread = threading.Thread(target=self._reflex_control_loop)
@@ -1376,7 +1385,7 @@ class DenddronAgent:
             "t_engage": eng["t_engage"] if eng else None,
             "confirmed": eng["confirmed"] if eng else None,
         }
-        if self.sync.mode == "master":
+        if self.sync.mode in ("master", "consensus"):
             hb["t1"] = self._stamp()               # two-way exchange: echoed by the ship's roster
         self._radio_put(self.pub_heartbeat, "swarm/heartbeat", hb)
         if self._needs_help():
@@ -1399,8 +1408,10 @@ class DenddronAgent:
                                  "voxels": self.voxel_map.get_stats().get("total_voxels", 0)})
                     clock = self._clock_report()
                     if clock:
-                        snap["clock"] = clock
+                        snap["clock"] = {k: v for k, v in clock.items() if k not in ("truth", "ship_est")}
+                        self.pub_clock_eval.put(json.dumps({"agent_id": self.agent_id, **clock}))
                     self._radio_put(self.pub_telemetry, "swarm/telemetry", snap)
+                self._send_clock_beacon()
                 link = self._link_up()
                 if link != self._link_was_up:
                     logger.warning(f"[{self.agent_id}] Radio link {'UP' if link else 'LOST'}"
@@ -1411,10 +1422,36 @@ class DenddronAgent:
                 logger.warning(f"[{self.agent_id}] heartbeat error: {e}")
             simclock.sleep(period)
 
+    def _send_clock_beacon(self):
+        """Consensus: update our clock from the neighbours heard, then beacon (CLOCK_BEACON_HZ)."""
+        if self.sync.mode != "consensus" or simclock.now() - self._last_beacon < self.beacon_period:
+            return
+        local = self._stamp()
+        if local is None:
+            return
+        self._last_beacon = simclock.now()
+        self.sync.step(local)
+        self._radio_put(self.pub_clock, "swarm/clock", {"agent_id": self.agent_id, **self.sync.beacon(local)})
+
+    def _on_clock_beacon(self, sample):
+        local_rx = self._stamp()
+        peer = str(sample.key_expr).rsplit("/", 1)[-1]
+        if peer == self.agent_id or local_rx is None:
+            return
+        self.telemetry.rx("swarm/clock")
+        self._peer_heard(peer)
+        self._radio_heard()
+        try:
+            b = self._parse(sample)
+            self.sync.on_beacon(peer, float(b["tau"]), float(b["alpha"]), float(b["o"]), b.get("anchor"),
+                                local_rx, echo=b.get("echo"))
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] Ignoring malformed clock beacon: {e}")
+
     def _clock_report(self):
-        """Sync state for telemetry (only with imperfect clocks or a sync mode).  truth and ship_est
-        are taken at the same instant so the ship can compute the true error (evaluation only:
-        a drone cannot know its own error)."""
+        """Sync state (only with imperfect clocks or a sync mode): mode, offset, own bound go in the
+        radio telemetry; truth and ship_est, taken at the same instant, go only to sim/clock_eval so
+        the ship can compute the true error (evaluation: a drone cannot know its own error)."""
         if self.sync.mode == "none" and self.clock.perfect:
             return None
         truth = simclock.truth_now()
@@ -1422,10 +1459,14 @@ class DenddronAgent:
             return None
         local = self.clock.read(truth)
         offset, bound = self.sync.offset(local), self.sync.error_bound(local)
-        return {"mode": self.sync.mode, "truth": round(truth, 6),
+        rep = {"mode": self.sync.mode, "truth": round(truth, 6),
                 "ship_est": round(self.sync.to_ship(self.sync.proto_time(local)), 6),
                 "offset": None if offset is None else round(offset, 6),
                 "bound": None if bound is None else round(bound, 6)}
+        if self.sync.mode == "consensus":
+            rep["hops"] = None if self.sync.anchor is None else self.sync.anchor[1]
+            rep["ship"] = self.sync.hears_leader(local)
+        return rep
 
     def _fresh_peers(self):
         now = simclock.now()
@@ -1461,7 +1502,7 @@ class DenddronAgent:
             if now - t > self.LINK_TIMEOUT_S:
                 del self._peer_help[peer]
             elif peer not in self.roster or peer in self.roster_relayed:
-                if self.sync.mode == "master" and local_rx is not None:
+                if self.sync.mode in ("master", "consensus") and local_rx is not None:
                     # Transparent clock: add how long we held the heartbeat, so the ship's receive
                     # stamp (t2) can be corrected; otherwise up to 1 s of holding biases the exchange.
                     hb = json.loads(payload)
@@ -1480,6 +1521,9 @@ class DenddronAgent:
             mine = (msg.get("sync") or {}).get(self.agent_id)
             if mine and t4 is not None and self.sync.mode == "master":
                 self.sync.on_exchange(*mine, t4)
+            elif self.sync.mode == "consensus" and t4 is not None and msg.get("beacon") is not None:
+                # The pinned leader's beacon; our echoed heartbeat, if there, measures the link.
+                self.sync.on_leader(float(msg["beacon"]), t4, (mine[0], mine[1]) if mine else None)
             self.roster = list(msg.get("members", []))
             self.roster_relayed = set(msg.get("relayed", []))
             self._roster_time = simclock.now()
