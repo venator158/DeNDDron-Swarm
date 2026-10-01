@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--first", type=float, default=25)
     ap.add_argument("--maneuver-p", type=float, default=0.0,
                     help="probability that a threat turns once mid-flight (THREAT_MANEUVER_P)")
+    ap.add_argument("--auto-approve", action="store_true",
+                    help="the ship's auto-approve approves threats instead of operator_bot.py")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--reaction", type=float, default=3.0)
     ap.add_argument("--timeout", type=float, default=420, help="sim seconds per run after the swarm is up")

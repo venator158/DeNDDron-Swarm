@@ -155,6 +155,8 @@ services:
       THREAT_SEED: ${THREAT_SEED:-42}
       THREAT_TYPES: ${THREAT_TYPES:-}
       THREAT_MANEUVER_P: ${THREAT_MANEUVER_P:-0}
+      AUTO_APPROVE: ${AUTO_APPROVE:-0}                    # ship approves feasible threats itself (dashboard toggle)
+      AUTO_APPROVE_REACTION_S: ${AUTO_APPROVE_REACTION_S:-3}
       INTERCEPT_MAX_RANGE_M: ${INTERCEPT_MAX_RANGE_M:-140}
       SHIP_CLOCK_DRIFT_PPM: ${SHIP_CLOCK_DRIFT_PPM:-0}
       SHIP_CLOCK_OFFSET_S: ${SHIP_CLOCK_OFFSET_S:-0}

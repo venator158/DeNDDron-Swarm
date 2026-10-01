@@ -299,6 +299,9 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
     rtf = args.rtf
     env = dict(os.environ, RADIO_QOS=profile, SIM_RTF=f"{rtf:g}", SWARM_INSTANCE=str(inst.k),
                DASHBOARD_URL=inst.api, **(extra_env or {}))
+    auto = getattr(args, "auto_approve", False)
+    if auto:   # the ship approves itself (in sim time); no external stand-in operator
+        env.update(AUTO_APPROVE="1", AUTO_APPROVE_REACTION_S=f"{args.reaction:g}")
     applied = scale_netem(netem, rtf) if netem else ""
     t0 = time.time()
     log(f"=== {profile} / {cond} #{rep} ({netem or 'no impairment'}"
@@ -326,9 +329,10 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
         if applied:
             subprocess.run([str(HERE / "degrade_radio.sh"), "apply", applied], check=True, env=env,
                            stdout=subprocess.DEVNULL)
-        bot = subprocess.Popen([sys.executable, str(HERE / "operator_bot.py"), f"{args.reaction / rtf:g}",
-                                f"{args.timeout / rtf:g}", f"{1.0 / rtf:g}"], env=env,
-                               stdout=open(rundir / "operator.log", "w"), stderr=subprocess.STDOUT)
+        if not auto:
+            bot = subprocess.Popen([sys.executable, str(HERE / "operator_bot.py"), f"{args.reaction / rtf:g}",
+                                    f"{args.timeout / rtf:g}", f"{1.0 / rtf:g}"], env=env,
+                                   stdout=open(rundir / "operator.log", "w"), stderr=subprocess.STDOUT)
 
         def resolved():
             s = get("/api/summary", inst=inst)
@@ -395,6 +399,9 @@ def main():
     ap.add_argument("--threats", type=int, default=4)
     ap.add_argument("--maneuver-p", type=float, default=0.0,
                     help="probability that a threat turns once mid-flight (THREAT_MANEUVER_P)")
+    ap.add_argument("--auto-approve", action="store_true",
+                    help="the ship's auto-approve approves threats (reaction --reaction s, sim time) "
+                         "instead of the external stand-in operator (operator_bot.py)")
     ap.add_argument("--interval", type=float, default=30)
     ap.add_argument("--first", type=float, default=25)
     ap.add_argument("--seed", type=int, default=42)

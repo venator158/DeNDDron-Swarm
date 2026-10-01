@@ -187,6 +187,11 @@ class Ship:
         # each drone's heartbeat stamp (t1) with receive/send stamps (t2, t3) in the roster.
         self.sync_mode = (os.environ.get("CLOCK_SYNC") or "none").lower()
         self.sync_evals = []             # (drone, |true error| s, own bound s) from clock telemetry
+        # Auto-approve (dashboard toggle, /api/auto_approve, AUTO_APPROVE): the ship approves feasible
+        # threats itself, most urgent first, once each has been feasible for a reaction delay.
+        self.auto_approve = (os.environ.get("AUTO_APPROVE") or "0").strip().lower() in ("1", "on", "true", "yes")
+        self.auto_reaction_s = float(os.environ.get("AUTO_APPROVE_REACTION_S") or 3.0)
+        self._feasible_since = {}        # threat_id -> ship time it became (continuously) feasible
         self.truth_time = None
         self.ship_time = None
         self.tracks = {}                 # threat_id -> Track
@@ -676,7 +681,35 @@ class Ship:
                 "free": free, "feasible": ic is not None, "reason": reason}
 
     # ------------------------------------------------------------- orders
-    def approve(self, threat_id):
+    def set_auto_approve(self, enabled, reaction_s=None):
+        with self.lock:
+            if reaction_s is not None:
+                self.auto_reaction_s = max(0.0, float(reaction_s))
+            if bool(enabled) != self.auto_approve:
+                self.auto_approve = bool(enabled)
+                self._feasible_since.clear()
+                self.event("auto_approve", enabled=self.auto_approve, reaction_s=self.auto_reaction_s)
+            return {"enabled": self.auto_approve, "reaction_s": self.auto_reaction_s}
+
+    def _auto_approve(self, now):
+        """Approve the most urgent threat that has been feasible for auto_reaction_s (ship time), one
+        per call, like the stand-in operator (tools/comms/operator_bot.py) but on the ship."""
+        if not self.auto_approve:
+            return
+        for tid in self.queue.ordered():                # min-heap order: smallest TCPA first
+            tr = self.tracks[tid]
+            if tr.status != "tracking":
+                continue
+            if not self.feasibility(tr, now)["feasible"]:
+                self._feasible_since.pop(tid, None)
+                continue
+            since = self._feasible_since.setdefault(tid, now)
+            if now - since >= self.auto_reaction_s:
+                self._feasible_since.pop(tid, None)
+                self.approve(tid, by="auto")
+                return
+
+    def approve(self, threat_id, by="operator"):
         with self.lock:
             tr = self.tracks.get(threat_id)
             now = self.ship_time
@@ -696,7 +729,7 @@ class Ship:
             tr.approved_wall = simclock.now()
             self._announce(tr, tr.level)
             self._publish_zones()             # idle drones start clearing the zone right away
-            self.event("approved", threat=threat_id, tti_s=f["tti_s"], available_s=f["available_s"],
+            self.event("approved", threat=threat_id, by=by, tti_s=f["tti_s"], available_s=f["available_s"],
                        intercept_range_m=tr.intercept_range, legacy_range_m=tr.legacy_range)
             return True, "approved"
 
@@ -745,6 +778,7 @@ class Ship:
                     self._arbitrate()
                     self._reconcile()
                     self._retry_underassigned(now)
+                    self._auto_approve(now)
                 wall = simclock.now()
                 if wall - last_job >= 1.0 / JOB_HZ:
                     last_job = wall
@@ -902,6 +936,7 @@ class Ship:
                 counts[t.status] += 1
             return {
                 "sim_time": self.truth_time, "ship_time": now, "ship_clock": self.clock.describe(),
+                "auto_approve": {"enabled": self.auto_approve, "reaction_s": self.auto_reaction_s},
                 "params": {"defended_radius": self.args.defended_radius, "kill_radius": self.args.kill_radius,
                            "ship_radius": SHIP_RADIUS, "v_max": self.v_max, "a_max": self.a_max},
                 "roster": {"count": len(members), "free": len(self.free_drones()), "members": members,
@@ -955,6 +990,13 @@ def make_handler(ship):
                 self._json(404, {"error": "not found"})
 
         def do_POST(self):
+            if self.path == "/api/auto_approve":
+                try:
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                    return self._json(200, {"ok": True, **ship.set_auto_approve(bool(body["enabled"]),
+                                                                                body.get("reaction_s"))})
+                except Exception as e:
+                    return self._json(400, {"ok": False, "message": f"bad request: {e}"})
             if self.path != "/api/approve":
                 return self._json(404, {"error": "not found"})
             try:
