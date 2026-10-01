@@ -52,6 +52,12 @@ while [[ $# -gt 0 ]]; do
       export THREAT_MANEUVER_P="$2"
       shift 2
       ;;
+    --auto-approve)
+      # The ship approves every feasible threat itself (also a dashboard toggle); reaction in sim seconds.
+      export AUTO_APPROVE=1
+      if [[ $# -gt 1 && "$2" =~ ^[0-9.]+$ ]]; then export AUTO_APPROVE_REACTION_S="$2"; shift; fi
+      shift
+      ;;
     --instance)
       # Run as instance K (0 = default): own project, names, ports, subnets and config,
       # so several swarms can run side by side (scripts/swarm_instance.py).

@@ -36,6 +36,8 @@
   button { font: inherit; background: #1d4f7a; color: #fff; border: 0; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
   button:disabled { background: #25313c; color: #66788a; cursor: not-allowed; }
   button.big { padding: 8px 16px; font-size: 14px; }
+  button.auto { background: #25313c; color: var(--muted); }
+  button.auto.on { background: #1e6b4a; color: #fff; }
   .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); } .muted { color: var(--muted); }
   #detail { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; }
   #detail .k { color: var(--muted); }
@@ -54,6 +56,7 @@
   <span class="kpi">free <b id="free">–</b></span>
   <span class="kpi">expended <b id="expended">–</b></span>
   <span class="kpi">threats <b id="tcount">–</b></span>
+  <button class="auto" id="autoBtn" title="The ship approves every feasible threat itself, most urgent first, once it has been feasible for the reaction delay">Auto-approve: off</button>
   <span id="conn"><span class="dot" id="conndot"></span><span id="conntext">connecting</span></span>
 </header>
 <main>
@@ -136,6 +139,21 @@ async function approve(id) {
     const j = await r.json();
     toast(`${id}: ${j.message}`, j.ok);
   } catch (e) { toast(`${id}: ${e}`, false); }
+}
+
+async function setAuto(enabled) {
+  try {
+    const r = await fetch("/api/auto_approve", {method: "POST", headers: {"Content-Type": "application/json"},
+                                                 body: JSON.stringify({enabled})});
+    const j = await r.json();
+    toast(j.ok ? `Auto-approve ${j.enabled ? "on" : "off"} (reaction ${fmt(j.reaction_s)} s)` : j.message, j.ok);
+  } catch (e) { toast(`auto-approve: ${e}`, false); }
+}
+
+function renderAuto(s) {
+  const a = s.auto_approve || {}, b = $("autoBtn");
+  b.classList.toggle("on", !!a.enabled);
+  b.textContent = a.enabled ? `Auto-approve: on (${fmt(a.reaction_s)} s)` : "Auto-approve: off";
 }
 
 function drawMap(s) {
@@ -262,7 +280,7 @@ function render(s) {
   $("free").textContent = s.roster.free;
   $("expended").textContent = s.roster.expended;
   $("tcount").textContent = Object.entries(s.threat_counts).map(([k, v]) => `${k} ${v}`).join(" · ") || "0";
-  drawMap(s); renderThreats(s); renderDetail(s); renderDrones(s); renderRadio(s); renderEvents(s);
+  renderAuto(s); drawMap(s); renderThreats(s); renderDetail(s); renderDrones(s); renderRadio(s); renderEvents(s);
 }
 
 $("threats").addEventListener("click", (e) => {
@@ -272,6 +290,7 @@ $("threats").addEventListener("click", (e) => {
   if (tr) { selected = tr.dataset.id; if (state) render(state); }
 });
 $("approveBig").addEventListener("click", () => selected && approve(selected));
+$("autoBtn").addEventListener("click", () => setAuto(!(state && state.auto_approve && state.auto_approve.enabled)));
 
 function connect() {
   const es = new EventSource("/api/stream");
