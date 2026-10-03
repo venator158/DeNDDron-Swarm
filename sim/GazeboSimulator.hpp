@@ -121,6 +121,12 @@ private:
     double _fuze_range = 10.0;
     double _fuze_noise = 0.1;                // sd per axis, m
     double _fuze_latency = 0.0;              // sim seconds between measurement and delivery
+    // PERCEPTION=radar: the contact sensor becomes the hardware record's mmWave radar (range, rate,
+    // range/angle noise; topic drone/{id}/radar) and the planar lidar is no longer computed.
+    bool _radar_mode = false;
+    double _radar_range_sigma = 0.05, _radar_az_sigma = 0.0349, _radar_el_sigma = 0.0349;   // m, rad, rad
+    std::string _contact_topic = "fuze";
+    json _hw = json::object();               // hardware record from the runtime config
     double _last_fuze_pub_time = 0.0;
     std::mt19937 _fuze_rng{0};
     struct PendingFuze { double release; std::string topic; std::string payload; };
@@ -144,6 +150,38 @@ private:
     void apply_detonations(double sim_time);
     void publish_truth(double sim_time);
     void put(const std::string& key, const std::string& payload);
+
+    // Localization (LOCALIZATION=truth|anchors|coop).  Not truth: sensor frames lose x, y and the
+    // horizontal velocity (altitude and attitude stay: barometer/IMU/compass, taken as perfect), and
+    // each drone gets UWB ranges (drone/{id}/uwb) to the ship's anchors (hardware record: noise,
+    // range limit, dropouts, channel airtime), plus, with coop, to the peers it asks for
+    // (drone/{id}/uwb_tx), each with that peer's state payload.  UWB_JAM jams anchors/all UWB
+    // for sim-time windows: "anchors:t0:t1,all:t0:t1", optionally only for drones within r m of
+    // a jammer at (x, y): "anchors:t0:t1:x:y:r".
+    std::string _loc_mode = "truth";
+    std::vector<ignition::math::Vector3d> _anchors;
+    double _uwb_sigma = 0.1, _uwb_range = 250.0, _uwb_dropout = 0.02, _uwb_capacity = 1000.0;
+    double _uwb_anchor_period = 0.5, _uwb_peer_period = 0.5;
+    int _uwb_max_peers = 6;
+    double _last_uwb_anchor_time = 0.0, _last_uwb_peer_time = 0.0;
+    struct JamWindow { std::string what; double t0, t1; bool local = false; double x = 0, y = 0, r = 0; };
+    std::vector<JamWindow> _uwb_jam;
+    std::mt19937 _uwb_rng{1};
+    std::map<std::string, json> _uwb_tx;                       // agent -> latest uwb_tx (guarded)
+    std::optional<zenoh::Subscriber<void>> _sub_uwb_tx;
+    void configure_localization();
+
+    // Environment (hardware record "environment", real values x speed_scale; WIND_MPS="x,y" and
+    // GUST_SIGMA_MPS override): a steady wind plus per-drone gusts (Ornstein-Uhlenbeck, gust_tau_s)
+    // push the drones' true positions; drones cannot sense it.  Default calm.
+    ignition::math::Vector3d _wind{0, 0, 0};
+    double _gust_sigma = 0.0, _gust_tau = 5.0;
+    std::map<std::string, ignition::math::Vector3d> _gust;     // per drone (step thread only)
+    std::mt19937 _env_rng{7};
+    void configure_environment();
+    void on_uwb_tx(const zenoh::Sample& sample);
+    bool uwb_jammed(const std::string& what, double t, const ignition::math::Vector3d& at) const;
+    void publish_uwb(double sim_time, const std::vector<std::string>& agents, bool anchors, bool peers);
     void publish_fuze(double sim_time, const std::vector<std::string>& agents);
     void flush_fuze(double sim_time);
     json get_drone_pose(const std::string& agent_id);

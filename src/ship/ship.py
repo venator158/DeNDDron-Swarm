@@ -187,6 +187,7 @@ class Ship:
         # each drone's heartbeat stamp (t1) with receive/send stamps (t2, t3) in the roster.
         self.sync_mode = (os.environ.get("CLOCK_SYNC") or "none").lower()
         self.sync_evals = []             # (drone, |true error| s, own bound s) from clock telemetry
+        self.metrics = {}                # latest metrics-node summary (true separations)
         # Auto-approve (dashboard toggle, /api/auto_approve, AUTO_APPROVE): the ship approves feasible
         # threats itself, most urgent first, once each has been feasible for a reaction delay.
         self.auto_approve = (os.environ.get("AUTO_APPROVE") or "0").strip().lower() in ("1", "on", "true", "yes")
@@ -224,6 +225,7 @@ class Ship:
             self.onboard.declare_subscriber("sim/detonation", self._on_detonation),
             self.onboard.declare_subscriber("sim/damage", self._on_damage),
             self.onboard.declare_subscriber("sim/clock_eval", self._on_clock_eval),
+            self.onboard.declare_subscriber("swarm/metrics/summary", self._on_metrics),
             self.radio.declare_subscriber("swarm/heartbeat/*", self._on_heartbeat),
             self.radio.declare_subscriber("swarm/heartbeat_relay/*", self._on_relayed_heartbeat),
             self.radio.declare_subscriber("swarm/telemetry/*", self._on_telemetry),
@@ -312,6 +314,13 @@ class Ship:
         t = self._parse(sample)
         with self.lock:
             self.drones.setdefault(t["agent_id"], {"telemetry": {}})["telemetry"] = t
+
+    def _on_metrics(self, sample):
+        """The metrics node's summary (true positions): collisions, close calls, minimum separation."""
+        m = self._parse(sample)
+        with self.lock:
+            self.metrics = {k: v for k, v in m.items()
+                            if k in ("total_collisions", "close_calls", "min_separation_m") or k.startswith("loc_")}
 
     def _on_clock_eval(self, sample):
         """True sync error (evaluation only, onboard bus): the drone's estimate of ship time against
@@ -880,6 +889,10 @@ class Ship:
             "det_ordered_err_s_absmax": ordered[2],
             "det_miss_m_mean": miss[0], "det_miss_m_sd": miss[1], "det_miss_m_max": miss[2],
             "chain_fires": sum(1 for e in evals if e["chain"]),
+            # True separations between drones (metrics node, sim/truth).
+            "collisions": self.metrics.get("total_collisions"), "close_calls": self.metrics.get("close_calls"),
+            "min_separation_m": self.metrics.get("min_separation_m"),
+            **{k: v for k, v in self.metrics.items() if k.startswith("loc_")},   # localization error vs truth
             # Proximity fuze: what fired each detonation, false triggers (ground truth), holds.
             "det_reasons": dict(reasons),
             "fuze_false_triggers": sum(1 for e in evals if e.get("trigger_is_threat") is False),

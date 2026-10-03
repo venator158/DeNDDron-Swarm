@@ -45,6 +45,9 @@ services:
     environment:
       ZENOH_ROUTER_IP: tcp/${SIM_BUS_IP:-172.20.0.2}:7447
       SIM_RTF: ${SIM_RTF:-1}
+      PERCEPTION: ${PERCEPTION:-lidar}                    # lidar | radar (hardware record's mmWave radar)
+      LOCALIZATION: ${LOCALIZATION:-truth}                # truth | anchors | coop (UWB, hardware record)
+      UWB_JAM: ${UWB_JAM:-}
       # Proximity fuze sensor (drone/{id}/fuze); FUZE=0 turns it off
       FUZE: ${FUZE:-1}
       FUZE_HZ: ${FUZE_HZ:-50}
@@ -52,6 +55,8 @@ services:
       FUZE_NOISE_M: ${FUZE_NOISE_M:-0.1}
       FUZE_LATENCY_S: ${FUZE_LATENCY_S:-0}
       FUZE_SEED: ${FUZE_SEED:-0}
+      WIND_MPS: ${WIND_MPS:-}                             # "x,y" real m/s (x speed_scale); default: hardware record (calm)
+      GUST_SIGMA_MPS: ${GUST_SIGMA_MPS:-}
       GAZEBO_RESOURCE_PATH: /usr/share/gazebo-11:/home/app/sim
       SWARM_RUNTIME_CONFIG: /home/app/config/swarm_runtime.json
       DISPLAY: ${DISPLAY:-:0}
@@ -101,6 +106,9 @@ services:
       CLOCK_LEADER_SHARE: ${CLOCK_LEADER_SHARE:-0.5}
       CLOCK_AGGREGATE: ${CLOCK_AGGREGATE:-mean}
       CLOCK_STEP_S: ${CLOCK_STEP_S:-0.05}
+      PERCEPTION: ${PERCEPTION:-lidar}                    # obstacle avoidance from lidar + voxel map, or radar
+      LOCALIZATION: ${LOCALIZATION:-truth}                # truth | anchors | coop (UWB, hardware record)
+      UWB_JAM: ${UWB_JAM:-}
       # Proximity fuze (src/agent/fuze.py); FUZE=0 = timed detonation at t_engage
       FUZE: ${FUZE:-1}
       FUZE_WINDOW_S: ${FUZE_WINDOW_S:-2}

@@ -9,6 +9,9 @@ import numpy as np
 import logging
 import os
 from voxel_map import VoxelMap
+from radar_obstacles import RadarObstacles
+from localization import Localizer, anchors_from_record
+from coop import Coop, state_payload
 from path_planning import APFStrategy, ORCAStrategy
 from timing import TimingManager, TimingState
 from auction import AuctionManager
@@ -22,6 +25,17 @@ import hardware
 import localclock
 import simclock
 import timesync
+
+class _CmdRecorder:
+    """cmd_vel publisher that remembers the last command (the localizer's control input)."""
+
+    def __init__(self, pub):
+        self._pub, self.last = pub, None
+
+    def put(self, data):
+        self.last = data
+        self._pub.put(data)
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DenddronAgent")
@@ -44,6 +58,17 @@ class DenddronAgent:
     KEEPOUT = os.environ.get("ZONE_KEEPOUT", "1") != "0"
     # Proximity fuze (fuze.py): on by default; FUZE=0 restores timed detonation at t_engage.
     FUZE_ON = fuzelib.enabled()
+    # Perception for obstacle avoidance: lidar + voxel map (default), or the mmWave radar (PERCEPTION=radar),
+    # whose contacts also feed the fuze.
+    PERCEPTION = (os.environ.get("PERCEPTION") or "lidar").strip().lower()
+    # Localization: truth (the simulator's x,y, as before), anchors (UWB ranges to the ship's anchors,
+    # localization.py) or coop (anchors + peers).  Altitude and attitude are always given.
+    LOCALIZATION = (os.environ.get("LOCALIZATION") or "truth").strip().lower()
+    LOC_EVAL_PERIOD_S = 0.5    # sim s between localization reports for evaluation (drone/{id}/loc)
+    # Station keeping: drift (wind) beyond this from the hold point, or beyond the distance a goal
+    # latched at, flies the drone back.  Never triggers in calm air (a holding drone does not move).
+    # With 2 m beyond the 3 m stop radius, drones sat up to 5 m off their slots in a 0.5 m/s wind.
+    DRIFT_M = 1.0
 
     def __init__(self, agent_id: str, sim_bus_locator: str = None):
         self.agent_id = agent_id
@@ -58,6 +83,7 @@ class DenddronAgent:
         self.running = True
         self.state_lock = threading.RLock()
         self.voxel_map = VoxelMap()
+        self.obstacle_map = self.voxel_map     # what the planner repels from (radar mode: RadarObstacles)
         self.current_pose = None
         self.current_goal = None
         self.current_job = None
@@ -106,6 +132,8 @@ class DenddronAgent:
         # This prevents jitter from re-triggering APF after arrival.
         self._goal_reached = False
         self._prev_to_goal_vec = None
+        self._hold_point = None   # where an idle drone stopped (station keeping against wind)
+        self._latch_dist = None   # distance from the goal when it latched (station keeping)
         goal_cfg = dict(global_cfg.get("goal_control", {}))
         goal_cfg.update(my_cfg.get("goal_control", {}))
         _require_keys(
@@ -139,6 +167,23 @@ class DenddronAgent:
         if "goal" in my_cfg:
             self.current_goal = my_cfg["goal"]
             logger.info(f"[{self.agent_id}] Assigned static goal from runtime config: {self.current_goal}")
+
+        # --- Self-localization (LOCALIZATION != truth): x, y from UWB ranges ---
+        self.loc = None
+        self._loc_lock = threading.Lock()
+        self._loc_frame_t = None          # sim time of the last frame the estimate was predicted to
+        self._loc_report_t = -1e9
+        if self.LOCALIZATION != "truth":
+            uwb = self.hw.get("uwb", {})
+            self.anchors = anchors_from_record(self.hw)
+            self.loc = Localizer(range_sigma=float(uwb.get("range_sigma_m", 0.1)))
+            # launch position known to a few metres; the anchors refine it within seconds
+            self.loc.init_prior(float(self.spawn_pose["x"]), float(self.spawn_pose["y"]))
+        self.coop = None
+        if self.LOCALIZATION == "coop":
+            self.coop = Coop(self.agent_id, max_peers=int(self.hw.get("uwb", {}).get("max_peers", 6)))
+            logger.info(f"[{self.agent_id}] Localization {self.LOCALIZATION}: {len(self.anchors)} UWB anchors, "
+                        f"range sigma {self.loc.range_sigma} m")
 
         # --- Path Planner: strategy selection ---
         planner_cfg = dict(global_cfg.get("path_planning", {}))
@@ -239,7 +284,7 @@ class DenddronAgent:
         self._award_lock = threading.Lock()
 
         # --- Onboard bus (simulator) ---
-        self.pub_cmd_vel    = self.onboard.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
+        self.pub_cmd_vel    = _CmdRecorder(self.onboard.declare_publisher(f"swarm/{self.agent_id}/cmd_vel"))
         # Physics belongs to the simulator: we only ask to detonate; it places the blast at our true
         # position (sim/detonation) and applies friendly fire (drone/{id}/destroyed).
         self.pub_detonate = self.onboard.declare_publisher(f"drone/{self.agent_id}/detonate")
@@ -248,6 +293,12 @@ class DenddronAgent:
             f"drone/{self.agent_id}/sensors",
             self._on_sensor_data
         )
+        if self.loc is not None:
+            self.sub_uwb = self.onboard.declare_subscriber(f"drone/{self.agent_id}/uwb", self._on_uwb)
+            self.pub_loc = self.onboard.declare_publisher(f"drone/{self.agent_id}/loc")   # evaluation only
+        if self.coop is not None:
+            # our UWB transmissions: the state our ranging frames carry, and which peers to range
+            self.pub_uwb_tx = self.onboard.declare_publisher(f"drone/{self.agent_id}/uwb_tx")
 
         # --- Radio (peer-to-peer) ---
         self.pub_bids      = self.radio.declare_publisher("swarm/bids")
@@ -270,6 +321,10 @@ class DenddronAgent:
         self._zones_sig = None
         self._last_job = None          # threat_id of our current or most recent job: its blasts never hurt us
         self.fuze_cfg = fuzelib.FuzeConfig.from_env(kill_radius_m=self.KILL_RADIUS)
+        if self.PERCEPTION == "radar":
+            radar = self.hw.get("radar", {})
+            self.obstacle_map = RadarObstacles(clock=simclock.now)
+            self.fuze_cfg = dataclasses.replace(self.fuze_cfg, range_m=float(radar.get("max_range_m", 30.0)))
         self._detonate_lock = threading.Lock()
         self._progress_logged = -1e9
         self._route_planned = -1e9     # simclock time of the last route re-plan
@@ -281,8 +336,10 @@ class DenddronAgent:
         # Detonations: our job's trigger chain fire; damage to us comes from the simulator (_on_destroyed).
         self.sub_blasts    = self.onboard.declare_subscriber("sim/detonation", self._on_blast)
         self.sub_destroyed = self.onboard.declare_subscriber(f"drone/{self.agent_id}/destroyed", self._on_destroyed)
-        if self.FUZE_ON:
-            self.sub_fuze  = self.onboard.declare_subscriber(f"drone/{self.agent_id}/fuze", self._on_fuze)
+        if self.PERCEPTION == "radar":
+            self.sub_fuze  = self.onboard.declare_subscriber(f"drone/{self.agent_id}/radar", self._on_contacts)
+        elif self.FUZE_ON:
+            self.sub_fuze  = self.onboard.declare_subscriber(f"drone/{self.agent_id}/fuze", self._on_contacts)
         # Evaluation only: truth vs our estimate of ship time, on the onboard bus so it is measured
         # during radio cuts too (the radio telemetry carries only what a real drone could report).
         self.pub_clock_eval = self.onboard.declare_publisher("sim/clock_eval")
@@ -315,6 +372,9 @@ class DenddronAgent:
         """
         with self.state_lock:
             self.current_goal = goal
+            if goal is None:
+                self._hold_point = None           # hold wherever we stop
+            self._latch_dist = None
             self._goal_reached = False
             self._goal_hold_ticks = 0
             self._prev_to_goal_vec = None
@@ -340,6 +400,10 @@ class DenddronAgent:
                 "z": pose.get("z", 0.0),
                 "yaw": pose.get("yaw", 0.0)
             }
+            if self.loc is not None and sim_time is not None:
+                # x, y are not given: predict our estimate to this frame with the command we sent
+                # (frame sim time drives the integration step, as for the controller)
+                current_pose["x"], current_pose["y"] = self._loc_predict(float(sim_time))
 
             accepted, timing_state = self.timing.record_sensor(sim_time)
             if not accepted:
@@ -371,6 +435,87 @@ class DenddronAgent:
 
         except Exception as e:
             logger.debug(f"[{self.agent_id}] Error processing sensor data: {e}")
+
+    # ---- self-localization (LOCALIZATION != truth) ----
+    def _last_cmd_xy(self):
+        last = self.pub_cmd_vel.last
+        if not last:
+            return 0.0, 0.0
+        try:
+            lin = json.loads(last)["linear"]
+            return float(lin["x"]), float(lin["y"])
+        except Exception:
+            return 0.0, 0.0
+
+    def _loc_predict(self, t: float):
+        with self._loc_lock:
+            if self._loc_frame_t is not None and t > self._loc_frame_t:
+                self.loc.predict(t - self._loc_frame_t, self._last_cmd_xy())
+            self._loc_frame_t = t
+            x, y = self.loc.position()
+            report = t - self._loc_report_t >= self.LOC_EVAL_PERIOD_S
+            if report:
+                self._loc_report_t = t
+                P = self.loc.pos_cov()
+                msg = {"sim_time": t, "est": [round(x, 3), round(y, 3)],
+                       "cov": [round(float(P[0, 0]), 5), round(float(P[0, 1]), 5), round(float(P[1, 1]), 5)],
+                       "status": self.loc.status(), "updates": self.loc.updates, "rejected": self.loc.rejected,
+                       "relocks": self.loc.relocks}
+                if self.coop is not None:
+                    msg.update(hops=self.coop.hops(t), peer_updates=self.coop.peer_updates)
+        if report:
+            self.pub_loc.put(json.dumps(msg))
+        return x, y
+
+    def _on_uwb(self, sample):
+        """UWB ranges (drone/{id}/uwb): to the ship's anchors (and, with coop, to peers)."""
+        if self.destroyed:
+            return
+        try:
+            m = self._parse(sample)
+        except Exception:
+            return
+        with self.state_lock:
+            z = self.current_pose["z"] if self.current_pose is not None else None
+        if z is None:
+            return
+        anchor_ids = list(self.anchors)
+        got = [(self.anchors[anchor_ids[int(k)]], float(r)) for k, r in m.get("anchors", []) if int(k) < len(anchor_ids)]
+        t = m.get("sim_time")
+        with self._loc_lock:
+            for a, r in got:
+                if self.loc.update_range(a, r, z, t=t) and self.coop is not None:
+                    self.coop.on_anchor_update(t)
+            if self.coop is not None and m.get("peers"):
+                ref = self.coop.anchor_t()                # our chain before this round
+                for pid, r, payload in m["peers"]:
+                    if payload:
+                        self.coop.on_payload(str(pid), payload)
+                        self.coop.peer_update(self.loc, str(pid), float(r), z, t, ref_anchor_t=ref)
+            if self.loc.needs_relock() and len(got) >= 3:
+                if self.loc.relock_from([a for a, _ in got], [r for _, r in got], z):
+                    logger.warning(f"[{self.agent_id}] Localization re-locked from {len(got)} anchors "
+                                   f"(estimate disagreed with {self.loc.relock} ranges in a row)")
+
+    def _send_uwb_tx(self):
+        """Coop: publish the state our UWB frames carry and the peers to range next (2 Hz)."""
+        if self.coop is None or self.destroyed:
+            return
+        with self.state_lock:
+            z = self.current_pose["z"] if self.current_pose is not None else None
+        if z is None or self._loc_frame_t is None:
+            return
+        with self._loc_lock:
+            t = self._loc_frame_t
+            state = state_payload(self.loc, z, t, self.coop.hops(t), self.coop.anchor_t())
+            peers = self.coop.choose_peers(self.loc.position(), t, self.roster)
+        self.pub_uwb_tx.put(json.dumps({"state": state, "peers": peers}))
+
+    def _pos_sigma(self):
+        if self.loc is None:
+            return None
+        with self._loc_lock:
+            return round(self.loc.sigma_max(), 2)
 
     def _process_lidar(self, scan: dict, pose: dict):
         """scan: {"angle_step", "ranges": [...], "hits": [0/1, ...]}; ray i points at i * angle_step."""
@@ -599,6 +744,15 @@ class DenddronAgent:
                     self._goal_reached = True
 
                 if self._goal_reached:
+                    if self._latch_dist is None:
+                        self._latch_dist = dist_to_goal
+                    elif dist_to_goal > self._latch_dist + self.DRIFT_M:
+                        # drifted off a latched goal (wind): approach it again
+                        with self.state_lock:
+                            self._goal_reached = False
+                        self._goal_hold_ticks = 0
+                        self._latch_dist = None
+                if self._goal_reached:
                     safe_cmd = _zero_cmd
                     self.pub_cmd_vel.put(json.dumps(safe_cmd))
                     with self.state_lock:
@@ -619,7 +773,7 @@ class DenddronAgent:
                 cmd = self.path_planner.compute_velocity(
                     current_pose=current_pose,
                     goal_pose=current_goal,
-                    voxel_map=self.voxel_map
+                    voxel_map=self.obstacle_map
                 )
                 self.telemetry.planner(time.perf_counter() - t_plan)
 
@@ -657,7 +811,7 @@ class DenddronAgent:
                     raw_v[2] = 0.0
 
                 # ── B. Emergency damping near obstacles ────────────────────────
-                nearby = self.voxel_map.get_nearby_obstacles(
+                nearby = self.obstacle_map.get_nearby_obstacles(
                     curr_pos[0], curr_pos[1], curr_pos[2], radius=6.0
                 )
                 if nearby:
@@ -731,6 +885,14 @@ class DenddronAgent:
                 self.pub_cmd_vel.put(json.dumps(_zero_cmd))
                 with self.state_lock:
                     self.last_velocity = np.zeros(3)
+                # Wind pushes a holding drone away: remember where we stopped and fly back.
+                here = (current_pose["x"], current_pose["y"], current_pose["z"])
+                if self._hold_point is None:
+                    self._hold_point = here
+                elif math.dist(here, self._hold_point) > self.DRIFT_M:
+                    hp = self._hold_point
+                    self.set_goal({"x": hp[0], "y": hp[1], "z": hp[2]})
+                    self._hold_point = hp
 
             self.step_count += 1
             if self.step_count % 100 == 0 and current_goal is not None and safe_cmd is not None:
@@ -1270,23 +1432,29 @@ class DenddronAgent:
         p0, v, t0 = tr["p0"], tr["v"], float(tr["t0"])
         return lambda t: (p0["x"] + v["x"] * (t - t0), p0["y"] + v["y"] * (t - t0), p0["z"] + v["z"] * (t - t0))
 
-    def _on_fuze(self, sample):
-        """A fuze scan (onboard sensor): unlabelled contacts relative to us.  The fuze decides."""
+    def _on_contacts(self, sample):
+        """A contact scan (fuze sensor, or the mmWave radar): unlabelled objects relative to us.  With the
+        radar it also gives the planner its obstacles; when engaged, the fuze decides."""
         if self.destroyed:
-            return
-        eng = self.engagement
-        if eng is None or not eng["confirmed"] or eng.get("fuze") is None:
             return
         try:
             scan = self._parse(sample)
             contacts = [tuple(float(c) for c in o) for o in scan.get("objects", [])]
             truth = float(scan["sim_time"])
         except Exception as e:
-            logger.debug(f"[{self.agent_id}] Bad fuze scan: {e}")
+            logger.debug(f"[{self.agent_id}] Bad contact scan: {e}")
             return
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None
         if pose is None:
+            return
+        if self.PERCEPTION == "radar" and self.current_goal is not None:
+            # obstacles only matter while flying (idle drones hold and do not plan)
+            t0 = time.perf_counter()
+            self.obstacle_map.update((pose["x"], pose["y"], pose["z"]), contacts)
+            self.telemetry.perception(time.perf_counter() - t0)
+        eng = self.engagement
+        if eng is None or not eng["confirmed"] or eng.get("fuze") is None:
             return
         t = self.sync.proto_time(self.clock.read(truth))      # the scan's time on our clock
         d = eng["fuze"].update(t, (pose["x"], pose["y"], pose["z"]), contacts, eng["t_engage"],
@@ -1391,7 +1559,7 @@ class DenddronAgent:
             self._disengage(threat.threat_id, "missed")    # its blasts cannot hurt us (_last_job)
             return
         if fz is not None:
-            # The fuze decides (_on_fuze).  Watchdog: no scans past the window (no sensor) -> fallback.
+            # The fuze decides (_on_contacts).  Watchdog: no scans past the window (no sensor) -> fallback.
             eng["off_slot_checked"] = True
             if not fz.done and now > eng["t_engage"] + fz.cfg.window_s + 0.5:
                 fz.done = True
@@ -1494,6 +1662,7 @@ class DenddronAgent:
             "state": self._state_name(),
             "link": self._link_up(),
             "pose": None if pose is None else {k: round(pose[k], 2) for k in ("x", "y", "z")},
+            "pos_sigma": self._pos_sigma(),         # 1-sigma horizontal position uncertainty (None: truth)
             "threat_id": eng["threat"].threat_id if eng else None,
             "t_engage": eng["t_engage"] if eng else None,
             "confirmed": eng["confirmed"] if eng else None,
@@ -1518,7 +1687,7 @@ class DenddronAgent:
                     snap = self.telemetry.snapshot()
                     snap.update({"agent_id": self.agent_id, "peers_heard": len(self._fresh_peers()),
                                  "assignments": dict(self._assign_hashes),
-                                 "voxels": self.voxel_map.get_stats().get("total_voxels", 0)})
+                                 "voxels": self.obstacle_map.get_stats().get("total_voxels", 0)})
                     clock = self._clock_report()
                     if clock:
                         snap["clock"] = {k: v for k, v in clock.items() if k not in ("truth", "ship_est")}
@@ -1526,6 +1695,7 @@ class DenddronAgent:
                                                             **self._clock_diagnostics()}))
                     self._radio_put(self.pub_telemetry, "swarm/telemetry", snap)
                 self._send_clock_beacon()
+                self._send_uwb_tx()
                 link = self._link_up()
                 if link != self._link_was_up:
                     logger.warning(f"[{self.agent_id}] Radio link {'UP' if link else 'LOST'}"
