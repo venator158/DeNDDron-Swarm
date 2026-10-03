@@ -23,6 +23,7 @@ This README is the project's only documentation. Keep it up to date when behavio
 - [Configuration](#configuration)
 - [Testing](#testing)
 - [Repository layout](#repository-layout)
+- [Next steps](#next-steps)
 - [Known limitations](#known-limitations)
 
 ## Quick start
@@ -1025,6 +1026,93 @@ src/metrics/main.py     metrics node (truth vs estimates, separations, distance)
 tests/                  unit tests and validation scripts
 tools/comms/            degraded-comms probes, radio cut helper, chaos script, stand-in operator
 ```
+
+## Next steps
+
+The plan, in priority order (written 2026-10-04). Each item is switchable, and is measured with the [sensing sweep](#sensing-and-ship-link-sweep) before it becomes a default. Items marked **decision** need the project owner's call before implementation.
+
+### 1. Robust job confirmation (ship-link loss)
+
+**Problem.** At 30 % loss on the ship link, 4 of 8 threats were lost. In the case traced, the ship confirmed drone_4 for T4 at t = 136.9 s, but no ACK or job update reached the drone. It abandoned the job at 139.4 s, its 3 s timeout (`ACK_TIMEOUT_S`), and the re-announcement found no drone that could still make it.
+
+**Steps:**
+1. **Diagnose first.** The ACK is sent for every award copy, and job updates go out at 2 Hz. Six messages in a row should almost never all be lost at 30 %. Check whether:
+   - the drone's job-topic subscription, declared only when it wins, takes time to reach the ship over the lossy link;
+   - Zenoh batches several messages into one UDP datagram, so losses are correlated.
+
+   Log the receive times of ACKs and job updates per drone in a `ship_loss30` run.
+2. **Ask before abandoning.** Instead of the fixed 3 s, an unconfirmed drone keeps flying and re-requests confirmation every heartbeat. Its heartbeat already carries `threat_id` and `confirmed: false`, and the ship answers it with an ACK. It abandons only when an ACK can no longer arrive in time: its ETA plus a margin passes `t_engage`, or the ship has rejected it.
+3. **Ship side.** The ship confirms from heartbeats as well as awards, and resends ACKs until the drone's heartbeat shows `confirmed: true`. A drone the ship has not confirmed still never detonates.
+4. **Measure.** `ship_loss30`, `ship_outage` and `combined`, 3 repeats, before and after; also `degradation_sweep.py` loss10 and loss30.
+
+**Decision:** whether an unconfirmed drone may keep flying towards a slot until its time runs out. This changes the engagement protocol, so two drones could briefly head for one slot until the ship arbitrates; the ship already NACKs the worse bid.
+
+### 2. GNSS as comparator and fallback
+
+GNSS is not used today: position comes from the ship's UWB anchors, which also work where GNSS is jammed or spoofed. Where it is available, it can check UWB and stand in for it.
+
+**Steps:**
+1. **Hardware record.** Add a `gnss` class: a multi-band, multi-constellation receiver with typical 1.5–3 m horizontal σ standalone (decimetres with RTK corrections from the ship), 5–10 Hz, and fix quality and satellite count. Add a ship `gnss` and heading entry, since positions are needed relative to the ship.
+2. **Simulator.**
+   - Publish `drone/{id}/gnss` with the record's noise and a slowly varying bias (Gauss–Markov, like real receiver errors).
+   - Impairment knobs as for UWB: `GNSS_JAM` (outage windows, local or global) and `GNSS_SPOOF` (an offset that ramps in slowly, the hard case to detect). Like UWB noise, these are not speed-scaled.
+3. **Drone.**
+   - **Comparator mode (default when available):** check GNSS against the UWB estimate with a windowed normalized-innovation test. Disagreement is flagged in telemetry and heartbeats; GNSS is not fused, so a spoofer cannot pull the drone.
+   - **Fallback mode:** when the drone has no fresh anchor chain (no anchor and no fresher peer chain), fuse GNSS into the EKF with an inflated noise. Its status shows `gnss` and its σ shows the lower trust. The comparator stays active, so a sudden jump between GNSS and the dead-reckoned estimate rejects GNSS.
+   - The ship-relative conversion uses the ship's own GNSS position and heading.
+4. **Sweep conditions:**
+   - `gnss_fallback_uwb_short`: UWB to 80 m with GNSS on, the case where peer chains failed;
+   - `gnss_jam`;
+   - `gnss_spoof_ramp`;
+   - `gnss_spoof` with `uwb_jam_all`, the worst case.
+
+**Decisions:**
+- whether GNSS may ever be fused while anchors are fresh (proposed: no, comparator only);
+- what the swarm does on a confirmed spoof (proposed: flag, ignore GNSS, report to the operator).
+
+### 3. Recursive decentralized localization (RDL)
+
+**Problem.** Peer fusion today uses each peer's estimate as if it were independent of ours. That stops the 7× overconfidence seen first (by flooring our variance at the peer's), but not overconfidence along chains. With UWB range cut to 80 m, drones localized only through peers were 16 m off (p95) while claiming sub-metre accuracy (NEES 50).
+
+**Method.** RDL (Luft et al., 2018) keeps the cross-covariance between every pair of drones that have exchanged ranges, in factored form: each drone stores its share σᵢⱼ for each peer j. A pairwise range update needs only the two drones involved. It produces a consistent joint update of both states, and updates the two drones' factors, while every other factor stays valid. Propagation multiplies only the drone's own factors by its transition matrix. No drone needs the global covariance, and it tolerates asynchronous, lossy exchanges.
+
+**Steps:**
+1. **`src/agent/rdl.py`**, pure and unit-tested on the existing 6-state EKF (position, velocity, wind):
+   - factor storage per peer, capped at the UWB `max_peers` plus recent partners, oldest dropped (a dropped factor is treated as unknown correlation: covariance intersection for that pair);
+   - the joint 12-state range update;
+   - anchor updates (anchors are uncorrelated landmarks, so only the drone's own factors change).
+
+   Tests reuse `test_coop.py`'s swarm:
+   - consistency (NEES ≈ 2) for the far drone;
+   - with every anchor jammed, relative positions stay tight while absolute error grows honestly;
+   - the `uwb_short` geometry;
+   - exchange loss.
+2. **Exchange.** A range update changes both drones, so the initiator sends the responder its new state and factor in a reply. The simulator carries it in the next UWB frame, as `uwb_tx` payloads are carried now, with the same dropout and capacity model. A lost reply is detected by sequence number, and that pair falls back to covariance intersection.
+3. **Integration** behind `LOCALIZATION=rdl`, with `coop` the default until RDL beats it in the sweep (`uwb_short`, `uwb_jam_all`, `uwb_jam_local`, `combined`; NEES, p95 and max error, kills).
+4. **Cost.** State per drone grows with the peer count: 6 × 6 per factor, so about 1.5 kB at 6 peers. The UWB payload grows by one 6 × 6 factor per exchange (~150 B in float16): check it against the record's airtime model.
+
+It can start now, independently of items 1 and 2. It is the larger job: about the size of the cooperative localization work.
+
+### 4. Robust UWB filtering
+With UWB noise 3× the record's, the filter was overconfident (NEES 25), re-locked 86 times, and hit an 18.6 m excursion. The plan:
+- **Adaptive noise:** estimate the range noise from the innovations over a window, with a floor at the record's figure.
+- **Robust gating:** a Huber or Student-t update in place of the hard gate, so outliers are down-weighted rather than accepted or rejected.
+- **Safe re-locks:** require at least 4 anchors, with a residual check, so a re-lock cannot jump to a bad fix.
+
+The `uwb_nlos` 14 m excursion is the same problem.
+
+### 5. Already-open items
+- **Chain fire for spread-out mates** (**decision**): fire only if the mate's own radar sees the threat inside the kill radius, otherwise wait for its own fuze.
+- **Three-drone stack spacing** (**decision**): spacing about 4 m, or a lower proximity threshold.
+- **Speed retune and 1 km detection:** `speed_scale` 0.2–0.4, threats faster, detection ~1 km out.
+- **Continuous position hold** in wind, instead of latch and re-approach.
+- **Motion-model mismatch:** drones use an approximate command response, not the simulator's exact one.
+- **Fuze window** centred on the predicted arrival rather than `t_engage`.
+- **Clocks:**
+  - a timestamp-uncertainty term in the sync error bounds;
+  - a trimmed-mean or MSR aggregator for consensus;
+  - the planned clock sweep (drift, offset, sync mode, fuze, radio, threat speed).
+- **Fewer idle wake-ups** (the [CPU profile](#scaling)): a slower control loop and radio for idle drones.
 
 ## Known limitations
 - **Localization is optimistic.** The drones' motion model is the simulator's exact command response, and wind is the only disturbance. On hardware the response must be identified and is only approximately known. By default, ultra-wideband (UWB) ranges have no blocked-path or multipath errors, and the radar has no clutter or false alarms. The [sensing sweep](#sensing-and-ship-link-sweep) adds them as impairments: a positive non-line-of-sight bias, missed detections and uniform clutter. These are simple models, not a propagation or radar-scene simulation.
