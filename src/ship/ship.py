@@ -212,6 +212,11 @@ class Ship:
 
         v_max, a_max = self._kinematics()
         self.v_max, self.a_max = v_max, a_max
+        # Ship no-fly zone (NO_FLY_RADIUS_M, 0: off): intercept points stay 5 m outside it, the
+        # fallback point moves out to that radius, and routes go around it (3 m margin).
+        self.no_fly = float(args.no_fly or 0.0)
+        self.engage_radius = max(args.defended_radius, self.no_fly + 5.0) if self.no_fly > 0 else args.defended_radius
+        self.no_fly_route = self.no_fly + 3.0 if self.no_fly > 0 else None
 
         self.radio = RadioProcess()          # own process: a radio failure must not freeze C2
         self.onboard = open_onboard(args.sim_bus)
@@ -320,7 +325,8 @@ class Ship:
         m = self._parse(sample)
         with self.lock:
             self.metrics = {k: v for k, v in m.items()
-                            if k in ("total_collisions", "close_calls", "min_separation_m") or k.startswith("loc_")}
+                            if k in ("total_collisions", "close_calls", "min_separation_m", "min_ship_range_m")
+                            or k.startswith("loc_")}
 
     def _on_clock_eval(self, sample):
         """True sync error (evaluation only, onboard bus): the drone's estimate of ship time against
@@ -425,7 +431,8 @@ class Ship:
                      for pos in (self._pose(d) for d in t.confirmed) if pos]
         args = (tr.position, now, tr.legacy_t, drones, level or tr.level,
                 self._reservations(exclude=tr.threat_id), self.v_max, self.a_max)
-        kw = dict(max_range=self.args.intercept_range, z_range=self.z_range)
+        kw = dict(max_range=self.args.intercept_range, z_range=self.z_range,
+                  min_range=self.engage_radius if self.no_fly > 0 else 0.0, no_fly=self.no_fly_route)
         if slack is not None:
             kw["slack"] = slack
         ic = choose_intercept(*args, committed=committed, **kw) or choose_intercept(*args, **kw)
@@ -438,11 +445,12 @@ class Ship:
         on_job = set(tr.confirmed) | set(tr.pending) | set(tr.detonated)
         out = []
         for d in self.members():
-            p = self.drones[d]["hb"].get("pose")
+            hb = self.drones[d]["hb"]
+            p = hb.get("pose")
             if d in on_job or not p:
                 continue
             if math.dist((p["x"], p["y"], p["z"]), tr.point) < self.zone_radius(tr):
-                out.append({"id": d, "pose": p})
+                out.append({"id": d, "pose": p, "sigma": hb.get("pos_sigma")})
         return out
 
     def _publish_zones(self):
@@ -469,7 +477,8 @@ class Ship:
                 pos = self._pose(d)
                 if pos is None:
                     continue
-                route = plan_route(pos, tr.point, now, blasts, self.v_max, self.a_max, t_goal=tr.t_engage)
+                route = plan_route(pos, tr.point, now, blasts, self.v_max, self.a_max, t_goal=tr.t_engage,
+                                   no_fly=self.no_fly_route)
                 if route.blocked or now + route.cost() > tr.t_engage:
                     unfit.add(d)
             accepted, rejected = arbitrate({d: c for d, (c, _) in tr.pending.items() if d not in unfit},
@@ -635,7 +644,7 @@ class Ship:
         miss = self.rng.uniform(-a.max_miss, a.max_miss)
         v = aim_velocity(p0, tt.speed, miss)
 
-        tr = Track(f"T{self.detected}", kind, tt.level, p0, v, self.truth_time, a.defended_radius, self.clock)
+        tr = Track(f"T{self.detected}", kind, tt.level, p0, v, self.truth_time, self.engage_radius, self.clock)
         if a.maneuver_p > 0 and self.maneuver_rng.random() < a.maneuver_p:
             tr.maneuver_at = now + self.maneuver_rng.uniform(0.3, 0.6) * (tr.t_engage - now)
         self.tracks[tr.threat_id] = tr
@@ -892,6 +901,7 @@ class Ship:
             # True separations between drones (metrics node, sim/truth).
             "collisions": self.metrics.get("total_collisions"), "close_calls": self.metrics.get("close_calls"),
             "min_separation_m": self.metrics.get("min_separation_m"),
+            "min_ship_range_m": self.metrics.get("min_ship_range_m"),         # closest any drone came to the ship
             **{k: v for k, v in self.metrics.items() if k.startswith("loc_")},   # localization error vs truth
             # Proximity fuze: what fired each detonation, false triggers (ground truth), holds.
             "det_reasons": dict(reasons),
@@ -1050,6 +1060,8 @@ def main():
                     help="probability that a threat turns once, re-aiming past the ship")
     ap.add_argument("--defended-radius", type=float, default=_env("DEFENDED_RADIUS_M", 45.0, float))
     ap.add_argument("--kill-radius", type=float, default=_env("KILL_RADIUS_M", 8.0, float))
+    ap.add_argument("--no-fly", type=float, default=_env("NO_FLY_RADIUS_M", 0.0, float),
+                    help="ship no-fly zone radius (m, 0: off)")
     ap.add_argument("--log-path", default=os.environ.get("SHIP_LOG", "/state/ship_log.jsonl"))
     args = ap.parse_args()
 

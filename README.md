@@ -338,11 +338,22 @@ Absolute position is only observable through the anchors: with every anchor jamm
 - the wind state in the filter: without it, a 0.5 m/s wind made it 600× overconfident and re-lock 290 times in one run;
 - station keeping: idle drones fly back after drifting 1 m, and a drone latched on its goal re-approaches after drifting 1 m beyond where it latched. Neither triggers in calm air.
 
+**Ship no-fly zone (`--no-fly 50`, `NO_FLY_RADIUS_M`).** Shrapnel safety: drones stay out of a circle of radius R around the ship.
+- **Stations** move to R+5 … R+45 m (55–95 m for 50).
+- **Planners:** APF repels from the zone's boundary, widened by 2σ of the drone's own position uncertainty; ORCA uses the boundary as its hard constraint.
+- **Routes** (`deconflict.plan_route`, used for bids, ETAs, the ship's feasibility and confirmation) go around the zone instead of through it: tangent, arc and tangent waypoints at R + 3 m, the shorter way round (`detour`).
+- **Intercept points** stay at least R + 5 m out, and the fallback point (the old 45 m defended-radius crossing) moves out to that radius.
+
+**Uncertainty in the gates.**
+- **Fuze:** a contact must lie within the gate + 3σ of the predicted threat position, because the drone's own error shifts every contact.
+- **Final intruder check:** clearance + 2·(own σ + the intruder's σ); heartbeats carry `pos_sigma`.
+
 **Evaluation.** Drones report their estimate and covariance on `drone/{id}/loc`. The metrics node compares them with `sim/truth` and reports, through `/api/summary` and the sweeps:
 - position error: `loc_err_mean_m`, `loc_err_p95_m`, `loc_err_max_m`;
 - consistency: `loc_nees_mean` (2 for a consistent filter) and `loc_within95` (share of errors inside the 95 % ellipse);
 - `loc_relocks`;
-- true separations: `collisions` (< 2.5 m), `close_calls` (< 5 m) and `min_separation_m`.
+- true separations: `collisions` (< 2.5 m), `close_calls` (< 5 m) and `min_separation_m`;
+- `min_ship_range_m`: the closest any drone came to the ship.
 
 Measured, 8 drones, 4 level-1 threats, `--rtf 3` (wind 5 m/s with 1.5 m/s gusts, real; the jammer blocks the anchors for drones within 30 m of (40, 0) from t = 30 s):
 
@@ -371,6 +382,17 @@ Perception alone, truth localization (`scaling_sweep.py`, sampled over the run):
 - Anchors alone hold position error to centimetres in calm air and to sub-metre in wind.
 - Cooperation keeps jammed drones within 0.76 m, where anchors alone let them drift by up to 11 m.
 - Misses in wind are a station-keeping limit, the same with truth: drones latch up to 3 m from their slot, downwind, and the fuze cannot make up a cross-track offset.
+
+The full architecture (`LOCALIZATION=coop PERCEPTION=radar NO_FLY_RADIUS_M=50`), 4 level-1 threats, `--rtf 3`:
+
+| Drones, conditions | Destroyed | Miss mean | Intercept range mean | Closest to the ship | Position error p95 | NEES |
+|---|---|---|---|---|---|---|
+| 8, original defaults | 4/4 | 0.27 m | 92 m | – | – | – |
+| 8, calm | 4/4 | 1.15–1.22 m | 104 m | 58.7 m | 0.46–0.53 m | 1.6 |
+| 8, wind | 4/4 | 2.46 m | 103 m | – | 0.57 m | 3.0 |
+| 4 (intercepts on the far side: routes around the zone), calm | 4/4 | 2.47 m | 74 m | **54.9 m** | 0.53 m | 1.5 |
+
+None of these runs had collisions, friendly fire or holds. No drone entered the zone. Misses are larger than with the original defaults. Stations are farther out, so drones fly longer and arrive with their position known to within about 0.5 m rather than exactly, and the fuze cannot remove a cross-track offset.
 
 ## Proximity fuze
 
@@ -712,6 +734,7 @@ Where each implemented feature lives.
 | | evaluation: errors, NEES, separations | `src/metrics/main.py` (`_on_loc`, `_loc_summary`) |
 | **Perception** | mmWave radar (`PERCEPTION=radar`), lidar off | `GazeboSimulator.cpp` (`configure_fuze`, `publish_fuze`) |
 | | radar contacts -> planner obstacles | `src/agent/radar_obstacles.py`, `agent.py` (`_on_contacts`) |
+| **No-fly zone** | routes around the ship's zone, intercepts outside it; planner barrier with 2σ margin; stations outside | `deconflict.py` (`detour`, `plan_route`, `choose_intercept`), `path_planning.py`, `ship.py` (`engage_radius`), `generate_swarm_config.py` (`--no-fly`) |
 | **Fuze** | fuze sensor: unlabelled contacts with noise and latency | `GazeboSimulator.cpp` (`configure_fuze`, `publish_fuze`, `flush_fuze`) |
 | | fuze logic: tracking, mate record, arming, gate, firing rules, fallback | `src/agent/fuze.py` |
 | | drone: fuze scans, detonation (once), chain fire, fallback | `agent.py` (`_on_fuze`, `_fuze_decision`, `_detonate`, `_on_mate_blast`, `_check_engagement`) |
@@ -773,6 +796,8 @@ Devices marked `"simulated": false` are recorded for hardware deployment but not
 
 Simulation speed (env): `SIM_RTF` (1), set by `--rtf`.
 
+Ship no-fly zone (env): `NO_FLY_RADIUS_M` (0 = off; `--no-fly R`, which also moves stations to R+5 … R+45 m).
+
 Localization and perception (env): `PERCEPTION` (`lidar`|`radar`, `--perception`), `LOCALIZATION` (`truth`|`anchors`|`coop`, `--localization`), `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensor and environment parameters are in the [hardware record](#hardware-record).
 
 Proximity fuze (env): `FUZE` (1; 0 = timed detonation), `FUZE_WINDOW_S` (2), `FUZE_GATE_M` (5), `FUZE_FIRE` (`cpa`), `FUZE_FALLBACK` (`hold`), and for the simulator's sensor `FUZE_RANGE_M` (10, drones too), `FUZE_HZ` (50), `FUZE_NOISE_M` (0.1), `FUZE_LATENCY_S` (0), `FUZE_SEED` (0). See [Proximity fuze](#proximity-fuze).
@@ -797,6 +822,7 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_threat_queue.py` | min-heap ordering by TCPA, lazy removal |
 | `test_hardware.py` | hardware record complete, kinematics reproduce the original drones, runtime config wins; drones never read `sim/truth` |
 | `test_localclock.py` | perfect default, drift/offset model, jitter only in exchange stamps, reproducible per-node draw |
+| `test_deconflict.py` | spatial queue: speed profiles, routes with holds and exits around blasts, earliest-feasible intercepts, manoeuvre re-plan slack; routes around the no-fly zone (legs clear, shorter way, timing) |
 | `test_localization.py` | EKF from anchor ranges: multilateration, tracking a moving drone consistently (NEES), outlier gating, dropouts, re-lock after a corrupted estimate, uncertainty growth, wind learned, outage dead-reckoned with the wind |
 | `test_coop.py` | cooperative localization: a drone beyond anchor range localized through anchored peers (consistent), drift without peers, no stale "anchored" loop with every anchor jammed, peer selection |
 | `test_radar_obstacles.py` | radar contacts give exactly the lidar's obstacle points (50 random layouts vs a port of the simulator's lidar), ship contacts dropped, staleness |
@@ -831,7 +857,8 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 - **Localization is optimistic.** The drones' motion model is the simulator's exact command response, and wind is the only disturbance. On hardware the response must be identified and is only approximately known. Ultra-wideband (UWB) ranges have no blocked-path or multipath model, and the radar has no clutter or false alarms.
 - **No consistent fusion between unanchored drones.** Peers are used only along fresh anchor chains. With every anchor jammed, drones dead-reckon independently (their uncertainty grows honestly), and peer ranges keep nobody's estimate tight. Recursive decentralized localization (RDL), which tracks cross-covariances with pairwise exchanges, is the planned fix.
 - **Station keeping in wind.** Drones latch up to 3 m from their goal, then drift downwind until they re-approach: 2.6–2.9 m misses in a 0.5 m/s wind, with true positions too. Continuous position hold would remove most of it.
-- **Not yet done** (cooperative localization step L4): the 50 m no-fly zone around the ship, stations 50–100 m out, routing and ETAs around the zone, uncertainty in the fuze gate, clearance and intruder checks, and the planned speed (`speed_scale` 0.2–0.4) and 1 km detection retune.
+- **Not yet done:** the planned speed retune (`speed_scale` 0.2–0.4, threats faster) and 1 km threat detection. The full architecture is behind switches; the defaults are still the original truth, lidar and no zone.
+- **Routes around the no-fly zone are timed conservatively:** each detour waypoint is planned from rest, so ETAs over-estimate.
 - **Chain-fire delay.** A real mate-to-mate trigger such as a barometric shock travels at about the speed of sound: ~17 ms across a 6 m stack, which lets a fast threat escape. A barometric trigger would also respond to unrelated blasts. The simulation uses the detonation topic as an idealized, job-selective trigger (measured delivery 1.5–32 ms at `--rtf 3`).
 - **Closing-speed discrimination.** Closing speed would separate threats from drones only at real speeds, not at the simulation's scaled ones, so the fuze does not use it.
 - **Fuze window and clocks.** The window is centred on `t_engage`, but threats arrive ~1.1 s late (drones stop short), so without clock sync a clock ~1 s ahead closes the window too early (see [Proximity fuze](#proximity-fuze)).

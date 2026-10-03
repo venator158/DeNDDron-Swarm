@@ -184,9 +184,64 @@ def _first_conflict(pos, goal, t, blasts, v_max, a_max, t_goal, tol, v0=0.0):
     return None
 
 
+def detour(start: Vec3, goal: Vec3, radius: float, step_deg: float = 30.0) -> List[Vec3]:
+    """Waypoints around the ship's no-fly zone (a circle of `radius` at the origin, in the ground
+    plane) when the straight path start -> goal would cross it: tangent, arc, tangent, the shorter
+    way round.  Arc points are spaced at most step_deg apart, slightly outside the circle so the
+    chords between them stay out of it; altitude is interpolated.  [] if the path clears the zone
+    (or an end is inside it: nothing sensible to do)."""
+    sx, sy, gx, gy = start[0], start[1], goal[0], goal[1]
+    ds, dg = math.hypot(sx, sy), math.hypot(gx, gy)
+    if ds < radius or dg < radius or _seg_dist((0.0, 0.0, 0.0), (sx, sy, 0.0), (gx, gy, 0.0)) >= radius:
+        return []
+    a_s, a_g = math.atan2(sy, sx), math.atan2(gy, gx)
+    t_s, t_g = math.acos(radius / ds), math.acos(radius / dg)
+    best = None
+    for sgn in (1.0, -1.0):                       # counter-clockwise, clockwise
+        a1, a2 = a_s + sgn * t_s, a_g - sgn * t_g
+        sweep = ((a2 - a1) * sgn) % (2.0 * math.pi)
+        length = math.sqrt(ds * ds - radius * radius) + radius * sweep + math.sqrt(dg * dg - radius * radius)
+        if best is None or length < best[0]:
+            best = (length, a1, sweep, sgn)
+    _, a1, sweep, sgn = best
+    n = max(1, int(math.ceil(math.degrees(sweep) / step_deg)))
+    r_out = radius / math.cos(sweep / n / 2.0)      # chords between arc points stay outside the circle
+    pts = []
+    for k in range(n + 1):
+        a = a1 + sgn * sweep * k / n
+        f = (k + 1) / (n + 2)
+        pts.append((r_out * math.cos(a), r_out * math.sin(a), start[2] + (goal[2] - start[2]) * f))
+    return pts
+
+
 def plan_route(start: Vec3, goal: Vec3, t0: float, blasts: Iterable[Blast], v_max: float, a_max: float,
                t_goal: Optional[float] = None, tol: float = BLAST_TOL_S, max_legs: int = 12,
-               v0: float = 0.0) -> Route:
+               v0: float = 0.0, no_fly: Optional[float] = None) -> Route:
+    """Route start -> goal from time t0 that stays out of every blast during its window, and around
+    the ship's no-fly zone (radius `no_fly`, None: no zone) through detour() waypoints.  Each piece is
+    planned by _plan_segment (holds included); time is conservative (each waypoint from rest)."""
+    blasts = list(blasts)
+    wps = detour(start, goal, no_fly) if no_fly else []
+    if not wps:
+        return _plan_segment(start, goal, t0, blasts, v_max, a_max, t_goal, tol, max_legs, v0)
+    route = Route()
+    pos, t, v = tuple(start), float(t0), v0
+    for wp in wps + [tuple(goal)]:
+        last = wp == tuple(goal)
+        seg = _plan_segment(pos, wp, t, blasts, v_max, a_max, t_goal if last else None, tol, max_legs, v)
+        route.legs += seg.legs
+        route.travel_s += seg.travel_s
+        route.hold_s += seg.hold_s
+        route.blocked = route.blocked or seg.blocked
+        route.exposed += [e for e in seg.exposed if e not in route.exposed]
+        route.arrival = seg.arrival
+        pos, t, v = wp, seg.arrival, 0.0
+    return route
+
+
+def _plan_segment(start: Vec3, goal: Vec3, t0: float, blasts: Iterable[Blast], v_max: float, a_max: float,
+                  t_goal: Optional[float] = None, tol: float = BLAST_TOL_S, max_legs: int = 12,
+                  v0: float = 0.0) -> Route:
     """Route start -> goal from time t0 that stays out of every blast during its window.
 
     t_goal: until when the drone will wait at the goal (its own detonation time); a goal inside
@@ -294,12 +349,12 @@ def _seg_dist(p: Vec3, a: Vec3, b: Vec3) -> float:
 
 
 def disrupts(blast: Blast, committed: Sequence[Tuple[Vec3, Vec3, float]], now: float, v_max: float,
-             a_max: float) -> bool:
+             a_max: float, no_fly: Optional[float] = None) -> bool:
     """Would this blast force a hold on (or block) any committed drone (position, slot, own t)?"""
     for pos, goal, t_goal in committed:
         if _seg_dist(blast.center, pos, goal) >= blast.radius:
             continue                            # nowhere near its route or slot
-        r = plan_route(pos, goal, now, [blast], v_max, a_max, t_goal=t_goal)
+        r = plan_route(pos, goal, now, [blast], v_max, a_max, t_goal=t_goal, no_fly=no_fly)
         if r.blocked or r.hold_s > 0 or r.exposed:
             return True
     return False
@@ -309,7 +364,8 @@ def choose_intercept(track: Callable[[float], Vec3], now: float, t_latest: float
                      level: int, reservations: Sequence[Reservation], v_max: float, a_max: float,
                      max_range: float, z_range: Tuple[float, float], slack: float = INTERCEPT_SLACK_S,
                      margin: float = ETA_MARGIN, step: float = 0.5, verify: int = 3,
-                     committed: Sequence[Tuple[Vec3, Vec3, float]] = ()) -> Optional[Intercept]:
+                     committed: Sequence[Tuple[Vec3, Vec3, float]] = (), min_range: float = 0.0,
+                     no_fly: Optional[float] = None) -> Optional[Intercept]:
     """Earliest time t in [now + slack, t_latest] at which `level` drones can reach track(t) in time.
 
     A cheap straight-line bound ranks drones; only the best level + `verify` are checked with
@@ -323,16 +379,17 @@ def choose_intercept(track: Callable[[float], Vec3], now: float, t_latest: float
     t = now + slack
     while t <= t_latest + 1e-9:
         p = track(t)
-        if (math.hypot(p[0], p[1]) <= max_range and z_range[0] <= p[2] <= z_range[1]
+        if (min_range <= math.hypot(p[0], p[1]) <= max_range and z_range[0] <= p[2] <= z_range[1]
                 and all(math.dist(p, r.point) >= blast_separation(r.level, level) for r in reservations)):
             bound = sorted((eta(math.dist(d, p), v_max, a_max) * margin, i) for i, d in enumerate(drones))
             if now + slack + bound[level - 1][0] <= t:
                 costs = sorted(
                     route.cost(margin) for route in (
-                        plan_route(drones[i], p, now, blasts, v_max, a_max, t_goal=t)
+                        plan_route(drones[i], p, now, blasts, v_max, a_max, t_goal=t, no_fly=no_fly)
                         for _, i in bound[:level + verify]) if not route.blocked)
                 if (len(costs) >= level and now + slack + costs[level - 1] <= t
-                        and not disrupts(Blast("new", p, blast_radius(level), t), committed, now, v_max, a_max)):
+                        and not disrupts(Blast("new", p, blast_radius(level), t), committed, now, v_max, a_max,
+                                         no_fly)):
                     return Intercept(t, p, costs[level - 1])
         t += step
     return None

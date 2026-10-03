@@ -166,6 +166,7 @@ services:
       AUTO_APPROVE: ${AUTO_APPROVE:-0}                    # ship approves feasible threats itself (dashboard toggle)
       AUTO_APPROVE_REACTION_S: ${AUTO_APPROVE_REACTION_S:-3}
       INTERCEPT_MAX_RANGE_M: ${INTERCEPT_MAX_RANGE_M:-140}
+      NO_FLY_RADIUS_M: ${NO_FLY_RADIUS_M:-0}             # ship no-fly zone (0: off); intercepts stay 5 m outside
       SHIP_CLOCK_DRIFT_PPM: ${SHIP_CLOCK_DRIFT_PPM:-0}
       SHIP_CLOCK_OFFSET_S: ${SHIP_CLOCK_OFFSET_S:-0}
       SHIP_CLOCK_JITTER_S: ${SHIP_CLOCK_JITTER_S:-0}

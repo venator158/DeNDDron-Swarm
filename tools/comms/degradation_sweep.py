@@ -69,7 +69,7 @@ COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "drones", "threats", "
            "det_ordered_err_s_mean", "det_miss_m_mean", "det_miss_m_max",
            "sync_mode", "sync_err_s_mean", "sync_err_s_max", "sync_bound_s_mean", "sync_bound_coverage",
            "det_reasons", "chain_fires", "chain_delay_s_mean", "chain_delay_s_max", "fuze_false_triggers",
-           "fuze_no_detection", "collisions", "close_calls", "min_separation_m",
+           "fuze_no_detection", "collisions", "close_calls", "min_separation_m", "min_ship_range_m",
            "loc_err_mean_m", "loc_err_p95_m", "loc_err_max_m", "loc_nees_mean", "loc_within95", "loc_relocks",
            "hb_rx_per_s_at_ship", "env", "wall_s"]
 # Resource columns, sampled during the run (Sampler); see scaling_sweep.py.

@@ -52,6 +52,11 @@ while [[ $# -gt 0 ]]; do
       export THREAT_MANEUVER_P="$2"
       shift 2
       ;;
+    --no-fly)
+      # ship no-fly zone radius in m (stations move to R+5..R+45 m; planners and routes keep out)
+      export NO_FLY_RADIUS_M="$2"
+      shift 2
+      ;;
     --wind)
       # steady wind "x,y" in real m/s (scaled like the airframe), e.g. --wind 5,0
       export WIND_MPS="$2"
@@ -140,6 +145,9 @@ if [[ "$ARP_MAX" -gt 0 && "$ARP_NEED" -gt "$ARP_MAX" ]]; then
 fi
 
 GEN_ARGS=(--agents "$AGENT_COUNT" --seed "$SEED" --algorithm "$ALGORITHM")
+if [[ -n "${NO_FLY_RADIUS_M:-}" && "${NO_FLY_RADIUS_M}" != "0" ]]; then
+  GEN_ARGS+=(--no-fly "$NO_FLY_RADIUS_M")
+fi
 # In the defence scenario drones hold station until tasked, so no static goals.
 if [[ "$MAX_THREATS" -gt 0 ]]; then
   GEN_ARGS+=(--no-goals)
