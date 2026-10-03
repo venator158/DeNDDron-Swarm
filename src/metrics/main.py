@@ -41,6 +41,7 @@ log = logging.getLogger("MetricsNode")
 # Constants
 # ---------------------------------------------------------------------------
 COLLISION_RADIUS_M  = 2.5    # drones closer than this = proximity collision
+CLOSE_CALL_M        = 5.0    # pairs closer than this count as close calls; also the hash cell size
 DEDUP_WINDOW_S      = 3.0    # min seconds between same-pair collision events (suppress sustained-contact spam)
 PUBLISH_INTERVAL_S  = 5.0    # how often to publish swarm/metrics/summary
 SAVE_INTERVAL_S     = 60.0   # how often to auto-save log to disk
@@ -115,6 +116,8 @@ class MetricsNode:
         self._total_spawned    = 0
         self._total_despawned  = 0
         self._total_collisions = 0
+        self._close_calls      = 0
+        self._min_separation   = None   # closest true distance between two live drones (pairs < CLOSE_CALL_M)
         self._start_time       = time.monotonic()
         self._events: list = []
 
@@ -122,6 +125,12 @@ class MetricsNode:
         # True poses come from the simulator's evaluation stream (sim/truth): drones' own sensor
         # frames no longer carry x,y once they localize themselves.
         self._sub_truth = session.declare_subscriber("sim/truth", self._on_truth)
+        # Localization evaluation: drones report their x,y estimate and covariance (drone/{id}/loc);
+        # compared with sim/truth extrapolated to the report's sim time.
+        self._truth = {}                 # agent -> (sim_time, x, y, vx, vy)
+        self._loc_errs = []              # recent position errors (m), for percentiles
+        self._loc_stats = {"n": 0, "sum": 0.0, "max": 0.0, "nees_sum": 0.0, "within95": 0, "relocks": {}}
+        self._sub_loc = session.declare_subscriber("drone/*/loc", self._on_loc)
         self._sub_join = session.declare_subscriber(
             "swarm/agents/join", self._on_join
         )
@@ -142,7 +151,10 @@ class MetricsNode:
         try:
             payload = json.loads(bytes(sample.payload).decode("utf-8"))
             drones = payload.get("drones", {})
+            t = float(payload.get("sim_time", 0.0))
             with self._lock:
+                for agent_id, (x, y, z, vx, vy, vz) in drones.items():
+                    self._truth[agent_id] = (t, x, y, vx, vy)
                 for agent_id, (x, y, z, vx, vy, vz) in drones.items():
                     if agent_id not in self._agents:
                         self._agents[agent_id] = AgentState(agent_id)
@@ -161,6 +173,46 @@ class MetricsNode:
                         log.info(f"Agent gone from sim/truth: {agent_id}")
         except Exception as e:
             log.warning(f"Error in _on_truth: {e}")
+
+    def _on_loc(self, sample):
+        """A drone's localization report: error against truth, and consistency (NEES, 2 dof)."""
+        try:
+            agent_id = str(sample.key_expr).split("/")[1]
+            m = json.loads(bytes(sample.payload).decode("utf-8"))
+            with self._lock:
+                tr = self._truth.get(agent_id)
+                if tr is None or abs(m["sim_time"] - tr[0]) > 0.5:
+                    return
+                dt = m["sim_time"] - tr[0]
+                ex = m["est"][0] - (tr[1] + tr[3] * dt)
+                ey = m["est"][1] - (tr[2] + tr[4] * dt)
+                err = math.hypot(ex, ey)
+                a, b, c = m["cov"]
+                det = a * c - b * b
+                nees = (c * ex * ex - 2 * b * ex * ey + a * ey * ey) / det if det > 1e-12 else float("inf")
+                st = self._loc_stats
+                st["n"] += 1
+                st["sum"] += err
+                st["max"] = max(st["max"], err)
+                st["nees_sum"] += min(nees, 1e6)
+                st["within95"] += nees <= 5.99
+                st["relocks"][agent_id] = m.get("relocks", 0)
+                self._loc_errs.append(err)
+                if len(self._loc_errs) > 20000:
+                    del self._loc_errs[:5000]
+        except Exception as e:
+            log.warning(f"Error in _on_loc: {e}")
+
+    def _loc_summary(self) -> dict:
+        st = self._loc_stats
+        if not st["n"]:
+            return {}
+        errs = sorted(self._loc_errs)
+        return {"loc_reports": st["n"], "loc_err_mean_m": round(st["sum"] / st["n"], 3),
+                "loc_err_p95_m": round(errs[int(0.95 * (len(errs) - 1))], 3), "loc_err_max_m": round(st["max"], 3),
+                "loc_nees_mean": round(st["nees_sum"] / st["n"], 2),
+                "loc_within95": round(st["within95"] / st["n"], 3),
+                "loc_relocks": sum(st["relocks"].values())}
 
     def _on_join(self, sample):
         try:
@@ -231,7 +283,7 @@ class MetricsNode:
             return 0, 0
 
         # Step 2: Build spatial hash grid
-        cell_size = COLLISION_RADIUS_M
+        cell_size = CLOSE_CALL_M
         grid = {}
         for aid, (x, y, z) in snapshots.items():
             cell_key = (
@@ -266,6 +318,16 @@ class MetricsNode:
             dy = p1[1] - p2[1]
             dz = p1[2] - p2[2]
             dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if dist < CLOSE_CALL_M:
+                with self._lock:
+                    a1, a2 = self._agents.get(a1_id), self._agents.get(a2_id)
+                    if a1 and a2 and a1.alive and a2.alive:
+                        if self._min_separation is None or dist < self._min_separation:
+                            self._min_separation = dist
+                        key = ("close", a2_id)
+                        if now - a1._last_col_time.get(key, 0.0) >= DEDUP_WINDOW_S:
+                            a1._last_col_time[key] = now
+                            self._close_calls += 1
 
             if dist < COLLISION_RADIUS_M:
                 with self._lock:
@@ -315,6 +377,9 @@ class MetricsNode:
                 "total_spawned":     self._total_spawned,
                 "total_despawned":   self._total_despawned,
                 "total_collisions":  self._total_collisions,
+                "close_calls":       self._close_calls,
+                "min_separation_m":  None if self._min_separation is None else round(self._min_separation, 2),
+                **self._loc_summary(),
                 "avg_distance_m":    round(avg_dist, 2),
                 "avg_speed_mps":     round(avg_spd, 3),
                 "agents":            [a.to_dict() for a in sorted(

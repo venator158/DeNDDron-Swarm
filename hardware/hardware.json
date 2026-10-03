@@ -1,11 +1,9 @@
 {
   "_doc": "Hardware record: the class of every device the swarm uses (not exact models) and its typical real performance. Simulation parameters are derived from here (src/common/hardware.py); the launcher copies this file into config/swarm_runtime.json under 'hardware', where the simulator, drones and ship read it. Speeds and accelerations are scaled for the simulation by simulation.speed_scale; sensor noise, range and rate are used as they are. Classes marked simulated=false are recorded for hardware deployment but not modelled (their output is taken as perfect, or the device is unused).",
-
   "simulation": {
     "speed_scale": 0.1,
     "_speed_scale": "sim speed = real speed x this; 0.1 reproduces the original 4 m/s drones; planned 0.2-0.4"
   },
-
   "airframe": {
     "class": "racing-class interceptor quadcopter (5-7 inch, ~1 kg)",
     "max_speed_mps": 40.0,
@@ -15,16 +13,14 @@
     "endurance_s": 600,
     "simulated": true
   },
-
   "warhead": {
     "class": "fragmentation charge",
     "kill_radius_m": 8.0,
     "simulated": true
   },
-
   "uwb": {
     "class": "IEEE 802.15.4z HRP UWB transceiver (DW3000-class), double-sided two-way ranging",
-    "range_sigma_m": 0.10,
+    "range_sigma_m": 0.1,
     "max_range_m": 250.0,
     "exchange_airtime_s": 0.001,
     "channel_capacity_per_s": 1000,
@@ -35,13 +31,32 @@
     "payload_bytes": 64,
     "simulated": true
   },
-
   "uwb_anchors": {
     "class": "ship-mounted UWB anchors (same transceiver class), positions in the ship frame",
-    "positions_m": [[15.0, 5.0, 8.0], [15.0, -5.0, 8.0], [-15.0, 5.0, 8.0], [-15.0, -5.0, 8.0]],
+    "positions_m": [
+      [
+        15.0,
+        5.0,
+        8.0
+      ],
+      [
+        15.0,
+        -5.0,
+        8.0
+      ],
+      [
+        -15.0,
+        5.0,
+        8.0
+      ],
+      [
+        -15.0,
+        -5.0,
+        8.0
+      ]
+    ],
     "simulated": true
   },
-
   "radar": {
     "class": "60 GHz FMCW mmWave radar (IWR6843AOP-class), four boards for 360 degree coverage",
     "max_range_m": 30.0,
@@ -53,7 +68,6 @@
     "latency_s": 0.0,
     "simulated": true
   },
-
   "imu": {
     "class": "MEMS 6-axis IMU (BMI088-class)",
     "gyro_noise_dps_rthz": 0.014,
@@ -62,7 +76,6 @@
     "simulated": false,
     "_note": "recorded for hardware deployment; x,y dead reckoning uses the commanded-velocity response model instead"
   },
-
   "barometer": {
     "class": "MEMS barometer (BMP390-class), fused with the IMU",
     "altitude_sigma_m": 0.1,
@@ -70,7 +83,6 @@
     "simulated": false,
     "_note": "altitude taken as perfect"
   },
-
   "compass": {
     "class": "3-axis magnetometer fused with the IMU (attitude/heading reference)",
     "heading_sigma_deg": 1.0,
@@ -78,10 +90,20 @@
     "simulated": false,
     "_note": "attitude and heading taken as perfect"
   },
-
   "c2_radio": {
     "class": "peer-to-peer data radio (Zenoh over UDP in the simulation)",
     "simulated": true,
     "_note": "impairments via tools/comms/degrade_radio.sh"
+  },
+  "environment": {
+    "class": "sea-state wind at drone altitude (not hardware: the conditions the hardware works in)",
+    "wind_mps": [
+      0.0,
+      0.0
+    ],
+    "gust_sigma_mps": 0.0,
+    "gust_tau_s": 5.0,
+    "simulated": true,
+    "_note": "real-world values, scaled by simulation.speed_scale like the airframe; a moderate breeze is ~5 m/s with ~1.5 m/s gusts. Default calm (0) keeps the original behaviour. Drones cannot sense it: it pushes their true position away from their dead-reckoned estimate."
   }
 }

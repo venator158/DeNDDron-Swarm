@@ -52,6 +52,25 @@ while [[ $# -gt 0 ]]; do
       export THREAT_MANEUVER_P="$2"
       shift 2
       ;;
+    --wind)
+      # steady wind "x,y" in real m/s (scaled like the airframe), e.g. --wind 5,0
+      export WIND_MPS="$2"
+      shift 2
+      ;;
+    --gust)
+      export GUST_SIGMA_MPS="$2"
+      shift 2
+      ;;
+    --localization)
+      # truth (simulator x,y) | anchors (UWB to the ship's anchors) | coop (anchors + peers)
+      export LOCALIZATION="$2"
+      shift 2
+      ;;
+    --perception)
+      # Obstacle perception: lidar (+ voxel map) or radar (mmWave, hardware record).
+      export PERCEPTION="$2"
+      shift 2
+      ;;
     --auto-approve)
       # The ship approves every feasible threat itself (also a dashboard toggle); reaction in sim seconds.
       export AUTO_APPROVE=1

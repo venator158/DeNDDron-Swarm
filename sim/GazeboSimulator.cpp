@@ -122,6 +122,17 @@ void GazeboSimulator::init() {
 
     load_spawn_config();
     configure_fuze();
+    configure_localization();
+    configure_environment();
+    if (_loc_mode == "coop") {
+        auto sub_opt_uwb = zenoh::Session::SubscriberOptions::create_default();
+        _sub_uwb_tx.emplace(_session->declare_subscriber(
+            zenoh::KeyExpr("drone/*/uwb_tx"),
+            std::bind(&GazeboSimulator::on_uwb_tx, this, std::placeholders::_1),
+            [](){},
+            std::move(sub_opt_uwb)
+        ));
+    }
 
     std::cout << "[GazeboSimulator] Ready. Waiting for agents..." << std::endl;
 }
@@ -140,6 +151,7 @@ void GazeboSimulator::load_spawn_config() {
 
     try {
         json cfg = json::parse(config_file);
+        if (cfg.contains("hardware") && cfg["hardware"].is_object()) _hw = cfg["hardware"];
         try {
             _kill_radius = cfg.at("hardware").at("warhead").at("kill_radius_m").get<double>();
         } catch (...) {}
@@ -735,6 +747,25 @@ void GazeboSimulator::configure_fuze() {
     _fuze_noise = std::max(0.0, env_double("FUZE_NOISE_M", 0.1));
     _fuze_latency = std::max(0.0, env_double("FUZE_LATENCY_S", 0.0));
     _fuze_rng.seed(static_cast<unsigned>(env_double("FUZE_SEED", 0.0)));
+    const char* perception = std::getenv("PERCEPTION");
+    _radar_mode = perception != nullptr && std::strcmp(perception, "radar") == 0;
+    if (_radar_mode) {
+        try {
+            const json& r = _hw.at("radar");
+            _fuze_range = r.at("max_range_m").get<double>();
+            _fuze_period = 1.0 / std::max(1.0, r.at("rate_hz").get<double>());
+            _fuze_latency = r.value("latency_s", 0.0);
+            _radar_range_sigma = r.at("range_sigma_m").get<double>();
+            _radar_az_sigma = r.at("azimuth_sigma_deg").get<double>() * M_PI / 180.0;
+            _radar_el_sigma = r.at("elevation_sigma_deg").get<double>() * M_PI / 180.0;
+        } catch (const std::exception& e) {
+            std::cerr << "[GazeboSimulator] radar parameters missing from the hardware record: " << e.what() << std::endl;
+        }
+        _contact_topic = "radar";
+        std::cout << "[GazeboSimulator] Perception: mmWave radar " << _fuze_range << " m, " << 1.0 / _fuze_period
+                  << " Hz, range sigma " << _radar_range_sigma << " m, angle sigma "
+                  << _radar_az_sigma * 180.0 / M_PI << " deg; lidar off" << std::endl;
+    }
     std::cout << "[GazeboSimulator] Proximity fuze " << (_fuze_on ? "on" : "off") << ": range " << _fuze_range
               << " m, " << 1.0 / _fuze_period << " Hz, noise " << _fuze_noise << " m, latency " << _fuze_latency
               << " s" << std::endl;
@@ -769,12 +800,27 @@ void GazeboSimulator::publish_fuze(double sim_time, const std::vector<std::strin
         }
         json objects = json::array();
         for (const auto& rel : seen) {
-            const double nx = _fuze_noise > 0.0 ? noise(_fuze_rng) : 0.0;
-            const double ny = _fuze_noise > 0.0 ? noise(_fuze_rng) : 0.0;
-            const double nz = _fuze_noise > 0.0 ? noise(_fuze_rng) : 0.0;
+            double nx = 0.0, ny = 0.0, nz = 0.0;
+            if (_radar_mode) {
+                // radar noise is in range, azimuth and elevation
+                const double r = rel.Length();
+                if (r > 1e-6) {
+                    std::normal_distribution<double> unit(0.0, 1.0);
+                    const double rr = r + _radar_range_sigma * unit(_fuze_rng);
+                    const double az = std::atan2(rel.Y(), rel.X()) + _radar_az_sigma * unit(_fuze_rng);
+                    const double el = std::asin(std::clamp(rel.Z() / r, -1.0, 1.0)) + _radar_el_sigma * unit(_fuze_rng);
+                    nx = rr * std::cos(el) * std::cos(az) - rel.X();
+                    ny = rr * std::cos(el) * std::sin(az) - rel.Y();
+                    nz = rr * std::sin(el) - rel.Z();
+                }
+            } else if (_fuze_noise > 0.0) {
+                nx = noise(_fuze_rng);
+                ny = noise(_fuze_rng);
+                nz = noise(_fuze_rng);
+            }
             objects.push_back({round_mm(rel.X() + nx), round_mm(rel.Y() + ny), round_mm(rel.Z() + nz)});
         }
-        _fuze_queue.push_back({sim_time + _fuze_latency, "drone/" + agent_id + "/fuze",
+        _fuze_queue.push_back({sim_time + _fuze_latency, "drone/" + agent_id + "/" + _contact_topic,
                                json{{"sim_time", sim_time}, {"objects", objects}}.dump()});
     }
 }
@@ -855,6 +901,139 @@ std::string key_agent(const std::string& key) {
 }
 double round_mm(double v) { return std::round(v * 1000.0) / 1000.0; }
 }  // namespace
+
+void GazeboSimulator::configure_localization() {
+    const char* mode = std::getenv("LOCALIZATION");
+    _loc_mode = (mode != nullptr && std::strlen(mode) > 0) ? mode : "truth";
+    if (_loc_mode == "truth") return;
+    try {
+        const json& u = _hw.at("uwb");
+        _uwb_sigma = u.at("range_sigma_m").get<double>();
+        _uwb_range = u.at("max_range_m").get<double>();
+        _uwb_dropout = u.value("dropout_p", 0.0);
+        _uwb_capacity = u.value("channel_capacity_per_s", 1000.0);
+        _uwb_anchor_period = 1.0 / std::max(0.1, u.at("anchor_rate_hz").get<double>());
+        _uwb_peer_period = 1.0 / std::max(0.1, u.at("peer_rate_hz").get<double>());
+        _uwb_max_peers = u.value("max_peers", 6);
+        for (const auto& a : _hw.at("uwb_anchors").at("positions_m"))
+            _anchors.emplace_back(a.at(0).get<double>(), a.at(1).get<double>(), a.at(2).get<double>());
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] UWB parameters missing from the hardware record: " << e.what() << std::endl;
+    }
+    _uwb_rng.seed(static_cast<unsigned>(env_double("UWB_SEED", 1.0)));
+    if (const char* jam = std::getenv("UWB_JAM"); jam != nullptr) {
+        std::stringstream ss(jam);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            std::stringstream is(item);
+            std::string what, a, b, x, y, r;
+            if (std::getline(is, what, ':') && std::getline(is, a, ':') && std::getline(is, b, ':')) {
+                JamWindow j{what, std::atof(a.c_str()), std::atof(b.c_str())};
+                if (std::getline(is, x, ':') && std::getline(is, y, ':') && std::getline(is, r, ':')) {
+                    j.local = true;
+                    j.x = std::atof(x.c_str());
+                    j.y = std::atof(y.c_str());
+                    j.r = std::atof(r.c_str());
+                }
+                _uwb_jam.push_back(j);
+            }
+        }
+    }
+    std::cout << "[GazeboSimulator] Localization " << _loc_mode << ": x,y withheld; UWB " << _anchors.size()
+              << " anchors, sigma " << _uwb_sigma << " m, max range " << _uwb_range << " m, anchors every "
+              << _uwb_anchor_period << " s, peers every " << _uwb_peer_period << " s (max " << _uwb_max_peers
+              << "), " << _uwb_jam.size() << " jam window(s)" << std::endl;
+}
+
+void GazeboSimulator::configure_environment() {
+    double scale = 0.1, wx = 0.0, wy = 0.0;
+    try {
+        scale = _hw.at("simulation").at("speed_scale").get<double>();
+        const json& e = _hw.at("environment");
+        wx = e.at("wind_mps").at(0).get<double>();
+        wy = e.at("wind_mps").at(1).get<double>();
+        _gust_sigma = e.value("gust_sigma_mps", 0.0);
+        _gust_tau = e.value("gust_tau_s", 5.0);
+    } catch (...) {}
+    if (const char* w = std::getenv("WIND_MPS"); w != nullptr && std::strlen(w) > 0) {
+        std::stringstream ss(w);
+        std::string a, b;
+        if (std::getline(ss, a, ',') && std::getline(ss, b, ',')) { wx = std::atof(a.c_str()); wy = std::atof(b.c_str()); }
+    }
+    _gust_sigma = env_double("GUST_SIGMA_MPS", _gust_sigma);
+    _wind = ignition::math::Vector3d(wx * scale, wy * scale, 0.0);
+    _gust_sigma *= scale;
+    if (_wind.Length() > 0.0 || _gust_sigma > 0.0)
+        std::cout << "[GazeboSimulator] Wind " << _wind.X() << "," << _wind.Y() << " m/s (sim), gusts sigma "
+                  << _gust_sigma << " m/s, tau " << _gust_tau << " s" << std::endl;
+}
+
+void GazeboSimulator::on_uwb_tx(const zenoh::Sample& sample) {
+    try {
+        const std::string agent_id = key_agent(std::string(sample.get_keyexpr().as_string_view()));
+        auto msg = json::parse(sample.get_payload().as_string());
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        _uwb_tx[agent_id] = msg;
+    } catch (...) {}
+}
+
+bool GazeboSimulator::uwb_jammed(const std::string& what, double t, const ignition::math::Vector3d& at) const {
+    for (const auto& j : _uwb_jam) {
+        if ((j.what != what && j.what != "all") || t < j.t0 || t >= j.t1) continue;
+        if (!j.local || std::hypot(at.X() - j.x, at.Y() - j.y) <= j.r) return true;
+    }
+    return false;
+}
+
+void GazeboSimulator::publish_uwb(double sim_time, const std::vector<std::string>& agents, bool anchors, bool peers) {
+    std::map<std::string, ignition::math::Vector3d> pos;
+    std::map<std::string, json> tx;
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        for (const auto& id : agents) {
+            auto it = _drone_states.find(id);
+            if (it != _drone_states.end()) pos[id] = it->second.position;
+        }
+        if (peers) tx = _uwb_tx;
+    }
+    // Channel airtime: exchanges wanted per second vs the channel's capacity -> extra loss.
+    double load = static_cast<double>(pos.size()) * _anchors.size() / _uwb_anchor_period;
+    if (_loc_mode == "coop")
+        load += static_cast<double>(pos.size()) * _uwb_max_peers / _uwb_peer_period;
+    const double p_overload = load > _uwb_capacity ? 1.0 - _uwb_capacity / load : 0.0;
+    std::uniform_real_distribution<double> uni(0.0, 1.0);
+    std::normal_distribution<double> noise(0.0, _uwb_sigma);
+    auto lost = [&]() { return uni(_uwb_rng) < _uwb_dropout || uni(_uwb_rng) < p_overload; };
+    for (const auto& [id, me] : pos) {
+        json out = {{"sim_time", sim_time}, {"anchors", json::array()}, {"peers", json::array()}};
+        if (anchors && !uwb_jammed("anchors", sim_time, me)) {
+            for (size_t k = 0; k < _anchors.size(); ++k) {
+                const double d = (_anchors[k] - me).Length();
+                if (d > _uwb_range || lost()) continue;
+                out["anchors"].push_back({static_cast<int>(k), std::round((d + noise(_uwb_rng)) * 1000.0) / 1000.0});
+            }
+        }
+        if (peers && !uwb_jammed("peers", sim_time, me)) {
+            auto want = tx.find(id);
+            if (want != tx.end() && want->second.contains("peers") && want->second["peers"].is_array()) {
+                int n = 0;
+                for (const auto& pid_j : want->second["peers"]) {
+                    if (n >= _uwb_max_peers || !pid_j.is_string()) break;
+                    const std::string pid = pid_j.get<std::string>();
+                    auto q = pos.find(pid);
+                    auto ptx = tx.find(pid);
+                    if (pid == id || q == pos.end() || ptx == tx.end()) continue;
+                    ++n;
+                    const double d = (q->second - me).Length();
+                    if (d > _uwb_range || lost()) continue;
+                    out["peers"].push_back({pid, std::round((d + noise(_uwb_rng)) * 1000.0) / 1000.0,
+                                            ptx->second.value("state", json::object())});
+                }
+            }
+        }
+        if (!out["anchors"].empty() || !out["peers"].empty()) put("drone/" + id + "/uwb", out.dump());
+    }
+}
 
 void GazeboSimulator::put(const std::string& key, const std::string& payload) {
     if (_session) {
@@ -973,13 +1152,17 @@ void GazeboSimulator::step() {
     // Pose at 50 Hz; a lidar scan rides along every 0.1 s of sim time (10 Hz).
     if (current_sim_time - _last_sensor_pub_time >= 0.02) {
         _last_sensor_pub_time = current_sim_time;
-        const bool with_lidar = current_sim_time - _last_lidar_pub_time >= 0.1;
+        const bool with_lidar = !_radar_mode && current_sim_time - _last_lidar_pub_time >= 0.1;
         if (with_lidar) _last_lidar_pub_time = current_sim_time;
         for (const auto& agent_id : active_agents) {
             json sensor_data = {
                 {"sim_time", current_sim_time},
                 {"pose", get_drone_pose(agent_id)}
             };
+            if (_loc_mode != "truth") {
+                // the drone localizes itself: only altitude and attitude (baro/IMU/compass) are given
+                for (const char* k : {"x", "y", "vx", "vy"}) sensor_data["pose"].erase(k);
+            }
             if (with_lidar) {
                 sensor_data["lidar"] = simulate_lidar(agent_id);
             }
@@ -993,11 +1176,19 @@ void GazeboSimulator::step() {
         publish_truth(current_sim_time);
     }
 
-    if (_fuze_on && current_sim_time - _last_fuze_pub_time >= _fuze_period - 1e-3) {
+    if ((_fuze_on || _radar_mode) && current_sim_time - _last_fuze_pub_time >= _fuze_period - 1e-3) {
         _last_fuze_pub_time = current_sim_time;
         publish_fuze(current_sim_time, active_agents);
     }
     flush_fuze(current_sim_time);
+
+    if (_loc_mode != "truth") {
+        const bool due_anchors = current_sim_time - _last_uwb_anchor_time >= _uwb_anchor_period - 1e-3;
+        const bool due_peers = _loc_mode == "coop" && current_sim_time - _last_uwb_peer_time >= _uwb_peer_period - 1e-3;
+        if (due_anchors) _last_uwb_anchor_time = current_sim_time;
+        if (due_peers) _last_uwb_peer_time = current_sim_time;
+        if (due_anchors || due_peers) publish_uwb(current_sim_time, active_agents, due_anchors, due_peers);
+    }
 
     if (current_sim_time - _last_clock_pub_time >= 0.1 && _pub_clock) {
         _last_clock_pub_time = current_sim_time;
@@ -1025,6 +1216,17 @@ void GazeboSimulator::step() {
 
                         // Integrate position using gazebo simulation time
                         state.position += state.linear_velocity * dt;
+                        if (_gust_sigma > 0.0 || _wind.Length() > 0.0) {
+                            // wind the drone cannot sense: pushes its true position
+                            auto& g = _gust[agent_id];
+                            if (_gust_sigma > 0.0) {
+                                std::normal_distribution<double> unit(0.0, 1.0);
+                                const double k = std::exp(-dt / std::max(_gust_tau, 1e-3));
+                                const double s = _gust_sigma * std::sqrt(std::max(0.0, 1.0 - k * k));
+                                g = ignition::math::Vector3d(g.X() * k + s * unit(_env_rng), g.Y() * k + s * unit(_env_rng), 0.0);
+                            }
+                            state.position += (_wind + g) * dt;
+                        }
 
                         // Hard world safety constraints.
                         const double min_z = 1.0;
