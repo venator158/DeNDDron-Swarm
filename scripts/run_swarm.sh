@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --no-fly)
-      # ship no-fly zone radius in m (stations move to R+5..R+45 m; planners and routes keep out)
+      # ship no-fly zone radius in m (default 50; stations at R+5..R+45 m, planners and routes keep out; 0: off)
       export NO_FLY_RADIUS_M="$2"
       shift 2
       ;;
@@ -67,12 +67,12 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --localization)
-      # truth (simulator x,y) | anchors (UWB to the ship's anchors) | coop (anchors + peers)
+      # coop (default: UWB to the ship's anchors + peers) | anchors (anchors only) | truth (simulator x,y)
       export LOCALIZATION="$2"
       shift 2
       ;;
     --perception)
-      # Obstacle perception: lidar (+ voxel map) or radar (mmWave, hardware record).
+      # Obstacle perception: radar (default, mmWave, hardware record) or lidar (legacy, + voxel map).
       export PERCEPTION="$2"
       shift 2
       ;;
@@ -144,10 +144,9 @@ if [[ "$ARP_MAX" -gt 0 && "$ARP_NEED" -gt "$ARP_MAX" ]]; then
   echo "         sudo sysctl -w net.ipv4.neigh.default.gc_thresh1=4096 net.ipv4.neigh.default.gc_thresh2=8192 net.ipv4.neigh.default.gc_thresh3=16384" >&2
 fi
 
-GEN_ARGS=(--agents "$AGENT_COUNT" --seed "$SEED" --algorithm "$ALGORITHM")
-if [[ -n "${NO_FLY_RADIUS_M:-}" && "${NO_FLY_RADIUS_M}" != "0" ]]; then
-  GEN_ARGS+=(--no-fly "$NO_FLY_RADIUS_M")
-fi
+# Ship no-fly zone: 50 m by default (stations at 55-95 m); --no-fly 0 turns it off (stations at 30-45 m).
+export NO_FLY_RADIUS_M="${NO_FLY_RADIUS_M:-50}"
+GEN_ARGS=(--agents "$AGENT_COUNT" --seed "$SEED" --algorithm "$ALGORITHM" --no-fly "$NO_FLY_RADIUS_M")
 # In the defence scenario drones hold station until tasked, so no static goals.
 if [[ "$MAX_THREATS" -gt 0 ]]; then
   GEN_ARGS+=(--no-goals)
