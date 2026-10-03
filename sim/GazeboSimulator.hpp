@@ -125,6 +125,9 @@ private:
     // range/angle noise; topic drone/{id}/radar) and the planar lidar is no longer computed.
     bool _radar_mode = false;
     double _radar_range_sigma = 0.05, _radar_az_sigma = 0.0349, _radar_el_sigma = 0.0349;   // m, rad, rad
+    // Degradation (env, for sweeps): the environment is worse than the record; drones keep the record's figures.
+    double _radar_miss_p = 0.0;     // RADAR_MISS_P: each real contact missed per scan
+    double _radar_clutter = 0.0;    // RADAR_CLUTTER: mean false contacts per scan (Poisson, uniform in range)
     std::string _contact_topic = "fuze";
     json _hw = json::object();               // hardware record from the runtime config
     double _last_fuze_pub_time = 0.0;
@@ -161,6 +164,9 @@ private:
     std::string _loc_mode = "truth";
     std::vector<ignition::math::Vector3d> _anchors;
     double _uwb_sigma = 0.1, _uwb_range = 250.0, _uwb_dropout = 0.02, _uwb_capacity = 1000.0;
+    // Degradation (env, for sweeps; drones keep the record's sigma): extra Gaussian noise, and
+    // non-line-of-sight ranges: with probability _uwb_nlos_p a positive bias, exponential with mean _uwb_nlos_bias.
+    double _uwb_extra_sigma = 0.0, _uwb_nlos_p = 0.0, _uwb_nlos_bias = 0.0;
     double _uwb_anchor_period = 0.5, _uwb_peer_period = 0.5;
     int _uwb_max_peers = 6;
     double _last_uwb_anchor_time = 0.0, _last_uwb_peer_time = 0.0;

@@ -16,7 +16,7 @@ This README is the project's only documentation. Keep it up to date when behavio
 - [Localization and perception](#localization-and-perception)
 - [Proximity fuze](#proximity-fuze)
 - [Distributed clock](#distributed-clock)
-- [Degraded communications](#degraded-communications)
+- [Degraded communications](#degraded-communications) (and [sensing degradation](#sensing-and-ship-link-sweep))
 - [Instrumentation](#instrumentation)
 - [Implementation map](#implementation-map)
 - [Agent internals](#agent-internals)
@@ -690,6 +690,72 @@ The loss rows are from the run with the award fixes below. The other rows come f
 - **`tuned` vs `default`.** No meaningful difference in any condition, so `default` stays the default.
 - **Impairment method.** `degrade_radio.sh` impairs only UDP. The earlier version impaired all traffic on the radio interface, including the dashboard's TCP connection (Docker forwards `:8080` to the ship's radio address). At 64 kbit/s one dashboard request then took 1.2 s instead of 1 ms, which is why the earlier tuned 64 kbit/s run failed.
 
+### Sensing and ship-link sweep
+
+`tools/comms/sensing_sweep.py` runs the seeded scenario under degraded sensing and a degraded link to the ship. There is no GNSS degradation, because the drones don't use GNSS: their position comes from UWB.
+
+Every impairment makes the **environment** worse than the [hardware record](#hardware-record) says. The drones keep assuming the record: for example, their filters still expect 0.1 m UWB noise. That is how a real degradation reaches them.
+
+```bash
+python3 tools/comms/sensing_sweep.py --list                      # the conditions and their settings
+docker compose build                                             # after code changes: the sweep runs existing images
+python3 tools/comms/sensing_sweep.py                             # every condition once: 15 drones, 8 threats, --rtf 3
+python3 tools/comms/sensing_sweep.py --conditions baseline uwb_nlos ship_outage --repeats 3
+python3 tools/comms/sensing_sweep.py --custom wet="UWB_NLOS_P=0.2 RADAR_CLUTTER=1" --conditions baseline wet
+python3 tools/comms/sensing_sweep.py --drones 30 --threats 15 --parallel 2 --repeats 3  # larger, 2 swarms at once
+```
+
+| Condition | Impairment |
+|---|---|
+| `baseline` | none |
+| `uwb_noise` | UWB range noise 0.32 m (record 0.1 m): `UWB_EXTRA_SIGMA_M=0.3` |
+| `uwb_nlos` | 10 % of UWB ranges non-line-of-sight, with a positive bias (exponential, mean 1 m): `UWB_NLOS_P=0.1 UWB_NLOS_BIAS_M=1` |
+| `uwb_dropout` | half of all UWB exchanges lost: `UWB_DROPOUT_P=0.5` |
+| `uwb_short` | UWB range 80 m (record 250 m), so far stations and intercepts depend on peers: `UWB_MAX_RANGE_M=80` |
+| `uwb_jam_local` | anchors jammed within 40 m of (80, 0) from t = 60 s: `UWB_JAM=anchors:60:100000:80:0:40` |
+| `uwb_jam_all` | all UWB, anchors and peers, jammed for t = 60–120 s, so everyone dead-reckons: `UWB_JAM=all:60:120` |
+| `ship_loss30` | 30 % loss on the ship's link, both ways, for the whole run |
+| `ship_outage` | the ship's link cut for t = 90–120 s |
+| `radar_noise` | radar noise 0.3 m, 6° (record 0.05 m, 2°): `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG` |
+| `radar_miss` | radar misses 30 % of contacts per scan: `RADAR_MISS_P=0.3` |
+| `radar_clutter` | 2 false contacts per scan, uniform within range: `RADAR_CLUTTER=2` |
+| `radar_latency` | radar scans 0.1 s late: `RADAR_LATENCY_S=0.1` |
+| `combined` | UWB noise + NLOS, radar noise + clutter, 30 % loss on the ship link |
+
+**How the ship link is impaired.** The tool shapes the ship's own UDP traffic, and the drones' UDP traffic addressed to the ship (`degrade_radio.sh` with `DST_IP`). Drone-to-drone links and the dashboard are untouched, so a timed outage is applied and lifted by watching the dashboard's sim time; it is logged in `impairments.log`. Netem loss is not scaled by `--rtf`.
+
+**Options:** the same as `degradation_sweep.py` (`--rtf`, `--drones`, `--threats`, `--maneuver-p`, `--interval`, `--first`, `--seed`, `--repeats`, `--parallel`, `--auto-approve`, `--env`, `--out`). The defaults are 15 drones, 8 threats and `--rtf 3`.
+
+**Results** go to `results/sensing_<time>/`:
+- `results.csv` (every column of `degradation_sweep.py`);
+- `results.md`: the key metrics per run, then mean ± sd per condition. These include kills, misses, detonation reasons, fuze holds and false triggers, missed slots, position error p95/max, NEES and minimum separation;
+- per run: `swarm.log`, `operator.log`, `summary.json`, `state.json` and `impairments.log`.
+
+**First results** (2026-10-03: one run per condition, 15 drones, 8 threats, `--rtf 3`, seed 42; single runs, so treat differences of one threat as noise):
+
+| Condition | Destroyed | Miss mean / max | Position error p95 / max | NEES | What went wrong |
+|---|---|---|---|---|---|
+| baseline | 8/8 | 2.39 / 4.84 m | 0.42 / 1.16 m | 1.5 | – |
+| `uwb_noise` | 8/8 | 2.82 / 6.63 m | **2.84 / 18.6 m** | **24.8** | the filter still assumes 0.1 m: overconfident, 86 re-locks, 1 fuze false trigger, closest pair 3.9 m |
+| `uwb_nlos` | 8/8 | 2.35 / 4.98 m | 0.52 / **14.0 m** | 2.5 | the gate rejects most biased ranges; 3 re-locks, one bad excursion |
+| `uwb_dropout` | 8/8 | 2.33 / 5.09 m | 0.58 / 1.85 m | 1.5 | – (consistent) |
+| `uwb_short` | **5/8** | 3.02 / 5.0 m | **16.3 / 36.1 m** | **49.8** | beyond 80 m only peers localize, and the fusion is badly overconfident; 3 drones held with no detection |
+| `uwb_jam_local` | 8/8 | 2.40 / 4.81 m | 0.38 / 1.43 m | 1.5 | – |
+| `uwb_jam_all` | 8/8 | 2.42 / 4.85 m | 2.55 / 7.1 m | 1.1 | dead reckoning for 60 s; error grows but stays honest |
+| `ship_loss30` | **4/8** | 2.31 / 3.51 m | 0.42 / 1.16 m | 1.5 | ACKs lost: confirmed drones abandoned after 3 s, re-announcements found no drone in time (3 never fully assigned, 8 re-announcements) |
+| `ship_outage` | 8/8 | 2.31 / 5.15 m | 0.42 / 1.13 m | 1.5 | no decision fell in the window this run; in a smoke run of the same condition, one threat was approved too late and lost |
+| `radar_noise` | 8/8 | **4.94** / 6.98 m | 0.43 / 1.14 m | 1.5 | misses doubled; 2 fuze false triggers |
+| `radar_miss` | 7/7 approved | 2.65 / 5.02 m | 0.43 / 1.45 m | 1.5 | one threat never approved (the operator found it infeasible), so it leaked |
+| `radar_clutter` | 8/8 | 2.40 / 5.06 m | 0.41 / 1.33 m | 1.5 | – (clutter never gated in) |
+| `radar_latency` | 8/8 | 2.51 / 5.21 m | 0.41 / 1.45 m | 1.5 | – |
+| `combined` | **4/8** | 3.28 / 5.29 m | 1.27 / 7.3 m | 10.4 | the ship-link losses as in `ship_loss30`, plus overconfidence from the UWB noise |
+
+What this points at:
+- **Ship-link loss is the biggest threat to the kill rate.** At 30 % loss, the 3 s ACK timeout drops confirmed drones, and by the time a threat is re-announced it is too late.
+- **The UWB filters trust the record's noise figure.** When real noise is 3× worse, they become overconfident and re-lock repeatedly. Adapting the noise estimate, or a more robust gate, is needed.
+- **Peer-only localization beyond anchor range is not safe yet** (`uwb_short`): errors reached tens of metres while the filters claimed sub-metre accuracy. This is the open recursive decentralized localization (RDL) item in [Known limitations](#known-limitations).
+- **The radar is robust** to misses, clutter and 0.1 s latency, but noisier ranging doubles the misses.
+
 ### Spatial queue
 
 A detonation destroys any drone within 8 m (friendly fire), and the drones have no seeker. The rule: at detonation, every drone not on that job must be more than **12 m** away. `src/common/deconflict.py` is shared by the ship and the drones, and is unit-tested. It enforces the rule in space and time:
@@ -763,7 +829,8 @@ All sizes: no re-announces, no conflicts, full agreement on assignments, decisio
 | `cut_radio.sh <container> <network> <subnet> [netem\|disconnect] [duration]` | cuts one container's radio (used by the others) |
 | `chaos.py <compose log> [disconnect\|netem]` | during a live run: cuts an idle drone, then the first drone that engages, then restores the idle one |
 | `operator_bot.py [reaction_s] [duration_s] [poll_s]` | stand-in operator: approves feasible threats through the dashboard API, most urgent first |
-| `degrade_radio.sh apply "<netem args>" \| clear [container...]` | impairs the radio (UDP only) of every drone and the ship: loss, delay, rate, combinable |
+| `degrade_radio.sh apply "<netem args>" \| clear [container...]` | impairs the radio (UDP only) of every drone and the ship: loss, delay, rate, combinable; `DST_IP=<ip>` impairs only traffic to that address |
+| `sensing_sweep.py [--conditions NAME ...] [--custom NAME="K=V ..."] [--list] [--rtf K] [--drones N] [--threats K] [--repeats N]` | the seeded scenario under UWB, radar and ship-link degradation (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)) |
 | `degradation_sweep.py [--rtf K] [--drones N] [--threats K] [--maneuver-p P] [--repeats N] [--profiles ...] [--conditions NAME=NETEM ...] [--env KEY=VALUE ...]` | the seeded scenario under each impairment and QoS profile, with the stand-in operator; writes `results/<sweep>/results.{csv,md}` with mean ± sd per cell (see [Unattended runs and sweeps](#unattended-runs-and-sweeps)) |
 
 All probes accept `IMAGE=...` to test another Zenoh build and pass through the radio settings (`RADIO_PROTO`, `RADIO_PROCESS`, `RADIO_LEASE_MS`, `RADIO_OPEN_TIMEOUT_MS`, `RADIO_ZENOH_CONFIG`, `RADIO_DEBUG`). `radio_probe.sh` takes `PEERS=N`.
@@ -902,7 +969,7 @@ Simulation speed (env): `SIM_RTF` (1), set by `--rtf`.
 
 Ship no-fly zone (env): `NO_FLY_RADIUS_M` (50; 0 = off, stations at 30–45 m; `--no-fly R`, which also moves stations to R+5 … R+45 m).
 
-Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `anchors`, or legacy `truth`; `--localization`), `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensor and environment parameters are in the [hardware record](#hardware-record).
+Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `anchors`, or legacy `truth`; `--localization`), `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensing degradation (simulator only; empty = the record, which the drones keep assuming): `UWB_EXTRA_SIGMA_M`, `UWB_NLOS_P`, `UWB_NLOS_BIAS_M`, `UWB_DROPOUT_P`, `UWB_MAX_RANGE_M`, `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG`, `RADAR_MISS_P`, `RADAR_CLUTTER`, `RADAR_LATENCY_S` (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)). Sensor and environment parameters are in the [hardware record](#hardware-record).
 
 Proximity fuze (env): `FUZE` (1; 0 = timed detonation), `FUZE_WINDOW_S` (2), `FUZE_GATE_M` (5), `FUZE_FIRE` (`cpa`), `FUZE_FALLBACK` (`hold`), and for the simulator's sensor `FUZE_RANGE_M` (10, drones too), `FUZE_HZ` (50), `FUZE_NOISE_M` (0.1), `FUZE_LATENCY_S` (0), `FUZE_SEED` (0). See [Proximity fuze](#proximity-fuze).
 
@@ -960,8 +1027,12 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 ```
 
 ## Known limitations
-- **Localization is optimistic.** The drones' motion model is the simulator's exact command response, and wind is the only disturbance. On hardware the response must be identified and is only approximately known. Ultra-wideband (UWB) ranges have no blocked-path or multipath model, and the radar has no clutter or false alarms.
+- **Localization is optimistic.** The drones' motion model is the simulator's exact command response, and wind is the only disturbance. On hardware the response must be identified and is only approximately known. By default, ultra-wideband (UWB) ranges have no blocked-path or multipath errors, and the radar has no clutter or false alarms. The [sensing sweep](#sensing-and-ship-link-sweep) adds them as impairments: a positive non-line-of-sight bias, missed detections and uniform clutter. These are simple models, not a propagation or radar-scene simulation.
 - **No consistent fusion between unanchored drones.** Peers are used only along fresh anchor chains. With every anchor jammed, drones dead-reckon independently (their uncertainty grows honestly), and peer ranges keep nobody's estimate tight. Recursive decentralized localization (RDL), which tracks cross-covariances with pairwise exchanges, is the planned fix.
+- **Degraded sensing** (see the [sensing sweep](#sensing-and-ship-link-sweep)):
+  - **Peer chains beyond anchor range:** with UWB range cut to 80 m, drones localized only through peers were tens of metres off while claiming sub-metre accuracy (NEES 50).
+  - **Fixed noise figure:** the filters use the record's UWB noise, so a noisier environment makes them overconfident.
+  - **Ship-link loss:** at 30 % loss on the ship link, the 3 s ACK timeout drops confirmed drones.
 - **Station keeping in wind.** Drones latch up to 3 m from their goal, then drift downwind until they re-approach: 2.6–2.9 m misses in a 0.5 m/s wind, with true positions too. Continuous position hold would remove most of it.
 - **Not yet done:** the planned speed retune (`speed_scale` 0.2–0.4, threats faster) and 1 km threat detection.
 - **Routes around the no-fly zone are timed conservatively:** each detour waypoint is planned from rest, so ETAs over-estimate.
