@@ -392,7 +392,23 @@ The full architecture (`LOCALIZATION=coop PERCEPTION=radar NO_FLY_RADIUS_M=50`),
 | 8, wind | 4/4 | 2.46 m | 103 m | – | 0.57 m | 3.0 |
 | 4 (intercepts on the far side: routes around the zone), calm | 4/4 | 2.47 m | 74 m | **54.9 m** | 0.53 m | 1.5 |
 
-None of these runs had collisions, friendly fire or holds. No drone entered the zone. Misses are larger than with the original defaults. Stations are farther out, so drones fly longer and arrive with their position known to within about 0.5 m rather than exactly, and the fuze cannot remove a cross-track offset.
+None of these runs had collisions, friendly fire or holds. No drone entered the zone.
+
+At 50 drones (25 threats, 1×, `scaling_sweep.py`), after two fixes this comparison found:
+- goals latch only within 0.5 m of their altitude, with vertical braking separate from horizontal. Stacked job-mates had settled 1.5 m apart within the 3 m stop radius;
+- route legs advance once their goal latches. A drone had held 2.9 m from a detour waypoint, outside the 1.5 m leg threshold, and missed its slot by 8.7 m.
+
+| | Original defaults | Full architecture |
+|---|---|---|
+| Destroyed | 23/25 | 24/25 |
+| Intercept range mean | 86 m | 100 m |
+| Closest to the ship | 28 m | 55 m |
+| Proximity < 2.5 m / closest pair | 0 / 4.7 m | 3 / 2.2 m (two stacked job-mates, 3 m apart by design) |
+| Position error p95, NEES | – | 0.42 m, 1.5 |
+| Drone CPU, host CPU | 4.7 %, 2.16 cores | 4.2 %, 1.96 cores |
+
+- **Defaults, T19 and T23:** the losses are chain fire, not localization. In a three-drone stack, one chain-fired mate missed by 8.4–9.5 m: the mates are spread along the track, and chain fire sets them all off when the first one's fuze fires.
+- **Full architecture, T22:** the loss was a late three-drone detection that was never feasible with stations and intercepts outside the zone. Misses are larger than with the original defaults. Stations are farther out, so drones fly longer and arrive with their position known to within about 0.5 m rather than exactly, and the fuze cannot remove a cross-track offset.
 
 ## Proximity fuze
 
@@ -862,6 +878,8 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 - **Chain-fire delay.** A real mate-to-mate trigger such as a barometric shock travels at about the speed of sound: ~17 ms across a 6 m stack, which lets a fast threat escape. A barometric trigger would also respond to unrelated blasts. The simulation uses the detonation topic as an idealized, job-selective trigger (measured delivery 1.5–32 ms at `--rtf 3`).
 - **Closing-speed discrimination.** Closing speed would separate threats from drones only at real speeds, not at the simulation's scaled ones, so the fuze does not use it.
 - **Fuze window and clocks.** The window is centred on `t_engage`, but threats arrive ~1.1 s late (drones stop short), so without clock sync a clock ~1 s ahead closes the window too early (see [Proximity fuze](#proximity-fuze)).
+- **Chain fire fires spread-out mates early.** Job-mates end up several metres apart along the threat's track, and chain fire sets them all off when the first one's fuze fires, up to 2 s before the threat reaches the last. At 50 drones this cost two three-drone kills in one run (misses of 8.4 and 9.5 m, where each drone's own fuze would have missed by 1–3 m).
+- **Stack spacing vs proximity.** Three-drone stacks are 3 m apart vertically; with 0.5 m altitude latching, stacked mates can be 2.0–2.5 m apart, under the metrics node's 2.5 m proximity threshold.
 - **Late job-mates.** A job-mate that enters fuze range after the mates were recorded (still flying in) is a new track; if it passes within the gate of the predicted threat position it could trigger the fuze. The evaluation labels every trigger; none was false in the runs so far.
 - **Best-effort radio.** The radio runs over UDP, so messages can be lost under packet loss; see [Degraded communications](#degraded-communications).
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.

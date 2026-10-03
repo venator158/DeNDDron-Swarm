@@ -69,6 +69,10 @@ class DenddronAgent:
     # latched at, flies the drone back.  Never triggers in calm air (a holding drone does not move).
     # With 2 m beyond the 3 m stop radius, drones sat up to 5 m off their slots in a 0.5 m/s wind.
     DRIFT_M = 1.0
+    # A goal latches only within this of its altitude (exact: barometer).  Job-mates are stacked 3 m
+    # apart vertically; latching anywhere within the 3 m stop radius let two mates settle 1.5 m apart
+    # (50 drones, coop + radar: a collision).
+    LATCH_Z_M = 0.5
 
     def __init__(self, agent_id: str, sim_bus_locator: str = None):
         self.agent_id = agent_id
@@ -722,7 +726,8 @@ class DenddronAgent:
 
                 # ── ARRIVAL LATCH ────────────────────────────────────────────
                 # Latch on first arrival; stay latched until set_goal() is called.
-                in_goal_region = (
+                z_ok = dist_z <= self.LATCH_Z_M
+                in_goal_region = z_ok and (
                     (dist_to_goal <= self.GOAL_STOP_RADIUS) or
                     (dist_xy <= self.GOAL_TOLERANCE_XY and dist_z <= self.GOAL_TOLERANCE_Z) or
                     (dist_to_goal <= max(self.GOAL_TOLERANCE, stopping_distance + 0.2) and current_speed <= 0.8) or
@@ -734,7 +739,7 @@ class DenddronAgent:
                     self._goal_hold_ticks = 0
 
                 # Immediate hard latch once stop radius or crossing condition is met.
-                if dist_to_goal <= self.GOAL_STOP_RADIUS or crossed_goal:
+                if z_ok and (dist_to_goal <= self.GOAL_STOP_RADIUS or crossed_goal):
                     with self.state_lock:
                         self._goal_reached = True
                     self._goal_hold_ticks = self.GOAL_SETTLE_TICKS
@@ -849,14 +854,15 @@ class DenddronAgent:
 
                 # ── D. Goal-approach braking envelope ───────────────────────
                 # Bound commanded speed so the drone can still stop inside the tolerance.
-                brake_margin = max(0.0, dist_to_goal - self.GOAL_TOLERANCE)
-                allowed_speed = np.sqrt(max(0.0, 2.0 * max_decel * brake_margin))
-                raw_speed = np.linalg.norm(raw_v)
-                if raw_speed > allowed_speed:
-                    if allowed_speed <= 1e-6:
-                        raw_v = np.zeros(3)
-                    else:
-                        raw_v = (raw_v / raw_speed) * allowed_speed
+                # Horizontal and vertical separately: altitude is exact and must settle tightly (stacked
+                # job-mates), so vertical braking runs down to 0.2 m, not the 3D goal tolerance.
+                allowed_xy = np.sqrt(max(0.0, 2.0 * max_decel * max(0.0, dist_xy - self.GOAL_TOLERANCE)))
+                allowed_z = np.sqrt(max(0.0, 2.0 * max_decel * max(0.0, dist_z - 0.2)))
+                sp_xy = float(np.linalg.norm(raw_v[:2]))
+                if sp_xy > allowed_xy:
+                    raw_v[:2] = raw_v[:2] * (allowed_xy / sp_xy) if allowed_xy > 1e-6 else 0.0
+                if abs(raw_v[2]) > allowed_z:
+                    raw_v[2] = np.sign(raw_v[2]) * allowed_z
 
                 # ── E. Acceleration clamping ─────────────────────────────────
                 dv     = raw_v - self.last_velocity
@@ -1187,7 +1193,7 @@ class DenddronAgent:
         leg = legs[0]
         here = (pose["x"], pose["y"], pose["z"])
         if (leg.release is not None and now >= leg.release) or \
-                (leg.release is None and math.dist(here, leg.target) < self.RETARGET_MIN_M * 3):
+                (leg.release is None and (math.dist(here, leg.target) < self.RETARGET_MIN_M * 3 or self._goal_reached)):
             with self._eng_lock:
                 if self.engagement is not eng:
                     return
