@@ -119,9 +119,9 @@ class MetricsNode:
         self._events: list = []
 
         # Zenoh declarations — NOTE: Zenoh uses * (not +) for single-level wildcard
-        self._sub_sensors = session.declare_subscriber(
-            "drone/*/sensors", self._on_sensors
-        )
+        # True poses come from the simulator's evaluation stream (sim/truth): drones' own sensor
+        # frames no longer carry x,y once they localize themselves.
+        self._sub_truth = session.declare_subscriber("sim/truth", self._on_truth)
         self._sub_join = session.declare_subscriber(
             "swarm/agents/join", self._on_join
         )
@@ -130,39 +130,37 @@ class MetricsNode:
         )
         self._pub_summary = session.declare_publisher("swarm/metrics/summary")
 
-        log.info("Subscribed to drone/*/sensors, swarm/agents/join, swarm/agents/despawn")
+        log.info("Subscribed to sim/truth, swarm/agents/join, swarm/agents/despawn")
 
     # -----------------------------------------------------------------------
     # Zenoh callbacks (called from Zenoh threads — must be fast and safe)
     # -----------------------------------------------------------------------
 
-    def _on_sensors(self, sample):
+    def _on_truth(self, sample):
+        """sim/truth: {sim_time, drones{id: [x, y, z, vx, vy, vz]}} for every live drone (10 Hz).  A drone
+        missing from it has been despawned by the simulator (detonated or destroyed)."""
         try:
-            # Key is "drone/{agent_id}/sensors"
-            key_str  = str(sample.key_expr)
-            parts    = key_str.split("/")
-            if len(parts) < 3:
-                return
-            agent_id = parts[1]
-
             payload = json.loads(bytes(sample.payload).decode("utf-8"))
-            pose    = payload.get("pose", {})
-            x  = pose.get("x",  0.0);  y  = pose.get("y",  0.0);  z  = pose.get("z",  0.0)
-            vx = pose.get("vx", 0.0);  vy = pose.get("vy", 0.0);  vz = pose.get("vz", 0.0)
-
+            drones = payload.get("drones", {})
             with self._lock:
-                if agent_id not in self._agents:
-                    # First contact — register the agent
-                    self._agents[agent_id] = AgentState(agent_id)
-                    self._total_spawned += 1
-                    log.info(f"Auto-registered agent {agent_id} from sensor data")
-
-                agent = self._agents[agent_id]
-                agent.update_pose(x, y, z, vx, vy, vz)
-                # Collision detection runs asynchronously in _collision_loop thread
-
+                for agent_id, (x, y, z, vx, vy, vz) in drones.items():
+                    if agent_id not in self._agents:
+                        self._agents[agent_id] = AgentState(agent_id)
+                        self._total_spawned += 1
+                        log.info(f"Auto-registered agent {agent_id} from sim/truth")
+                    agent = self._agents[agent_id]
+                    if agent.alive:
+                        agent.update_pose(x, y, z, vx, vy, vz)
+                for agent_id, agent in self._agents.items():
+                    if agent.alive and agent.first_pose_received and agent_id not in drones:
+                        agent.alive = False
+                        agent.death_time = time.monotonic()
+                        self._total_despawned += 1
+                        self._events.append({"type": "despawn", "agent_id": agent_id, "reason": "simulator",
+                                             "time": time.time()})
+                        log.info(f"Agent gone from sim/truth: {agent_id}")
         except Exception as e:
-            log.warning(f"Error in _on_sensors: {e}")
+            log.warning(f"Error in _on_truth: {e}")
 
     def _on_join(self, sample):
         try:

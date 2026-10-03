@@ -14,6 +14,7 @@
 #include <mutex>
 #include <deque>
 #include <random>
+#include <set>
 
 using json = nlohmann::json;
 
@@ -125,6 +126,24 @@ private:
     struct PendingFuze { double release; std::string topic; std::string payload; };
     std::deque<PendingFuze> _fuze_queue;     // scans held back by the latency (step() thread only)
     void configure_fuze();
+
+    // Physics owned by the simulator (truth): a drone asks to detonate (drone/{id}/detonate); the
+    // blast is placed at its true position (sim/detonation) and destroys every other drone within
+    // the warhead's kill radius, except drones on the same job (they detonate together by design;
+    // drones report their current or last job on drone/{id}/job).  sim/truth carries true poses for
+    // evaluation only; drones never subscribe to it.
+    std::optional<zenoh::Subscriber<void>> _sub_detonate;
+    std::optional<zenoh::Subscriber<void>> _sub_job;
+    std::map<std::string, std::string> _drone_job;              // guarded by _state_mtx
+    struct PendingDetonation { std::string agent_id; json msg; };
+    std::vector<PendingDetonation> _pending_detonations;        // guarded by _state_mtx
+    double _kill_radius = 8.0;                                  // hardware.warhead.kill_radius_m
+    double _last_truth_pub_time = 0.0;
+    void on_detonate(const zenoh::Sample& sample);
+    void on_job(const zenoh::Sample& sample);
+    void apply_detonations(double sim_time);
+    void publish_truth(double sim_time);
+    void put(const std::string& key, const std::string& payload);
     void publish_fuze(double sim_time, const std::vector<std::string>& agents);
     void flush_fuze(double sim_time);
     json get_drone_pose(const std::string& agent_id);

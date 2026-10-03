@@ -239,7 +239,7 @@ The assigned drones take up slots **stacked vertically** through that point (wit
   - Publishes each drone's proximity-fuze scan (`drone/{id}/fuze`): unlabelled relative positions of every object within 10 m, with noise and optional latency.
   - Publishes the sim clock at 10 Hz.
   - Moves threat models along the ship's tracks, nose along the direction of flight: a fixed-wing UAV (yellow), a finned missile (orange), a longer winged cruise missile (red). Drones are quadcopters in their swarm colour. All shapes are visual-only primitives, so they add no physics load.
-  - Despawns drones for good when they detonate.
+  - Owns the physics: a drone only *asks* to detonate (`drone/{id}/detonate`); the simulator places the blast at the drone's true position, destroys every other drone within the warhead's kill radius (except the same job's), despawns them for good, and publishes `sim/truth` for evaluation. Kill radius and every other device parameter come from the [hardware record](#hardware-record).
   - Gazebo reports sim time only every 0.2 s, so the bridge extrapolates between updates using the observed real-time factor.
 - **Ship** (`src/ship/ship.py`): radar simulation, threat queue, roster, feasibility, orders, kill assessment, instrumentation aggregation, and the dashboard (`dashboard.html`).
 - **Drones** (`src/agent/`): perception, planning, the 50 Hz control loop, decentralized allocation, heartbeat and telemetry.
@@ -253,8 +253,11 @@ The assigned drones take up slots **stacked vertically** through that point (wit
 | `swarm/{id}/cmd_vel` | onboard | drone → sim | `{linear, angular}` |
 | `swarm/agents/join`, `swarm/agents/despawn` | onboard | drone → sim, metrics | spawn / remove this drone |
 | `sim/clock` | onboard | sim → ship | `{sim_time}` at 10 Hz |
-| `sim/detonation` | onboard | drone → ship, drones | `{agent_id, threat_id, truth_time, local_time, sync_time, t_engage, reason, chain, chain_delay_s, chain_by, trigger, x, y, z, intruders[]}` (physical event, observed by radar; drones within 8 m of another job's blast are destroyed). `truth_time` is the drone's sensor-frame sim time, for kill assessment and evaluation only. |
-| `sim/damage` | onboard | drone → ship | `{agent_id, cause: friendly_fire, by, by_threat, job, distance, truth_time}` |
+| `drone/{id}/detonate` | onboard | drone → sim | `{threat_id, truth_time, local_time, sync_time, t_engage, reason, chain, chain_delay_s, chain_by, trigger, est, intruders[]}`: the drone asks to detonate; `est` is where it believes it is (evaluation) |
+| `drone/{id}/job` | onboard | drone → sim | `{job}`: the drone's current or last job, so the simulator exempts it from that job's blasts |
+| `sim/detonation` | onboard | sim → ship, drones | the request plus `{agent_id, x, y, z, blast_sim_time}`: the blast, placed by the simulator at the drone's **true** position (physical event, observed by radar) |
+| `sim/damage`, `drone/{id}/destroyed` | onboard | sim → ship / the victim | `{agent_id, cause: friendly_fire, by, by_threat, job, distance, truth_time}`: the simulator destroys every other drone within the warhead's kill radius, except drones on the same job |
+| `sim/truth` | onboard | sim → metrics, evaluation | `{sim_time, drones{id: [x, y, z, vx, vy, vz]}}` at 10 Hz: true poses; **drones never subscribe** (`test_hardware.py` checks) |
 | `ship/zones` | radio | ship → drones | `{zones[{threat_id, point, radius, t_engage}]}` at 1 Hz: every job's reserved blast |
 | `sim/threat_tracks` | onboard | ship → sim | `{threat_id, type, level, status, t0, p0, v}` for Gazebo markers, in **truth** (the only track message not in ship time) |
 | `sim/clock_eval` | onboard | drone → ship | `{agent_id, mode, truth, ship_est, offset, bound, hops?, ship?}` at 1 Hz, only with a sync mode or an imperfect clock; evaluation only (true sync error) |
@@ -606,7 +609,9 @@ Where each implemented feature lives.
 | **Launch** | swarm launcher: drones, threat scenario, rebuilds | `scripts/run_swarm.sh` |
 | | spawn layout and planner/kinematics defaults (`swarm_runtime.json`) | `scripts/generate_swarm_config.py` |
 | | services, the two networks, healthchecks, clean shutdown | `docker-compose.yml`, `docker/*.Dockerfile` |
-| **Simulator** | Gazebo bridge: kinematic integration from `cmd_vel`, spawn/despawn | `sim/GazeboSimulator.cpp/.hpp`, `sim/simulator_main.cpp` |
+| **Hardware** | device-class record and derived simulation parameters | `hardware/hardware.json`, `src/common/hardware.py` |
+| **Simulator** | physics: blasts at true positions, friendly fire, `sim/truth` | `GazeboSimulator.cpp` (`on_detonate`, `on_job`, `apply_detonations`, `publish_truth`) |
+| | Gazebo bridge: kinematic integration from `cmd_vel`, spawn/despawn | `sim/GazeboSimulator.cpp/.hpp`, `sim/simulator_main.cpp` |
 | | sim clock extrapolated between Gazebo's 5 Hz stats; pose 50 Hz, lidar 10 Hz (per sim second, at any `SIM_RTF`) | `GazeboSimulator.cpp` (`estimated_sim_time`, `step`) |
 | | planar 32-ray lidar (ship + other drones), compact scan | `GazeboSimulator.cpp` (`simulate_lidar`) |
 | | threat models (by type) moved along the ship's tracks | `GazeboSimulator.cpp` (`generate_threat_sdf`, `on_threat_track`, `move_threat_markers`) |
@@ -673,6 +678,22 @@ Where each implemented feature lives.
 
 ## Configuration
 
+### Hardware record
+
+`hardware/hardware.json` records the class of every device the swarm uses, not exact models, with its typical real performance:
+- airframe (speed, acceleration, climb and descent rates);
+- warhead (kill radius);
+- UWB radio and the ship's UWB anchors;
+- mmWave radar;
+- IMU, barometer and compass;
+- the C2 radio.
+
+Simulation parameters are derived from it (`src/common/hardware.py`):
+- **airframe speeds and accelerations** are the real figures × `simulation.speed_scale` (0.1 reproduces the 4 m/s, 1 m/s² drones);
+- **sensor noise, range and rate** are used as recorded.
+
+Devices marked `"simulated": false` are recorded for hardware deployment but not modelled; for example, altitude, attitude and heading are taken as perfect. The launcher copies the record into `config/swarm_runtime.json` under `hardware`, where the simulator, drones and ship read it; `HARDWARE_RECORD=<file>` points the launcher at another one. When a sensor or airframe model is added or changed, its class and parameters go into the record first.
+
 `config/swarm_runtime.json` is generated on every launch and is not tracked in git. To change the defaults, edit `GLOBAL_DEFAULTS` in `scripts/generate_swarm_config.py`.
 
 | Section | Keys |
@@ -705,6 +726,7 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_auction.py` | deterministic priority assignment, all-or-nothing, tie-breaks, early/late bids, conflict yield |
 | `test_threats.py` | CPA/TCPA, engagement point (CPA vs. defended-radius crossing), slots, ETA, TTI, serialization |
 | `test_threat_queue.py` | min-heap ordering by TCPA, lazy removal |
+| `test_hardware.py` | hardware record complete, kinematics reproduce the original drones, runtime config wins; drones never read `sim/truth` |
 | `test_localclock.py` | perfect default, drift/offset model, jitter only in exchange stamps, reproducible per-node draw |
 | `test_fuze.py` | proximity fuze: fires at closest approach (three threat speeds), threat in range before arming not taken for a mate, mates never trigger, hold and timed fallbacks, closest approach beyond the kill radius, contacts off the predicted track ignored, radius mode, arming window, stale track, chain readiness, config |
 | `test_ship_track.py` | radar track: truth vs ship-time view, true closest approach; ship time attributes set at start (needs zenoh installed) |

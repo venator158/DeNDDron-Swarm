@@ -18,6 +18,7 @@ from deconflict import SLOT_RADIUS_M, Blast, plan_route
 import fuze as fuzelib
 from links import open_onboard
 from radio_process import RadioProcess
+import hardware
 import localclock
 import simclock
 import timesync
@@ -92,6 +93,9 @@ class DenddronAgent:
                 )
 
         global_cfg = runtime_cfg.get("defaults", {})
+        # Hardware record (hardware/hardware.json, copied into the runtime config by the launcher).
+        self.hw = hardware.load(runtime_cfg) or {}
+        self.KILL_RADIUS = float(self.hw.get("warhead", {}).get("kill_radius_m", self.KILL_RADIUS))
         my_cfg = runtime_cfg.get("agents", {}).get(self.agent_id, {})
 
         if not global_cfg:
@@ -236,7 +240,10 @@ class DenddronAgent:
 
         # --- Onboard bus (simulator) ---
         self.pub_cmd_vel    = self.onboard.declare_publisher(f"swarm/{self.agent_id}/cmd_vel")
-        self.pub_detonation = self.onboard.declare_publisher("sim/detonation")
+        # Physics belongs to the simulator: we only ask to detonate; it places the blast at our true
+        # position (sim/detonation) and applies friendly fire (drone/{id}/destroyed).
+        self.pub_detonate = self.onboard.declare_publisher(f"drone/{self.agent_id}/detonate")
+        self.pub_job = self.onboard.declare_publisher(f"drone/{self.agent_id}/job")
         self.sub_sensors = self.onboard.declare_subscriber(
             f"drone/{self.agent_id}/sensors",
             self._on_sensor_data
@@ -271,11 +278,11 @@ class DenddronAgent:
             # Clock beacons between drones (timesync.Consensus); the ship's is in its roster.
             self.pub_clock = self.radio.declare_publisher(f"swarm/clock/{self.agent_id}")
             self.sub_clock = self.radio.declare_subscriber("swarm/clock/*", self._on_clock_beacon)
-        # Physics: detonations of other jobs within KILL_RADIUS destroy this drone (friendly fire).
+        # Detonations: our job's trigger chain fire; damage to us comes from the simulator (_on_destroyed).
         self.sub_blasts    = self.onboard.declare_subscriber("sim/detonation", self._on_blast)
+        self.sub_destroyed = self.onboard.declare_subscriber(f"drone/{self.agent_id}/destroyed", self._on_destroyed)
         if self.FUZE_ON:
             self.sub_fuze  = self.onboard.declare_subscriber(f"drone/{self.agent_id}/fuze", self._on_fuze)
-        self.pub_damage    = self.onboard.declare_publisher("sim/damage")
         # Evaluation only: truth vs our estimate of ship time, on the onboard bus so it is measured
         # during radio cuts too (the radio telemetry carries only what a real drone could report).
         self.pub_clock_eval = self.onboard.declare_publisher("sim/clock_eval")
@@ -906,6 +913,7 @@ class DenddronAgent:
             with self._eng_lock:
                 self.engaged_threat = t
                 self._last_job = t.threat_id
+                self.pub_job.put(json.dumps({"job": t.threat_id}))   # the simulator exempts us from its blasts
                 self._set_engagement({
                     "threat": t, "wave_id": r.wave_id, "confirmed": False, "since": simclock.now(), "seq": -1,
                     "point": (loc["x"], loc["y"], loc["z"]), "t_engage": t.t_engage,
@@ -1194,7 +1202,8 @@ class DenddronAgent:
             return
 
     def _on_blast(self, sample):
-        """A detonation from another job within KILL_RADIUS destroys this drone (friendly fire)."""
+        """A detonation (placed by the simulator).  Our job's: chain fire (_on_mate_blast).  Damage to us
+        is the simulator's call (_on_destroyed)."""
         if self.destroyed:
             return
         try:
@@ -1206,27 +1215,19 @@ class DenddronAgent:
         eng = self.engagement
         if eng is not None and eng["threat"].threat_id == b.get("threat_id"):
             self._on_mate_blast(eng, b)
-            return                                   # a job's own blast never hurts its drones
-        if b.get("threat_id") == self._last_job:
-            return                                   # our last job's blast (we aborted or gave it back)
-        with self.state_lock:
-            pose = dict(self.current_pose) if self.current_pose is not None else None
-        if pose is None:
+
+    def _on_destroyed(self, sample):
+        """The simulator says a blast destroyed us (friendly fire): go inert."""
+        if self.destroyed:
             return
-        dist = math.dist((pose["x"], pose["y"], pose["z"]), (b["x"], b["y"], b["z"]))
-        if dist > self.KILL_RADIUS:
-            return
+        try:
+            d = self._parse(sample)
+        except Exception:
+            d = {}
+        eng = self.engagement
         threat_id = eng["threat"].threat_id if eng else None
-        logger.warning(f"[{self.agent_id}] DESTROYED by friendly fire: {b['agent_id']} detonated on "
-                       f"{b.get('threat_id')} {dist:.1f} m away" + (f"; job {threat_id} lost" if threat_id else ""))
-        self.pub_damage.put(json.dumps({"agent_id": self.agent_id, "cause": "friendly_fire", "by": b["agent_id"],
-                                        "by_threat": b.get("threat_id"), "job": threat_id,
-                                        "distance": round(dist, 2), "truth_time": b.get("truth_time")}))
-        self.pub_cmd_vel.put(json.dumps({"linear": {"x": 0.0, "y": 0.0, "z": 0.0},
-                                         "angular": {"x": 0.0, "y": 0.0, "z": 0.0}}))
-        pub_leave = self.onboard.declare_publisher("swarm/agents/despawn")
-        pub_leave.put(json.dumps({"agent_id": self.agent_id, "reason": "friendly_fire"}))
-        pub_leave.undeclare()
+        logger.warning(f"[{self.agent_id}] DESTROYED by friendly fire: {d.get('by')} detonated on "
+                       f"{d.get('by_threat')} {d.get('distance')} m away" + (f"; job {threat_id} lost" if threat_id else ""))
         with self._auction_lock:
             self.auction.release()
         with self._eng_lock:
@@ -1430,22 +1431,20 @@ class DenddronAgent:
         if intruders:
             logger.warning(f"[{self.agent_id}] Detonating on {threat.threat_id} with non-job drones within "
                            f"{self.CLEARANCE_M:.0f} m: {intruders} (risk of friendly fire)")
-        # Physical event: goes on the onboard bus (the ship's radar observes it there).  truth_time
-        # (this sensor frame's sim time) places the blast for kill assessment and evaluation; the
-        # protocol uses sync_time (ship time), local_time is for evaluation.
-        self.pub_detonation.put(json.dumps({
-            "agent_id": self.agent_id, "threat_id": threat.threat_id, "truth_time": truth,
+        # Ask the simulator to detonate us: it places the blast at our *true* position (sim/detonation,
+        # observed by the ship's radar), applies friendly fire and despawns us.  truth_time (this sensor
+        # frame's sim time) times the blast for kill assessment; sync_time is the protocol's stamp,
+        # local_time and est (where we believe we are) are for evaluation.
+        self.pub_detonate.put(json.dumps({
+            "threat_id": threat.threat_id, "truth_time": truth,
             "local_time": local, "sync_time": self.sync.to_ship(now), "t_engage": self.sync.to_ship(eng["t_engage"]),
             "reason": reason, "chain": reason == "chain", "chain_delay_s": chain_delay, "chain_by": by,
             "trigger": None if trigger is None else [round(c, 3) for c in trigger],
-            "x": pose["x"], "y": pose["y"], "z": pose["z"], "intruders": intruders,
+            "est": [round(pose["x"], 3), round(pose["y"], 3), round(pose["z"], 3)], "intruders": intruders,
         }))
         self.pub_cmd_vel.put(json.dumps({
             "linear": {"x": 0.0, "y": 0.0, "z": 0.0}, "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
         }))
-        pub_leave = self.onboard.declare_publisher("swarm/agents/despawn")
-        pub_leave.put(json.dumps({"agent_id": self.agent_id, "reason": "detonated", "threat_id": threat.threat_id}))
-        pub_leave.undeclare()
         with self._auction_lock:
             self.auction.release()
         with self._eng_lock:

@@ -5,7 +5,11 @@ import argparse
 import json
 import math
 import random
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "common"))
+import hardware  # noqa: E402  (hardware record: device classes -> simulation parameters)
 
 
 GLOBAL_DEFAULTS = {
@@ -183,8 +187,12 @@ def main():
     if args.seed is not None:
         random.seed(args.seed)
 
+    # Airframe limits come from the hardware record (real class performance x speed_scale).
+    hw = hardware.load()
+    GLOBAL_DEFAULTS["kinematics"].update(hardware.kinematics(hw))
     runtime = {
         "agent_count": args.agents,
+        "hardware": hw,
         "defaults": GLOBAL_DEFAULTS,
         "agents": build_agent_positions(
             args.agents,

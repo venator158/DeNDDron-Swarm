@@ -105,6 +105,21 @@ void GazeboSimulator::init() {
         std::move(sub_opt_despawn)
     ));
 
+    auto sub_opt_det = zenoh::Session::SubscriberOptions::create_default();
+    _sub_detonate.emplace(_session->declare_subscriber(
+        zenoh::KeyExpr("drone/*/detonate"),
+        std::bind(&GazeboSimulator::on_detonate, this, std::placeholders::_1),
+        [](){},
+        std::move(sub_opt_det)
+    ));
+    auto sub_opt_job = zenoh::Session::SubscriberOptions::create_default();
+    _sub_job.emplace(_session->declare_subscriber(
+        zenoh::KeyExpr("drone/*/job"),
+        std::bind(&GazeboSimulator::on_job, this, std::placeholders::_1),
+        [](){},
+        std::move(sub_opt_job)
+    ));
+
     load_spawn_config();
     configure_fuze();
 
@@ -125,6 +140,10 @@ void GazeboSimulator::load_spawn_config() {
 
     try {
         json cfg = json::parse(config_file);
+        try {
+            _kill_radius = cfg.at("hardware").at("warhead").at("kill_radius_m").get<double>();
+        } catch (...) {}
+        std::cout << "[GazeboSimulator] Warhead kill radius " << _kill_radius << " m" << std::endl;
         if (!cfg.contains("agents") || !cfg["agents"].is_object()) {
             std::cerr << "[GazeboSimulator] Runtime config missing 'agents' object." << std::endl;
             return;
@@ -827,6 +846,106 @@ double GazeboSimulator::estimated_sim_time() {
     return _clock_out;
 }
 
+namespace {
+// "drone/{id}/..." -> id
+std::string key_agent(const std::string& key) {
+    const size_t a = key.find('/');
+    const size_t b = key.find('/', a + 1);
+    return (a == std::string::npos || b == std::string::npos) ? std::string() : key.substr(a + 1, b - a - 1);
+}
+double round_mm(double v) { return std::round(v * 1000.0) / 1000.0; }
+}  // namespace
+
+void GazeboSimulator::put(const std::string& key, const std::string& payload) {
+    if (_session) {
+        _session->put(zenoh::KeyExpr(key), zenoh::Bytes(payload), zenoh::Session::PutOptions::create_default());
+    }
+}
+
+void GazeboSimulator::on_detonate(const zenoh::Sample& sample) {
+    try {
+        const std::string agent_id = key_agent(std::string(sample.get_keyexpr().as_string_view()));
+        auto msg = json::parse(sample.get_payload().as_string());
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        _pending_detonations.push_back({agent_id, msg});
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] Bad detonate request: " << e.what() << std::endl;
+    }
+}
+
+void GazeboSimulator::on_job(const zenoh::Sample& sample) {
+    try {
+        const std::string agent_id = key_agent(std::string(sample.get_keyexpr().as_string_view()));
+        auto msg = json::parse(sample.get_payload().as_string());
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        if (msg.contains("job") && msg["job"].is_string()) _drone_job[agent_id] = msg["job"].get<std::string>();
+    } catch (...) {}
+}
+
+void GazeboSimulator::apply_detonations(double sim_time) {
+    std::vector<PendingDetonation> dets;
+    std::map<std::string, ignition::math::Vector3d> pos;
+    std::map<std::string, std::string> jobs;
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        if (_pending_detonations.empty()) return;
+        dets.swap(_pending_detonations);
+        for (const auto& [id, st] : _drone_states) {
+            auto sp = _spawned_agents.find(id);
+            if (sp != _spawned_agents.end() && sp->second) pos[id] = st.position;
+        }
+        jobs = _drone_job;
+    }
+    std::set<std::string> gone;     // detonated or destroyed in this batch
+    for (const auto& d : dets) {
+        auto it = pos.find(d.agent_id);
+        if (it == pos.end() || gone.count(d.agent_id)) continue;     // already gone
+        const ignition::math::Vector3d p = it->second;
+        json blast = d.msg;
+        blast["agent_id"] = d.agent_id;
+        blast["x"] = round_mm(p.X());
+        blast["y"] = round_mm(p.Y());
+        blast["z"] = round_mm(p.Z());
+        blast["blast_sim_time"] = sim_time;
+        put("sim/detonation", blast.dump());
+        gone.insert(d.agent_id);
+        const std::string threat = blast.value("threat_id", std::string());
+        for (const auto& [id, q] : pos) {
+            if (gone.count(id)) continue;
+            const double dist = (q - p).Length();
+            if (dist > _kill_radius) continue;
+            auto j = jobs.find(id);
+            if (j != jobs.end() && !threat.empty() && j->second == threat) continue;   // same job: exempt
+            gone.insert(id);
+            json dmg = {{"agent_id", id}, {"cause", "friendly_fire"}, {"by", d.agent_id}, {"by_threat", threat},
+                        {"job", j != jobs.end() ? json(j->second) : json(nullptr)},
+                        {"distance", std::round(dist * 100.0) / 100.0},
+                        {"truth_time", blast.value("truth_time", sim_time)}};
+            put("sim/damage", dmg.dump());
+            put("drone/" + id + "/destroyed", dmg.dump());
+            std::cout << "[GazeboSimulator] " << id << " destroyed by friendly fire (" << d.agent_id << " on "
+                      << threat << ", " << dist << " m)" << std::endl;
+        }
+    }
+    std::lock_guard<std::mutex> lock(_state_mtx);
+    for (const auto& id : gone) _pending_despawns.push_back(id);
+}
+
+void GazeboSimulator::publish_truth(double sim_time) {
+    json drones = json::object();
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        for (const auto& [id, st] : _drone_states) {
+            auto sp = _spawned_agents.find(id);
+            if (sp == _spawned_agents.end() || !sp->second) continue;
+            drones[id] = {round_mm(st.position.X()), round_mm(st.position.Y()), round_mm(st.position.Z()),
+                          round_mm(st.linear_velocity.X()), round_mm(st.linear_velocity.Y()),
+                          round_mm(st.linear_velocity.Z())};
+        }
+    }
+    put("sim/truth", json{{"sim_time", sim_time}, {"drones", drones}}.dump());
+}
+
 void GazeboSimulator::step() {
     apply_pending_despawns();
 
@@ -866,6 +985,12 @@ void GazeboSimulator::step() {
             }
             publish_sensor_data(agent_id, sensor_data);
         }
+    }
+
+    apply_detonations(current_sim_time);
+    if (current_sim_time - _last_truth_pub_time >= 0.1 - 1e-3) {
+        _last_truth_pub_time = current_sim_time;
+        publish_truth(current_sim_time);
     }
 
     if (_fuze_on && current_sim_time - _last_fuze_pub_time >= _fuze_period - 1e-3) {

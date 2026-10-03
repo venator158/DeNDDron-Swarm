@@ -592,6 +592,9 @@ class Ship:
                "threat_speed": round(math.hypot(*tr.true_v), 2),
                "reason": d.get("reason", "timed"), "chain_delay_s": d.get("chain_delay_s"), "chain_by": d.get("chain_by"),
                "range_m": round(math.hypot(here[0], here[1]), 1)}      # blast's distance from the ship
+        if d.get("est"):
+            # where the drone believed it was (its localization error at the blast; evaluation only)
+            rec["est_err_m"] = round(math.dist(tuple(d["est"]), here), 2)
         if d.get("trigger"):
             # Ground-truth label of what the fuze fired on (evaluation only): was the contact the threat?
             trig = tuple(here[k] + float(d["trigger"][k]) for k in range(3))
