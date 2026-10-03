@@ -8,7 +8,6 @@ import threading
 import numpy as np
 import logging
 import os
-from voxel_map import VoxelMap
 from radar_obstacles import RadarObstacles
 from localization import Localizer, anchors_from_record
 from coop import Coop, state_payload
@@ -58,12 +57,13 @@ class DenddronAgent:
     KEEPOUT = os.environ.get("ZONE_KEEPOUT", "1") != "0"
     # Proximity fuze (fuze.py): on by default; FUZE=0 restores timed detonation at t_engage.
     FUZE_ON = fuzelib.enabled()
-    # Perception for obstacle avoidance: lidar + voxel map (default), or the mmWave radar (PERCEPTION=radar),
-    # whose contacts also feed the fuze.
-    PERCEPTION = (os.environ.get("PERCEPTION") or "lidar").strip().lower()
-    # Localization: truth (the simulator's x,y, as before), anchors (UWB ranges to the ship's anchors,
-    # localization.py) or coop (anchors + peers).  Altitude and attitude are always given.
-    LOCALIZATION = (os.environ.get("LOCALIZATION") or "truth").strip().lower()
+    # Perception for obstacle avoidance: the mmWave radar (default), whose contacts also feed the fuze,
+    # or the legacy lidar + voxel map (PERCEPTION=lidar).
+    PERCEPTION = (os.environ.get("PERCEPTION") or "radar").strip().lower()
+    # Localization: coop (default: UWB ranges to the ship's anchors and to peers, localization.py and
+    # coop.py), anchors (ship anchors only) or truth (the simulator's x,y, for comparison runs).
+    # Altitude and attitude are always given.
+    LOCALIZATION = (os.environ.get("LOCALIZATION") or "coop").strip().lower()
     LOC_EVAL_PERIOD_S = 0.5    # sim s between localization reports for evaluation (drone/{id}/loc)
     # Station keeping: drift (wind) beyond this from the hold point, or beyond the distance a goal
     # latched at, flies the drone back.  Never triggers in calm air (a holding drone does not move).
@@ -86,8 +86,11 @@ class DenddronAgent:
         # --- Internal State ---
         self.running = True
         self.state_lock = threading.RLock()
-        self.voxel_map = VoxelMap()
-        self.obstacle_map = self.voxel_map     # what the planner repels from (radar mode: RadarObstacles)
+        self.voxel_map = None                  # legacy lidar mode only (PERCEPTION=lidar)
+        if self.PERCEPTION == "lidar":
+            from voxel_map import VoxelMap
+            self.voxel_map = VoxelMap()
+        self.obstacle_map = self.voxel_map     # what the planner repels from (radar: RadarObstacles, below)
         self.current_pose = None
         self.current_goal = None
         self.current_job = None
@@ -434,7 +437,7 @@ class DenddronAgent:
             # station sends zero velocity and never reads the map.  Voxels expire after 0.5 s, so
             # there is nothing to keep fresh either; the first scan after tasking (<= 0.1 s)
             # rebuilds the map.  Skipping it while idle was ~75% of an idle drone's CPU.
-            if lidar_data and self.current_goal is not None:
+            if lidar_data and self.voxel_map is not None and self.current_goal is not None:
                 t0 = time.perf_counter()
                 self.voxel_map.cleanup_stale_data(max_age=0.5, current_time=self.current_time)
                 self._process_lidar(lidar_data, current_pose)

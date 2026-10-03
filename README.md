@@ -2,6 +2,8 @@
 
 **De**centralized **N**aval **D**efence **Dron**e swarm. Expendable drones hold station around a ship. The ship's radar reports incoming threats, and the operator approves each interception on a live dashboard. The drones then decide among themselves which of them engage. The assigned drones fly to the engagement point, wait there, and detonate when their proximity fuze sees the threat pass (or, with the fuze off, at the allocated time).
 
+Each drone works out its own position from ultra-wideband (UWB) ranges to anchors on the ship and to its neighbours. It sees threats and other drones with a mmWave radar. It never leaves a 50 m no-fly zone around the ship. The simulator owns the physics: a drone only asks to detonate, and the simulator decides what the blast hits.
+
 The simulation runs in Gazebo. Every drone is its own Python agent in its own container. The drones and the ship talk peer-to-peer over Zenoh, with no central router.
 
 This README is the project's only documentation. Keep it up to date when behaviour changes.
@@ -43,7 +45,35 @@ docker exec -it gazebo_simulator gzclient             # optional: 3D view
 docker compose down                                   # stop (every service shuts down cleanly)
 ```
 
-The first run builds the images, which takes several minutes. Add `--build` after changing code.
+The first run builds the images, which takes several minutes. Add `--build` after changing code; the sweeps below do not rebuild.
+
+**What runs by default.** Every default is the current architecture:
+- **Localization:** cooperative UWB (`--localization coop`). Drones are never told their x, y; they range the ship's four UWB anchors, and their neighbours when out of anchor reach.
+- **Perception:** the mmWave radar (`--perception radar`), for obstacle avoidance and the proximity fuze.
+- **Ship no-fly zone:** 50 m (`--no-fly 50`), with stations at 55–95 m. Routes go around the zone, and intercepts stay outside it.
+- **Proximity fuze:** on, with the `hold` fallback.
+- **Calm air**, and perfect clocks (`--clock-sync none`).
+
+The legacy setup is opt-in, for comparison runs only: the simulator's true x, y, a planar lidar with a voxel map, and stations at 30–45 m with no zone (`--localization truth --perception lidar --no-fly 0`).
+
+**Common runs:**
+
+```bash
+# the standard check: 8 drones, 4 threats, 3x real time, rebuild; then the stand-in operator approves
+bash scripts/run_swarm.sh 8 --threats 4 --rtf 3 --build
+python3 tools/comms/operator_bot.py 1 400 0.5          # reaction s, duration s, poll s (wall time)
+
+# no operator at all: the ship approves every feasible threat itself
+bash scripts/run_swarm.sh 12 --threats 6 --rtf 3 --maneuver-p 0.5 --auto-approve
+
+# wind (real m/s, scaled like the airframe) and a UWB jammer near (40, 0) from t = 30 s
+bash scripts/run_swarm.sh 8 --threats 4 --rtf 3 --wind 5,0 --gust 1.5
+UWB_JAM=anchors:30:9999:40:0:30 bash scripts/run_swarm.sh 8 --threats 4 --rtf 3
+
+# anchors only (no peer ranging), or the legacy setup for comparison
+bash scripts/run_swarm.sh 8 --threats 4 --rtf 3 --localization anchors
+bash scripts/run_swarm.sh 8 --threats 4 --rtf 3 --localization truth --perception lidar --no-fly 0
+```
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -54,6 +84,12 @@ The first run builds the images, which takes several minutes. Add `--build` afte
 | `--algorithm apf\|orca` | `apf` | path planner (APF with goal-proximity repulsion fade; ORCA dead-ends in crowds, see [Spatial queue](#spatial-queue)) |
 | `--seed S` | 42 | spawn layout and threat scenario |
 | `--maneuver-p P` | 0 | probability that a threat turns once mid-flight (`THREAT_MANEUVER_P`) |
+| `--localization coop\|anchors\|truth` | `coop` | how drones know x, y: UWB anchors + peers, anchors only, or the simulator's truth (legacy) (see [Localization and perception](#localization-and-perception)) |
+| `--perception radar\|lidar` | `radar` | obstacle sensing: mmWave radar, or the legacy lidar + voxel map |
+| `--no-fly R` | 50 | ship no-fly zone radius; stations at R+5 … R+45 m; `0` turns it off (stations at 30–45 m) |
+| `--wind X,Y`, `--gust S` | calm | steady wind and gust strength, real m/s (× `speed_scale`); drones cannot sense either |
+| `--auto-approve [S]` | off | the ship approves every feasible threat itself after S sim seconds (default 3); also a dashboard toggle |
+| `--instance K` | 0 | run an independent swarm next to others (see [Several swarms at once](#several-swarms-at-once)) |
 | `--rtf K` | 1 | run the simulation K times faster than real time (see [Faster than real time](#faster-than-real-time)) |
 | `--radio-qos default\|tuned` | `default` | Zenoh QoS profile for the radio (`RADIO_QOS`) |
 | `--clock-drift PPM`, `--clock-drift-spread PPM` | 0, 0 | drones' clock drift: fixed + uniform ±spread per drone (see [Distributed clock](#distributed-clock)) |
@@ -74,7 +110,7 @@ With no `--threats`, drones fly to the static goals in `config/swarm_runtime.jso
 `--rtf K` (`SIM_RTF`) runs the whole system K times faster, so experiments finish sooner. Speeding up Gazebo alone would change the results, because the swarm's protocol timers run on the computer's clock. So everything scales together:
 
 - **Gazebo** steps its 1 ms physics at 1000·K steps per second.
-- **The bridge** ticks every 20/K ms, so poses stay at 50 Hz and lidar at 10 Hz per simulated second.
+- **The bridge** ticks every 20/K ms, so per simulated second poses stay at 50 Hz, radar at 20 Hz and UWB at 2 Hz.
 - **Drones** run their control loop at 50·K Hz. The simulator filters each velocity command, so the command rate per simulated second must stay the same for the flight dynamics to match.
 - **Protocol timers** (heartbeats, link and roster timeouts, re-announce delay, decision latency, radio rates) use `src/common/simclock.py`. It follows the simulator's actual clock: drones feed it the sim time from their sensor frames, and the ship from `sim/clock`. Between updates it runs at the measured sim speed, so timers stay correct when Gazebo falls behind the target. At 25 drones, Gazebo reached 1.9× against a 2× target, and the ship still received exactly the expected 75 messages per simulated second.
 - **Radio impairments** must be scaled by hand: delay ÷ K and rate × K. Loss is unchanged. `degradation_sweep.py --rtf K` does this for you.
@@ -86,7 +122,7 @@ Compute metrics (loop timing, CPU) stay in real time. What doesn't scale:
 
 Keep K small, and check `rtf_measured` in sweep results.
 
-Measured at K = 3 with 8 drones:
+Measured at K = 3 with 8 drones (legacy lidar setup):
 - Gazebo reaches 2.98× real time.
 - Each drone uses about 15% of a CPU core; 8 drones plus Gazebo use about 2.3 of 6 cores.
 - A sweep run takes 87 s instead of 201 s.
@@ -113,7 +149,18 @@ python3 tools/comms/degradation_sweep.py --rtf 3 --drones 12 --threats 6 --maneu
 # any other swarm setting through --env, e.g. clocks and the fuze
 python3 tools/comms/degradation_sweep.py --rtf 3 --drones 8 --threats 4 --profiles default --conditions baseline= \
     --env CLOCK_DRIFT_SPREAD_PPM=500 CLOCK_OFFSET_SPREAD_S=1.5 CLOCK_SYNC=consensus FUZE=0
+
+# localization and environment: wind with gusts, then the legacy setup on the same scenario
+python3 tools/comms/degradation_sweep.py --rtf 3 --drones 8 --threats 4 --profiles default --conditions baseline= \
+    --env WIND_MPS=5,0 GUST_SIGMA_MPS=1.5
+python3 tools/comms/degradation_sweep.py --rtf 3 --drones 8 --threats 4 --profiles default --conditions baseline= \
+    --env LOCALIZATION=truth PERCEPTION=lidar NO_FLY_RADIUS_M=0
+
+# scaling: 50 drones at 1x, the ship approving by itself
+python3 tools/comms/scaling_sweep.py --sizes 50:1 --auto-approve
 ```
+
+The sweeps run whatever images exist: rebuild first (`bash scripts/run_swarm.sh 1 --build`, then `docker compose down`, or `docker compose build`) after changing code.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -125,9 +172,10 @@ python3 tools/comms/degradation_sweep.py --rtf 3 --drones 8 --threats 4 --profil
 | `--repeats N` | 1 | runs per cell |
 | `--conditions NAME=NETEM ...` | built-in matrix | radio impairments (`NAME=` for none) |
 | `--profiles ...` | `default tuned` | radio QoS profiles |
-| `--env KEY=VALUE ...` | | any other swarm environment (clocks, fuze, radar) |
+| `--env KEY=VALUE ...` | | any other swarm environment (clocks, fuze, localization, perception, no-fly zone, wind, threats) |
 | `--reaction S`, `--timeout S` | 3, 360 | operator reaction and time allowed per run, sim seconds |
 | `--parallel P`, `--instance K` | 1, 0 | runs at once on separate instances; which instance for a single run |
+| `--auto-approve` | off | the ship approves threats itself instead of `operator_bot.py` |
 | `--out DIR` | `results/sweep_<time>` | results: `results.csv`, `results.md` (mean ± sd per cell), and per run `swarm.log`, `operator.log`, `summary.json`, `state.json` |
 
 `scaling_sweep.py` takes the same `--maneuver-p` and `--env`, with swarm sizes as `--sizes N:RTF ...` and N/2 threats per size.
@@ -144,11 +192,18 @@ docker exec -d gazebo_simulator gzclient              # the 3D view; it closes w
 
 The dashboard at `http://localhost:8080` shows the same run live; results land in `results/n50_gui/`.
 
-For a single interactive run with the stand-in operator instead of a person: start the swarm, then the bot.
+For a single interactive run with the stand-in operator instead of a person: start the swarm, then the bot (or launch with `--auto-approve` and skip the bot).
 
 ```bash
 bash scripts/run_swarm.sh 12 --threats 6 --rtf 3 --maneuver-p 0.5
 python3 tools/comms/operator_bot.py 1 400 0.5      # reaction s, duration s, poll s (wall time)
+```
+
+The same 50-drone scenario as a plain launch, approved by the ship, with the Gazebo window:
+
+```bash
+bash scripts/run_swarm.sh 50 --threats 25 --threat-interval 4.8 --maneuver-p 0.5 --auto-approve
+docker exec -d gazebo_simulator gzclient
 ```
 
 ### Several swarms at once
@@ -206,28 +261,30 @@ Speeds are scaled to the drones' 4 m/s.
 The ship reports each threat as a straight-line track with its CPA and TCPA. The drones intercept at the **engagement point**, the **earliest point on the track** (so the farthest from the ship) that satisfies all of these (see [Spatial queue](#spatial-queue)):
 - enough free drones can reach it in time, with a 1.25× ETA margin plus 4 s of slack;
 - it is within 140 m of the ship (`INTERCEPT_MAX_RANGE_M`);
+- it is at least 55 m from the ship: the no-fly zone plus 5 m;
+- every drone can reach it on a route around the no-fly zone;
 - it is kept clear of other jobs.
 
-The latest acceptable point, used as a fallback, is the old rule:
-- the CPA, if the threat passes outside the defended radius (45 m);
+The latest acceptable point, used as a fallback, is the old rule, with the defended radius raised to the zone + 5 m (55 m; 45 m with `--no-fly 0`):
+- the CPA, if the threat passes outside the defended radius;
 - otherwise, the point where the track first crosses the defended radius.
 
-The assigned drones take up slots **stacked vertically** through that point (within ±3 m). Around the allocated time, the moment the threat should arrive, their **proximity fuze** arms, and each drone detonates as the threat passes closest; its job-mates fire with it (chain fire). With `--fuze off`, they detonate at the allocated time instead. Vertical stacking matters: the lidar is planar, so job-mates stacked 3 m apart don't repel each other off their slots (a horizontal ring did). The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
+The assigned drones take up slots **stacked vertically** through that point (within ±3 m). Around the allocated time, the moment the threat should arrive, their **proximity fuze** arms, and each drone detonates as the threat passes closest; its job-mates fire with it (chain fire). With `--fuze off`, they detonate at the allocated time instead. Vertical stacking matters: obstacle avoidance is planar (radar contacts become points at the drone's own altitude, as the lidar's were), so job-mates stacked 3 m apart don't repel each other off their slots (a horizontal ring did). The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
 
 ## Architecture
 
 ```
                  sim_net (Zenoh router "sim_bus")              radio_net (peer-to-peer, no router)
                  = each drone's own sensors/actuators          = all communications
-  ┌──────────────────┐   sensors 50 Hz, lidar 10 Hz   ┌──────────┐   heartbeats, orders,   ┌──────────┐
-  │ Gazebo simulator │ ─────────────────────────────▶ │ drone ×N │ ◀────bids, awards─────▶ │ drone ×N │
-  │ (C++ bridge)     │ ◀──── cmd_vel, detonation ──── │ (Python) │                         └──────────┘
-  │                  │ ── sim clock ──┐                └──────────┘                              ▲
-  │                  │ ◀─ tracks ──┐  │                      ▲ roster, orders    heartbeats,     │
-  └──────────────────┘             │  ▼                      │                   telemetry       │
-                                 ┌─────────────────────────────┐                                 │
-                                 │ ship: radar, C2, dashboard  │ ────────────────────────────────┘
-                                 └─────────────────────────────┘   metrics node: sim_net observer
+  ┌──────────────────┐  altitude 50 Hz, radar 20 Hz,  ┌──────────┐   heartbeats, orders,   ┌──────────┐
+  │ Gazebo simulator │ ───── UWB ranges 2 Hz ───────▶ │ drone ×N │ ◀────bids, awards─────▶ │ drone ×N │
+  │ (C++ bridge,     │ ◀── cmd_vel, detonate, job ─── │ (Python) │                         └──────────┘
+  │ physics, truth)  │ ── sim clock ──┐                └──────────┘                              ▲
+  │                  │ ◀─ tracks ──┐  │                      ▲ roster, orders,   heartbeats,     │
+  └──────────────────┘             │  ▼                      │ jobs, zones       telemetry       │
+        │ sim/truth            ┌─────────────────────────────┐                                   │
+        ▼ (evaluation only)    │ ship: radar, C2, dashboard  │ ──────────────────────────────────┘
+  metrics node                 └─────────────────────────────┘
 ```
 
 - **Two links per node** (`src/common/links.py`).
@@ -235,24 +292,42 @@ The assigned drones take up slots **stacked vertically** through that point (wit
   - The *radio* runs peer-to-peer over UDP on `radio_net` (Zenoh 1.10.1). Peers find each other by multicast scouting on the radio interface and connect directly. Drones also connect to the ship's fixed radio address (`.2` of the radio subnet, port 7450) as a meeting point, and Zenoh gossip introduces the rest. Every drone and the ship run the radio **in a separate OS process** (`src/common/radio_process.py`), so a radio failure cannot freeze flight control or C2. A watchdog pings the radio process every second, and restarts it if it stops answering for 5 s (subscriptions are re-declared). At ~50 peers starting together, a drone's Zenoh session occasionally hung inside a call and the drone never joined.
   - Degrading `radio_net` degrades only the communications. The physics keeps working.
 - **Simulator** (`sim/GazeboSimulator.cpp`).
-  - Integrates the drones' motion from `cmd_vel`.
-  - Publishes pose at 50 Hz and a compact 32-ray planar lidar at 10 Hz.
-  - Publishes each drone's proximity-fuze scan (`drone/{id}/fuze`): unlabelled relative positions of every object within 10 m, with noise and optional latency.
+  - Integrates the drones' motion from `cmd_vel` through a first-order command response, plus wind and gusts the drones cannot sense.
+  - Publishes each drone's pose frame at 50 Hz **without x, y or horizontal velocity**: only altitude and attitude (barometer, IMU, compass). With the legacy `--localization truth` the frame carries the full pose.
+  - Publishes UWB ranges (`drone/{id}/uwb`, 2 Hz): to the ship's four anchors and to the peers each drone asked for, with each peer's state attached, and with noise, a maximum range, dropouts, channel capacity and optional jamming.
+  - Publishes each drone's mmWave radar scan (`drone/{id}/radar`, 20 Hz): unlabelled relative positions of every threat, drone and the ship's hull within 30 m, with range and angle noise. It feeds obstacle avoidance and the proximity fuze. With the legacy `--perception lidar`, it publishes a 32-ray planar lidar at 10 Hz and a 10 m fuze sensor (`drone/{id}/fuze`) instead.
   - Publishes the sim clock at 10 Hz.
   - Moves threat models along the ship's tracks, nose along the direction of flight: a fixed-wing UAV (yellow), a finned missile (orange), a longer winged cruise missile (red). Drones are quadcopters in their swarm colour. All shapes are visual-only primitives, so they add no physics load.
   - Owns the physics: a drone only *asks* to detonate (`drone/{id}/detonate`); the simulator places the blast at the drone's true position, destroys every other drone within the warhead's kill radius (except the same job's), despawns them for good, and publishes `sim/truth` for evaluation. Kill radius and every other device parameter come from the [hardware record](#hardware-record).
   - Gazebo reports sim time only every 0.2 s, so the bridge extrapolates between updates using the observed real-time factor.
 - **Ship** (`src/ship/ship.py`): radar simulation, threat queue, roster, feasibility, orders, kill assessment, instrumentation aggregation, and the dashboard (`dashboard.html`).
-- **Drones** (`src/agent/`): perception, planning, the 50 Hz control loop, decentralized allocation, heartbeat and telemetry.
+- **Drones** (`src/agent/`): localization (UWB EKF and cooperative fusion), radar perception and the fuze, planning, the 50 Hz control loop, decentralized allocation, heartbeat and telemetry.
+
+### Drone pipeline
+
+One drone, from sensors to detonation (`src/agent/agent.py` unless noted):
+
+| Stage | What happens | Where |
+|---|---|---|
+| **Localization: predict** | every 50 Hz pose frame moves the EKF forward to the frame's sim time with the last commanded velocity; the estimate replaces x, y in the pose everything else uses | `_on_sensor_data`, `_loc_predict`; `localization.py` (`Localizer.predict`) |
+| **Localization: correct** | anchor ranges first, then (coop) peer ranges from drones whose anchor chain is fresher; gating and re-lock | `_on_uwb`; `localization.py` (`update_range`, `relock_from`); `coop.py` (`peer_update`) |
+| **Localization: share** | 2 Hz: our state for peers' tables and the peers to range next | `_send_uwb_tx`; `coop.py` (`state_payload`, `choose_peers`) |
+| **Perception** | radar contacts → planar obstacle points (while flying) and, when engaged, the fuze | `_on_contacts`; `radar_obstacles.py` |
+| **Assignment** | order → ETA bids around blasts and the no-fly zone → deterministic auction → ship confirmation → job topic | `_on_threat_wave`, `_calculate_costs`, `_service_auctions`, `_apply_job`; `auction.py`, `jobs.py` |
+| **Route** | trapezoidal-profile legs around the no-fly zone, with holds outside other jobs' blast windows; re-planned every second and on new zones; legs advance as each latches | `_service_route`, `_on_zones`; `deconflict.py` (`plan_route`, `detour`) |
+| **Reflex (50 Hz)** | arrival latch (0.5 m in altitude), APF velocity with a no-fly barrier widened by 2σ, safety envelope (floor/ceiling, obstacle damping, service radius, braking split horizontal/vertical, acceleration and speed caps); idle drones hold station against wind | `_reflex_control_loop`; `path_planning.py` |
+| **Fuze** | records mates, tracks contacts, gates on the predicted threat (+3σ), fires at closest approach inside `t_engage` ± 2 s; mates chain-fire | `_on_contacts`, `_fuze_decision`, `_on_mate_blast`, `_check_engagement`; `fuze.py` |
+| **Detonation** | the drone asks (`drone/{id}/detonate`, with its estimated position); the simulator places the blast at its true position and applies friendly fire | `_detonate_now`; `GazeboSimulator.cpp` (`apply_detonations`) |
+| **Clocks** | every protocol time (`t_engage`, zones, holds) is ship time: the drone's hardware clock read through its sync mode | `_proto_now`, `_inbound_job`; `localclock.py`, `timesync.py` |
 
 ### Topics
 
 | Topic | Link | Direction | Payload |
 |---|---|---|---|
-| `drone/{id}/sensors` | onboard | sim → drone, metrics | `{sim_time, pose, lidar?{angle_step, ranges[], hits[]}}` |
-| `drone/{id}/fuze` | onboard | sim → drone | `{sim_time, objects[[dx, dy, dz], ...]}` at `FUZE_HZ` (50): every threat, other drone and the ship's hull within `FUZE_RANGE_M` (10), relative, unlabelled, with noise |
-| `drone/{id}/radar` | onboard | sim → drone | the same contact format from the hardware record's mmWave radar (30 m, 20 Hz, range/angle noise), with `PERCEPTION=radar`; feeds obstacle avoidance and the fuze |
-| `drone/{id}/uwb` | onboard | sim → drone | `{sim_time, anchors[[k, range]], peers[[id, range, state]]}`: UWB ranges to the ship's anchors (and requested peers, with each peer's state), with `LOCALIZATION=anchors\|coop` |
+| `drone/{id}/sensors` | onboard | sim → drone, metrics | `{sim_time, pose{z, yaw, ...}}` at 50 Hz: altitude and attitude only (legacy `truth`: the full pose; legacy `lidar`: plus `lidar{angle_step, ranges[], hits[]}` every 0.1 s) |
+| `drone/{id}/radar` | onboard | sim → drone | `{sim_time, objects[[dx, dy, dz], ...]}` from the hardware record's mmWave radar (30 m, 20 Hz, range/angle noise): every threat, other drone and the ship's hull, relative and unlabelled; feeds obstacle avoidance and the fuze |
+| `drone/{id}/fuze` | onboard | sim → drone | legacy `PERCEPTION=lidar` only: the same contact format at `FUZE_HZ` (50) within `FUZE_RANGE_M` (10) |
+| `drone/{id}/uwb` | onboard | sim → drone | `{sim_time, anchors[[k, range]], peers[[id, range, state]]}`: UWB ranges to the ship's anchors (and requested peers, with each peer's state); not with `truth` |
 | `drone/{id}/uwb_tx` | onboard | drone → sim | `{state{x, y, vx, vy, cov, z, t, hops, anchor_t}, peers[]}`: the state our UWB frames carry and the peers to range (`coop`) |
 | `drone/{id}/loc` | onboard | drone → metrics | `{sim_time, est, cov, status, ...}` at 2 Hz: the drone's estimate, compared with `sim/truth` (evaluation only) |
 | `swarm/{id}/cmd_vel` | onboard | drone → sim | `{linear, angular}` |
@@ -319,11 +394,11 @@ Measured (8 drones, `--rtf 3`):
 
 ## Localization and perception
 
-Drones can localize themselves instead of receiving their true x,y, and avoid each other with a mmWave radar instead of lidar and a voxel map. Both are switches; the defaults (`LOCALIZATION=truth`, `PERCEPTION=lidar`) are the original behaviour. Altitude and attitude are always given (barometer, IMU and compass, taken as perfect); localization is in the ground plane. Every sensor parameter comes from the [hardware record](#hardware-record).
+Drones localize themselves instead of receiving their true x,y, and avoid each other with a mmWave radar instead of lidar and a voxel map. This is the default (`LOCALIZATION=coop`, `PERCEPTION=radar`, `NO_FLY_RADIUS_M=50`). The original behaviour (`truth`, `lidar`, `0`) is kept as a legacy option for comparison runs, and only then are the voxel map and the lidar loaded. Altitude and attitude are always given (barometer, IMU and compass, taken as perfect); localization is in the ground plane. Every sensor parameter comes from the [hardware record](#hardware-record).
 
-**Perception (`PERCEPTION=radar`).** The simulator turns the contact sensor into the record's 60 GHz mmWave radar (30 m, 20 Hz, 5 cm range and 2° angle noise, 360° from four boards; `drone/{id}/radar`) and stops computing lidar. The radar's contacts feed both the proximity fuze and obstacle avoidance. For avoidance, `radar_obstacles.py` builds exactly the obstacle points the planar lidar produced: the same 32 rays, each neighbour a 3 m circle at the drone's altitude, checked against a Python port of the simulator's lidar. The planners are unchanged, and nothing is ray-traced into a voxel map. Avoidance uses relative positions, so it does not depend on localization.
+**Perception (`PERCEPTION=radar`, default).** The simulator turns the contact sensor into the record's 60 GHz mmWave radar (30 m, 20 Hz, 5 cm range and 2° angle noise, 360° from four boards; `drone/{id}/radar`) and stops computing lidar. The radar's contacts feed both the proximity fuze and obstacle avoidance. For avoidance, `radar_obstacles.py` builds exactly the obstacle points the planar lidar produced: the same 32 rays, each neighbour a 3 m circle at the drone's altitude, checked against a Python port of the simulator's lidar. The planners are unchanged, and nothing is ray-traced into a voxel map. Avoidance uses relative positions, so it does not depend on localization.
 
-**Localization (`LOCALIZATION=anchors|coop`).** The simulator withholds x, y and the horizontal velocity, and gives UWB ranges instead (`drone/{id}/uwb`). Four anchors sit on the ship at the hull corners (±15 × ±5 m, 8 m up). The ranges have the record's characteristics: 10 cm noise, 250 m range, 2 % dropouts, and channel airtime. Each drone runs an EKF (`localization.py`) on [x, y, vx, vy, wind x, wind y]:
+**Localization (`LOCALIZATION=coop`, default, or `anchors`).** The simulator withholds x, y and the horizontal velocity, and gives UWB ranges instead (`drone/{id}/uwb`). Four anchors sit on the ship at the hull corners (±15 × ±5 m, 8 m up). The ranges have the record's characteristics: 10 cm noise, 250 m range, 2 % dropouts, and channel airtime. Each drone runs an EKF (`localization.py`) on [x, y, vx, vy, wind x, wind y]:
 - **prediction** with the velocity it commands, through the airframe's command response (the simulator's filter; on hardware, the identified response), plus the wind it cannot sense, which the anchors make observable;
 - **updates** from 3D anchor ranges with its altitude known, with an innovation gate and re-initialization after 5 rejections in a row;
 - **initialization** from the launch position, or by least squares from three or more anchors.
@@ -338,7 +413,7 @@ Absolute position is only observable through the anchors: with every anchor jamm
 - the wind state in the filter: without it, a 0.5 m/s wind made it 600× overconfident and re-lock 290 times in one run;
 - station keeping: idle drones fly back after drifting 1 m, and a drone latched on its goal re-approaches after drifting 1 m beyond where it latched. Neither triggers in calm air.
 
-**Ship no-fly zone (`--no-fly 50`, `NO_FLY_RADIUS_M`).** Shrapnel safety: drones stay out of a circle of radius R around the ship.
+**Ship no-fly zone (`--no-fly R`, `NO_FLY_RADIUS_M`, default 50; 0 turns it off).** Shrapnel safety: drones stay out of a circle of radius R around the ship.
 - **Stations** move to R+5 … R+45 m (55–95 m for 50).
 - **Planners:** APF repels from the zone's boundary, widened by 2σ of the drone's own position uncertainty; ORCA uses the boundary as its hard constraint.
 - **Routes** (`deconflict.plan_route`, used for bids, ETAs, the ship's feasibility and confirmation) go around the zone instead of through it: tangent, arc and tangent waypoints at R + 3 m, the shorter way round (`detour`).
@@ -383,11 +458,11 @@ Perception alone, truth localization (`scaling_sweep.py`, sampled over the run):
 - Cooperation keeps jammed drones within 0.76 m, where anchors alone let them drift by up to 11 m.
 - Misses in wind are a station-keeping limit, the same with truth: drones latch up to 3 m from their slot, downwind, and the fuze cannot make up a cross-track offset.
 
-The full architecture (`LOCALIZATION=coop PERCEPTION=radar NO_FLY_RADIUS_M=50`), 4 level-1 threats, `--rtf 3`:
+The full architecture, now the default (`LOCALIZATION=coop PERCEPTION=radar NO_FLY_RADIUS_M=50`), 4 level-1 threats, `--rtf 3`:
 
 | Drones, conditions | Destroyed | Miss mean | Intercept range mean | Closest to the ship | Position error p95 | NEES |
 |---|---|---|---|---|---|---|
-| 8, original defaults | 4/4 | 0.27 m | 92 m | – | – | – |
+| 8, legacy (truth, lidar, no zone) | 4/4 | 0.27 m | 92 m | – | – | – |
 | 8, calm | 4/4 | 1.15–1.22 m | 104 m | 58.7 m | 0.46–0.53 m | 1.6 |
 | 8, wind | 4/4 | 2.46 m | 103 m | – | 0.57 m | 3.0 |
 | 4 (intercepts on the far side: routes around the zone), calm | 4/4 | 2.47 m | 74 m | **54.9 m** | 0.53 m | 1.5 |
@@ -398,7 +473,7 @@ At 50 drones (25 threats, 1×, `scaling_sweep.py`), after two fixes this compari
 - goals latch only within 0.5 m of their altitude, with vertical braking separate from horizontal. Stacked job-mates had settled 1.5 m apart within the 3 m stop radius;
 - route legs advance once their goal latches. A drone had held 2.9 m from a detour waypoint, outside the 1.5 m leg threshold, and missed its slot by 8.7 m.
 
-| | Original defaults | Full architecture |
+| | Legacy (truth, lidar, no zone) | Full architecture (now the default) |
 |---|---|---|
 | Destroyed | 23/25 | 24/25 |
 | Intercept range mean | 86 m | 100 m |
@@ -407,14 +482,14 @@ At 50 drones (25 threats, 1×, `scaling_sweep.py`), after two fixes this compari
 | Position error p95, NEES | – | 0.42 m, 1.5 |
 | Drone CPU, host CPU | 4.7 %, 2.16 cores | 4.2 %, 1.96 cores |
 
-- **Defaults, T19 and T23:** the losses are chain fire, not localization. In a three-drone stack, one chain-fired mate missed by 8.4–9.5 m: the mates are spread along the track, and chain fire sets them all off when the first one's fuze fires.
-- **Full architecture, T22:** the loss was a late three-drone detection that was never feasible with stations and intercepts outside the zone. Misses are larger than with the original defaults. Stations are farther out, so drones fly longer and arrive with their position known to within about 0.5 m rather than exactly, and the fuze cannot remove a cross-track offset.
+- **Legacy, T19 and T23:** the losses are chain fire, not localization. In a three-drone stack, one chain-fired mate missed by 8.4–9.5 m: the mates are spread along the track, and chain fire sets them all off when the first one's fuze fires.
+- **Full architecture, T22:** the loss was a late three-drone detection that was never feasible with stations and intercepts outside the zone. Misses are larger than with the legacy setup. Stations are farther out, so drones fly longer and arrive with their position known to within about 0.5 m rather than exactly, and the fuze cannot remove a cross-track offset.
 
 ## Proximity fuze
 
-Timed detonation depends on every drone's clock and on the drone sitting exactly on the threat's path. The proximity fuze (`src/agent/fuze.py`, pure and unit-tested, driven by `agent.py`'s `_on_fuze`) detonates when the threat actually passes. It is on by default; `--fuze off` (`FUZE=0`) restores timed detonation.
+Timed detonation depends on every drone's clock and on the drone sitting exactly on the threat's path. The proximity fuze (`src/agent/fuze.py`, pure and unit-tested, driven by `agent.py`'s `_on_contacts`) detonates when the threat actually passes. It is on by default; `--fuze off` (`FUZE=0`) restores timed detonation.
 
-- **Sensor** (simulator, `drone/{id}/fuze`). Unlabelled 3D positions, relative to the drone, of every object within `FUZE_RANGE_M` (10 m): threats, other drones, the nearest point of the ship's hull. Gaussian noise `FUZE_NOISE_M` (0.1 m per axis), rate `FUZE_HZ` (50), latency `FUZE_LATENCY_S` (0). The planar lidar is not used: it only sees at the drone's own altitude. What each contact really was is known only to the evaluation.
+- **Sensor.** By default the mmWave radar (`drone/{id}/radar`): unlabelled 3D positions, relative to the drone, of every object within 30 m (threats, other drones, the nearest point of the ship's hull), at 20 Hz with 5 cm range and 2° angle noise (see [Localization and perception](#localization-and-perception)). The drone's own position uncertainty shifts every contact, so the gate below is widened by 3σ. With the legacy `--perception lidar`, a dedicated fuze sensor (`drone/{id}/fuze`) is used instead: `FUZE_RANGE_M` (10 m), Gaussian noise `FUZE_NOISE_M` (0.1 m per axis), `FUZE_HZ` (50), latency `FUZE_LATENCY_S` (0). What each contact really was is known only to the evaluation.
 - **Tracking.** Contacts are associated from scan to scan (nearest neighbour in world coordinates).
 - **Job-mates.** Objects already in range are recorded as known: the spatial queue keeps non-job drones more than 12 m away, so these are job-mates (or the ship). The record is taken at the first scan at which the job's track puts the threat within range + 2 m of the drone itself, or at arming if that is earlier. At the simulation's threat speeds (2.5–4.5 m/s), the threat is already 5–9 m away when the window opens, inside the 10 m range, and would otherwise be taken for a job-mate. A first version timed the record on the threat's distance to the engagement point; after a manoeuvre a drone had stopped 3 m short of the new point on the threat's side, took the threat for a mate, and held.
 - **Arming.** The fuze fires only during `t_engage ± FUZE_WINDOW_S` (2 s), in the drone's synchronized time.
@@ -426,7 +501,7 @@ Timed detonation depends on every drone's clock and on the drone sitting exactly
 - **Chain fire** (`_on_blast`). A detonation from the same job fires this drone at once if its fuze is armed and it is within 8 m of its slot; otherwise it does not fire, and survives. The detonation topic stands in for a job-selective trigger, and its delivery delay is logged (`chain_delay_s`), not hidden.
 - **Evaluation.** Each `detonation_eval` also records the reason (`fuze`, `chain`, `timed`, `fallback_timed`), the chain delay and who fired first, and, for fuze fires, how far the contact that fired it was from the true threat (`trigger_to_threat_m`, `trigger_is_threat` within 1 m). `/api/summary` adds `det_reasons`, `chain_fires`, `chain_delay_s_*`, `fuze_false_triggers` and `fuze_no_detection`.
 
-Measured (`--rtf 3`, one run each; timing error is the geometric one, see [Distributed clock](#distributed-clock)):
+Measured with the legacy setup and the 10 m fuze sensor (`--rtf 3`, one run each; timing error is the geometric one, see [Distributed clock](#distributed-clock)). With the current defaults, 8 drones and 4 uav: 4/4 by the fuze, misses 1.2 / 2.4 m (mean / max), timing error +0.06 ± 0.09 s:
 
 | Scenario | Fuze | Destroyed | What fired | Timing error (mean ± sd) | Miss mean / max | Other |
 |---|---|---|---|---|---|---|
@@ -645,7 +720,7 @@ What it took, from traced flights:
 
 ### Scaling
 
-Setup: `scaling_sweep.py`. N drones face N/2 threats (default type mix), detected every 240/N sim seconds, so the load per drone stays about the same. Each size runs at the fastest speed the host could sustain (6 cores, 15 GB). Needs the [ARP limit](#quick-start) raised above ~30 drones.
+Setup: `scaling_sweep.py`. The table was measured with the legacy setup (truth, lidar, no zone); the current defaults are profiled after it. N drones face N/2 threats (default type mix), detected every 240/N sim seconds, so the load per drone stays about the same. Each size runs at the fastest speed the host could sustain (6 cores, 15 GB). Needs the [ARP limit](#quick-start) raised above ~30 drones.
 
 | Drones | Speed (target → achieved) | Host CPU | Drone CPU per 1× | Gazebo CPU | Worst loop (p99) | Oldest sensor frame | Msgs/s received per drone | Msgs/s at ship | Outcome |
 |---|---|---|---|---|---|---|---|---|---|
@@ -723,8 +798,8 @@ Where each implemented feature lives.
 | **Hardware** | device-class record and derived simulation parameters | `hardware/hardware.json`, `src/common/hardware.py` |
 | **Simulator** | physics: blasts at true positions, friendly fire, `sim/truth` | `GazeboSimulator.cpp` (`on_detonate`, `on_job`, `apply_detonations`, `publish_truth`) |
 | | Gazebo bridge: kinematic integration from `cmd_vel`, spawn/despawn | `sim/GazeboSimulator.cpp/.hpp`, `sim/simulator_main.cpp` |
-| | sim clock extrapolated between Gazebo's 5 Hz stats; pose 50 Hz, lidar 10 Hz (per sim second, at any `SIM_RTF`) | `GazeboSimulator.cpp` (`estimated_sim_time`, `step`) |
-| | planar 32-ray lidar (ship + other drones), compact scan | `GazeboSimulator.cpp` (`simulate_lidar`) |
+| | sim clock extrapolated between Gazebo's 5 Hz stats; pose 50 Hz, radar 20 Hz, UWB 2 Hz (per sim second, at any `SIM_RTF`) | `GazeboSimulator.cpp` (`estimated_sim_time`, `step`) |
+| | legacy planar 32-ray lidar (ship + other drones), compact scan (`PERCEPTION=lidar`) | `GazeboSimulator.cpp` (`simulate_lidar`) |
 | | threat models (by type) moved along the ship's tracks | `GazeboSimulator.cpp` (`generate_threat_sdf`, `on_threat_track`, `move_threat_markers`) |
 | | quadcopter drone model; model deletion (despawn, destroyed threats) | `GazeboSimulator.cpp` (`generate_drone_sdf`, `delete_model`) |
 | | world: ocean, lighting, frigate (~31 m, sized to the simulator's 16 m ship radius) | `sim/ocean.world` |
@@ -741,7 +816,7 @@ Where each implemented feature lives.
 | | instrumentation aggregation, event log (`/state/ship_log.jsonl`), HTTP/SSE API | `ship.py` (`snapshot`, `make_handler`) |
 | | operator dashboard (map, heap queue, approval, swarm table, radio, events) | `src/ship/dashboard.html` |
 | **Drone** | agent lifecycle, ID allocation, SIGTERM | `src/agent/main.py` |
-| | perception: voxel map, occupied index, batched ray tracing, expiry | `src/agent/voxel_map.py`, `agent.py` (`_process_lidar`) |
+| | legacy perception (`PERCEPTION=lidar`): voxel map, occupied index, batched ray tracing, expiry; loaded only in that mode | `src/agent/voxel_map.py`, `agent.py` (`_process_lidar`) |
 | | planners (APF, ORCA) | `src/agent/path_planning.py` |
 | | 50 Hz control loop, safety envelope, arrival latch | `agent.py` (`_reflex_control_loop`) |
 | | sim-time / wall-time handling | `src/agent/timing.py` |
@@ -761,12 +836,12 @@ Where each implemented feature lives.
 | | cooperative localization: neighbour table, anchor-time chains, peer fusion | `src/agent/coop.py` |
 | | drone integration, station keeping against wind | `agent.py` (`_loc_predict`, `_on_uwb`, `_send_uwb_tx`, `_reflex_control_loop`) |
 | | evaluation: errors, NEES, separations | `src/metrics/main.py` (`_on_loc`, `_loc_summary`) |
-| **Perception** | mmWave radar (`PERCEPTION=radar`), lidar off | `GazeboSimulator.cpp` (`configure_fuze`, `publish_fuze`) |
+| **Perception** | mmWave radar (default; lidar off) | `GazeboSimulator.cpp` (`configure_fuze`, `publish_fuze`) |
 | | radar contacts -> planner obstacles | `src/agent/radar_obstacles.py`, `agent.py` (`_on_contacts`) |
 | **No-fly zone** | routes around the ship's zone, intercepts outside it; planner barrier with 2σ margin; stations outside | `deconflict.py` (`detour`, `plan_route`, `choose_intercept`), `path_planning.py`, `ship.py` (`engage_radius`), `generate_swarm_config.py` (`--no-fly`) |
 | **Fuze** | fuze sensor: unlabelled contacts with noise and latency | `GazeboSimulator.cpp` (`configure_fuze`, `publish_fuze`, `flush_fuze`) |
 | | fuze logic: tracking, mate record, arming, gate, firing rules, fallback | `src/agent/fuze.py` |
-| | drone: fuze scans, detonation (once), chain fire, fallback | `agent.py` (`_on_fuze`, `_fuze_decision`, `_detonate`, `_on_mate_blast`, `_check_engagement`) |
+| | drone: fuze scans, detonation (once), chain fire, fallback | `agent.py` (`_on_contacts`, `_fuze_decision`, `_detonate`, `_on_mate_blast`, `_check_engagement`) |
 | | ship: reason, trigger label, chain delay, no-detection count | `ship.py` (`_evaluate_detonation`, `_on_award`, `summary`) |
 | **Tests / tools** | unit tests and validation scripts | `tests/` (see [Testing](#testing)) |
 | | degraded-comms probes, radio cut, chaos, stand-in operator, radio degradation, sweep | `tools/comms/` |
@@ -775,13 +850,13 @@ Where each implemented feature lives.
 
 `src/agent/agent.py`:
 
-1. **Eyes: `voxel_map.py`.**
-   - A sparse 3D occupancy grid with 0.5 m voxels.
-   - Each lidar scan is ray-traced in one vectorized batch.
-   - Occupied voxels are indexed separately, so obstacle queries touch only those (about 0.01 ms).
-   - Voxels expire after 0.5 s, cleaned up incrementally batch by batch.
-2. **Reflexes: `path_planning.py` and the 50 Hz loop.**
-   - Planning uses APF or ORCA against the voxels and the ship.
+1. **Position: `localization.py`, `coop.py`.** An EKF on position, velocity and wind, predicted with the commanded velocity and corrected by UWB ranges to the ship's anchors and, out of their reach, to peers with fresher anchor chains. Its uncertainty (σ) widens the no-fly barrier, the fuze gate and the intruder check. See [Localization and perception](#localization-and-perception).
+2. **Eyes: `radar_obstacles.py`.**
+   - Radar contacts become planar obstacle points: 32 rays, each contact a 3 m circle at the drone's altitude, ship returns dropped.
+   - Updated only while the drone has a goal; points expire.
+   - The legacy lidar mode uses `voxel_map.py` instead: a sparse 0.5 m occupancy grid, ray-traced in vectorized batches, with expiry.
+3. **Reflexes: `path_planning.py` and the 50 Hz loop.**
+   - Planning uses APF (default) or ORCA against the obstacle points, the ship and the no-fly zone.
    - The loop then applies:
      - a floor/ceiling guard,
      - damping near obstacles,
@@ -789,11 +864,11 @@ Where each implemented feature lives.
      - a braking envelope,
      - acceleration and speed limits.
 
-     Arrival latches and the drone holds position.
-   - An untasked drone keeps sending zero velocity, so it holds.
-3. **Timing: `timing.py`.** Simulation time drives the physics integration. Wall-clock time drives sensor freshness. If sensor data is stale, the drone commands zero velocity.
-4. **Engagement: `auction.py` + `src/common/threats.py`.** Covers bidding, assignment, slots, and the detonation time. See [Engagement protocol](#engagement-protocol).
-5. **Telemetry: `telemetry.py`.**
+     Arrival latches (within 0.5 m of the goal's altitude) and the drone holds position, re-approaching if wind pushes it more than 1 m beyond where it latched.
+   - An untasked drone holds station: zero velocity, and back to its hold point after drifting 1 m.
+4. **Timing: `timing.py`.** Simulation time drives the physics integration. Wall-clock time drives sensor freshness. If sensor data is stale, the drone commands zero velocity.
+5. **Engagement: `auction.py` + `src/common/threats.py` + `fuze.py`.** Covers bidding, assignment, slots, the detonation time and the proximity fuze. See [Engagement protocol](#engagement-protocol).
+6. **Telemetry: `telemetry.py`.**
 
 ## Configuration
 
@@ -825,9 +900,9 @@ Devices marked `"simulated": false` are recorded for hardware deployment but not
 
 Simulation speed (env): `SIM_RTF` (1), set by `--rtf`.
 
-Ship no-fly zone (env): `NO_FLY_RADIUS_M` (0 = off; `--no-fly R`, which also moves stations to R+5 … R+45 m).
+Ship no-fly zone (env): `NO_FLY_RADIUS_M` (50; 0 = off, stations at 30–45 m; `--no-fly R`, which also moves stations to R+5 … R+45 m).
 
-Localization and perception (env): `PERCEPTION` (`lidar`|`radar`, `--perception`), `LOCALIZATION` (`truth`|`anchors`|`coop`, `--localization`), `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensor and environment parameters are in the [hardware record](#hardware-record).
+Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `anchors`, or legacy `truth`; `--localization`), `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensor and environment parameters are in the [hardware record](#hardware-record).
 
 Proximity fuze (env): `FUZE` (1; 0 = timed detonation), `FUZE_WINDOW_S` (2), `FUZE_GATE_M` (5), `FUZE_FIRE` (`cpa`), `FUZE_FALLBACK` (`hold`), and for the simulator's sensor `FUZE_RANGE_M` (10, drones too), `FUZE_HZ` (50), `FUZE_NOISE_M` (0.1), `FUZE_LATENCY_S` (0), `FUZE_SEED` (0). See [Proximity fuze](#proximity-fuze).
 
@@ -859,7 +934,7 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_ship_track.py` | radar track: truth vs ship-time view, true closest approach; ship time attributes set at start (needs zenoh installed) |
 | `test_timesync.py` | exchange arithmetic and asymmetry bias; ship-master filter: convergence under drift and offset, holdover on the rate, jitter and delay spikes, bound covers a constant asymmetry, congested start, corrupt exchange (negative round trip) discarded, re-acquisition after a wrong lock; time-to-go anchoring |
 | `test_consensus.py` | ship-anchored consensus on a simulated network: converges to ship time with ±500 ppm / ±3 s, learns rates, works through a chain of peers, keeps agreeing and holds ship time with the ship lost (bound grows with time only), congested start then ship loss, fast start by stepping, late unsynced joiner, echoes measure link delay, anchors count hops, bad ship exchanges filtered, pluggable aggregator |
-| `test_voxel_map_batch.py` | batched ray tracing, occupied index vs. brute force, incremental expiry, clock reset |
+| `test_voxel_map_batch.py` | legacy voxel map: batched ray tracing, occupied index vs. brute force, incremental expiry, clock reset |
 | `test_apf.py`, `test_orca_vertical_filter.py` | planner force bounds, ORCA vertical envelope |
 | `test_timing_manager.py`, `test_time_handling.py` | timing states |
 | `test_simclock.py` | protocol clock follows the measured sim rate, never goes backwards, survives restarts; `truth_now` extrapolation |
@@ -875,9 +950,11 @@ scripts/run_swarm.sh    launcher;  scripts/generate_swarm_config.py
 sim/                    GazeboSimulator (C++ bridge, kinematics, markers), simulator_main.cpp, ocean.world
 src/common/             threat model and geometry (threats.py), Zenoh links (links.py), radio process (radio_process.py),
                         spatial queue (deconflict.py), jobs (jobs.py), clocks (simclock.py, localclock.py, timesync.py)
-src/agent/              drone: agent, auction, planners, voxel map, timing, telemetry
+src/agent/              drone: agent, localization (EKF) and coop, radar obstacles, fuze, auction, planners, timing,
+                        telemetry; legacy voxel map
+hardware/hardware.json  device-class record: every simulation parameter comes from it
 src/ship/               ship C2 (ship.py), threat min-heap (threat_queue.py), dashboard.html
-src/metrics/main.py     metrics node (collisions, distance)
+src/metrics/main.py     metrics node (truth vs estimates, separations, distance)
 tests/                  unit tests and validation scripts
 tools/comms/            degraded-comms probes, radio cut helper, chaos script, stand-in operator
 ```
@@ -886,7 +963,7 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 - **Localization is optimistic.** The drones' motion model is the simulator's exact command response, and wind is the only disturbance. On hardware the response must be identified and is only approximately known. Ultra-wideband (UWB) ranges have no blocked-path or multipath model, and the radar has no clutter or false alarms.
 - **No consistent fusion between unanchored drones.** Peers are used only along fresh anchor chains. With every anchor jammed, drones dead-reckon independently (their uncertainty grows honestly), and peer ranges keep nobody's estimate tight. Recursive decentralized localization (RDL), which tracks cross-covariances with pairwise exchanges, is the planned fix.
 - **Station keeping in wind.** Drones latch up to 3 m from their goal, then drift downwind until they re-approach: 2.6–2.9 m misses in a 0.5 m/s wind, with true positions too. Continuous position hold would remove most of it.
-- **Not yet done:** the planned speed retune (`speed_scale` 0.2–0.4, threats faster) and 1 km threat detection. The full architecture is behind switches; the defaults are still the original truth, lidar and no zone.
+- **Not yet done:** the planned speed retune (`speed_scale` 0.2–0.4, threats faster) and 1 km threat detection.
 - **Routes around the no-fly zone are timed conservatively:** each detour waypoint is planned from rest, so ETAs over-estimate.
 - **Chain-fire delay.** A real mate-to-mate trigger such as a barometric shock travels at about the speed of sound: ~17 ms across a 6 m stack, which lets a fast threat escape. A barometric trigger would also respond to unrelated blasts. The simulation uses the detonation topic as an idealized, job-selective trigger (measured delivery 1.5–32 ms at `--rtf 3`).
 - **Closing-speed discrimination.** Closing speed would separate threats from drones only at real speeds, not at the simulation's scaled ones, so the fuze does not use it.
@@ -906,5 +983,5 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 - **Idealized threats.** They fly straight lines at constant speed, apart from at most one optional turn, and a detonation within the kill radius always kills (no kill probability).
 - **Re-planning after a manoeuvre uses the job's own drones only.** The ship re-picks the intercept point for them, falling back to the legacy point (closest approach or 45 m crossing) if none fits, which with 1 s of slack was never needed in the runs so far. It doesn't bring in closer free drones.
 - **Greedy assignment.** Orders are assigned per order, highest level first, not globally optimized. A drone waiting on one order's result skips any other order that arrives before that result.
-- **Planar perception.** The lidar is 2D, and voxels are placed at the drone's own altitude. ORCA uses greedy projection, not a full linear program.
+- **Planar perception.** Radar contacts (like the legacy lidar) become obstacle points at the drone's own altitude, so avoidance is 2D; the fuze uses the full 3D contacts. ORCA uses greedy projection, not a full linear program.
 - **No security.** Radio traffic is unauthenticated: a forged order or bid would be acted on.

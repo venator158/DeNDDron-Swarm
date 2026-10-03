@@ -45,8 +45,8 @@ services:
     environment:
       ZENOH_ROUTER_IP: tcp/${SIM_BUS_IP:-172.20.0.2}:7447
       SIM_RTF: ${SIM_RTF:-1}
-      PERCEPTION: ${PERCEPTION:-lidar}                    # lidar | radar (hardware record's mmWave radar)
-      LOCALIZATION: ${LOCALIZATION:-truth}                # truth | anchors | coop (UWB, hardware record)
+      PERCEPTION: ${PERCEPTION:-radar}                    # radar (hardware record's mmWave radar) | lidar (legacy)
+      LOCALIZATION: ${LOCALIZATION:-coop}                 # coop | anchors | truth (UWB, hardware record)
       UWB_JAM: ${UWB_JAM:-}
       # Proximity fuze sensor (drone/{id}/fuze); FUZE=0 turns it off
       FUZE: ${FUZE:-1}
@@ -106,8 +106,8 @@ services:
       CLOCK_LEADER_SHARE: ${CLOCK_LEADER_SHARE:-0.5}
       CLOCK_AGGREGATE: ${CLOCK_AGGREGATE:-mean}
       CLOCK_STEP_S: ${CLOCK_STEP_S:-0.05}
-      PERCEPTION: ${PERCEPTION:-lidar}                    # obstacle avoidance from lidar + voxel map, or radar
-      LOCALIZATION: ${LOCALIZATION:-truth}                # truth | anchors | coop (UWB, hardware record)
+      PERCEPTION: ${PERCEPTION:-radar}                    # obstacle avoidance from the radar, or lidar + voxel map (legacy)
+      LOCALIZATION: ${LOCALIZATION:-coop}                 # coop | anchors | truth (UWB, hardware record)
       UWB_JAM: ${UWB_JAM:-}
       # Proximity fuze (src/agent/fuze.py); FUZE=0 = timed detonation at t_engage
       FUZE: ${FUZE:-1}
@@ -166,7 +166,7 @@ services:
       AUTO_APPROVE: ${AUTO_APPROVE:-0}                    # ship approves feasible threats itself (dashboard toggle)
       AUTO_APPROVE_REACTION_S: ${AUTO_APPROVE_REACTION_S:-3}
       INTERCEPT_MAX_RANGE_M: ${INTERCEPT_MAX_RANGE_M:-140}
-      NO_FLY_RADIUS_M: ${NO_FLY_RADIUS_M:-0}             # ship no-fly zone (0: off); intercepts stay 5 m outside
+      NO_FLY_RADIUS_M: ${NO_FLY_RADIUS_M:-50}            # ship no-fly zone (0: off); intercepts stay 5 m outside
       SHIP_CLOCK_DRIFT_PPM: ${SHIP_CLOCK_DRIFT_PPM:-0}
       SHIP_CLOCK_OFFSET_S: ${SHIP_CLOCK_OFFSET_S:-0}
       SHIP_CLOCK_JITTER_S: ${SHIP_CLOCK_JITTER_S:-0}

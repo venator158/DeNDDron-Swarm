@@ -156,7 +156,7 @@ def main():
     parser.add_argument("--max-radius", type=float, default=45.0, help="Maximum distance from center")
     parser.add_argument("--min-separation", type=float, default=8.0, help="Minimum spacing between agents")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducible layouts")
-    parser.add_argument("--no-fly", type=float, default=0.0,
+    parser.add_argument("--no-fly", type=float, default=50.0,
                         help="ship no-fly zone radius (m): planners keep out, stations at R+5..R+45 m (0: off)")
     parser.add_argument("--no-goals", action="store_true",
                         help="Omit static goals; drones hold station until tasked (threat scenario)")

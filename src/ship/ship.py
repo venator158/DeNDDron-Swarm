@@ -1060,7 +1060,7 @@ def main():
                     help="probability that a threat turns once, re-aiming past the ship")
     ap.add_argument("--defended-radius", type=float, default=_env("DEFENDED_RADIUS_M", 45.0, float))
     ap.add_argument("--kill-radius", type=float, default=_env("KILL_RADIUS_M", 8.0, float))
-    ap.add_argument("--no-fly", type=float, default=_env("NO_FLY_RADIUS_M", 0.0, float),
+    ap.add_argument("--no-fly", type=float, default=_env("NO_FLY_RADIUS_M", 50.0, float),
                     help="ship no-fly zone radius (m, 0: off)")
     ap.add_argument("--log-path", default=os.environ.get("SHIP_LOG", "/state/ship_log.jsonl"))
     args = ap.parse_args()

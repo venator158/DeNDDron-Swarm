@@ -748,7 +748,8 @@ void GazeboSimulator::configure_fuze() {
     _fuze_latency = std::max(0.0, env_double("FUZE_LATENCY_S", 0.0));
     _fuze_rng.seed(static_cast<unsigned>(env_double("FUZE_SEED", 0.0)));
     const char* perception = std::getenv("PERCEPTION");
-    _radar_mode = perception != nullptr && std::strcmp(perception, "radar") == 0;
+    // radar unless the legacy lidar is asked for
+    _radar_mode = perception == nullptr || std::strcmp(perception, "lidar") != 0;
     if (_radar_mode) {
         try {
             const json& r = _hw.at("radar");
@@ -904,7 +905,7 @@ double round_mm(double v) { return std::round(v * 1000.0) / 1000.0; }
 
 void GazeboSimulator::configure_localization() {
     const char* mode = std::getenv("LOCALIZATION");
-    _loc_mode = (mode != nullptr && std::strlen(mode) > 0) ? mode : "truth";
+    _loc_mode = (mode != nullptr && std::strlen(mode) > 0) ? mode : "coop";
     if (_loc_mode == "truth") return;
     try {
         const json& u = _hw.at("uwb");
