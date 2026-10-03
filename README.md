@@ -664,6 +664,19 @@ All sizes: no re-announces, no conflicts, full agreement on assignments, decisio
   - Expended drones close their radio 1 s after detonating.
 
   At 50 drones, CPU per drone fell from 6.9% to 3.9%. Host CPU fell from 3.1 to 1.9 cores, control-loop overruns from 3,064 to 40, and the simulator reached 0.98× real time.
+- **Profile, full architecture (radar, cooperative UWB, no-fly zone; 50 drones, 25 threats, 1×).** The whole swarm used 1.8 cores: drones 1.31, Gazebo 0.31, the simulator's Zenoh router 0.11, ship 0.04, metrics node 0.01. Per drone, from per-thread CPU over 33 s mid-run:
+
+  | Drone state | Total | Control loop (50 Hz) | Zenoh callbacks and radio relay | Zenoh native threads | Radio process | Heartbeat |
+  |---|---|---|---|---|---|---|
+  | idle (30 drones) | 3.6 % (3.2–4.0) | 0.8 | 0.8 | 0.5 | 1.3 | 0.1 |
+  | tasked (engaging, on station, bidding) | 3.4–4.1 % | 0.8–1.2 | 0.6–0.7 | 0.5 | 1.3–1.6 | 0.1 |
+  | expended | 0.04 % | – | – | – | – | – |
+
+  - **Almost all of it is fixed runtime overhead.** It goes to the two Zenoh sessions (onboard, and the radio in its own process) and to waking the 50 Hz control loop and the callback threads, so a tasked drone costs about the same as an idle one.
+  - **The algorithms barely register.** py-spy, counting only threads that were not blocked, saw Python code running for about 0.5% of a core per drone. Localization, coop fusion, radar obstacles, fuze and planner were each under 0.1% of a core.
+  - **Where the next saving is:** fewer idle wake-ups (a slower control loop or radio process while idle). Algorithmic work has nothing left worth optimizing.
+
+  How it was measured: `utime + stime` of every thread in `/proc/*/task/*/stat` inside each container, read twice 30 s apart (`docker exec`); py-spy from an image built `FROM denddron-swarm-agent` with `pip install py-spy`, run with `--pid=container:<id> --cap-add SYS_PTRACE` in blocking mode. In `--nonblocking` mode py-spy cannot tell blocked threads from busy ones and reports every waiting thread as busy. Host `perf` needs `kernel.perf_event_paranoid` ≤ 2, so Gazebo and the native Zenoh threads were not profiled below the thread level.
 - **The two remaining misses are geometry, not load.** In every 50-drone run the same drones miss the same threats by the same distances: drone_40 on T7 by 8.3–8.7 m, drone_48 on T22 by 10.4–11 m. That was true before and after the CPU fixes, so it isn't CPU starvation, as first assumed. It's probably an optimistic ETA bid or crowding on the way; it still needs investigating.
 
 ### Tools (`tools/comms/`)
@@ -689,9 +702,9 @@ Every drone sends `swarm/telemetry/{id}` once a second, covering the last second
 | `cpu_pct` | process CPU |
 | `loop_hz`, `loop_p50_ms`, `loop_p99_ms`, `loop_work_p99_ms`, `overruns` | control loop timing, real time (50·`SIM_RTF` Hz). An overrun is a tick longer than 1.5 × the period. |
 | `sensor_age_p50_ms`, `sensor_age_max_ms` | age of the newest onboard sensor frame, sampled every tick |
-| `perception_p99_ms`, `planner_p99_ms` | lidar processing per scan; planner per tick |
+| `perception_p99_ms`, `planner_p99_ms` | lidar or radar processing per scan; planner per tick |
 | `rx_per_s`, `tx_per_s`, `tx_bytes_per_s` | radio messages per topic, and bytes sent, per simulated second |
-| `peers_heard`, `voxels` | peers heard from (bids, awards, help, clock beacons) in the last 3 s; voxel map size |
+| `peers_heard`, `voxels` | peers heard from (bids, awards, help, clock beacons) in the last 3 s; voxel map size (radar: obstacle points held) |
 | `clock` | clock sync state (only with a sync mode or an imperfect clock): mode, estimated offset, own error bound; with `consensus` also hops to the ship and whether it hears the ship. The ship adds the true error from `sim/clock_eval` (`clock_err_ms`, see [Distributed clock](#distributed-clock)) |
 
 The ship adds per-topic radio receive rates, per-threat decision latency (approval → first and last award), and an event log. Events also go to `/state/ship_log.jsonl` in the `swarm_state` volume, for offline analysis, with each detonation's timing evaluation (`detonation_eval`, see [Distributed clock](#distributed-clock)). Every event carries truth (`sim_time`) and ship time (`ship_time`). The metrics node logs positions, distance flown and collisions (under 2.5 m).
