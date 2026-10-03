@@ -294,7 +294,9 @@ def run_jobs(jobs, parallel, base_instance=0):
         return list(pool.map(on_instance, jobs))
 
 
-def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, inst=DEFAULT_INST):
+def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, inst=DEFAULT_INST, hook=None):
+    """hook(env, inst, rundir), if given, runs once the swarm is up and returns a cleanup callable (or None):
+    timed impairments such as a ship outage (sensing_sweep.py)."""
     rundir = outdir / (name or f"{profile}_{cond}_r{rep}")
     rundir.mkdir(parents=True, exist_ok=True)
     rtf = args.rtf
@@ -315,6 +317,7 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
          "--maneuver-p", f"{getattr(args, 'maneuver_p', 0.0):g}"],
         cwd=REPO, env=env, stdout=swarm_log, stderr=subprocess.STDOUT)
     bot = None
+    cleanup = None
     summary = {}
     sampler = Sampler(getattr(args, "sample_s", 10.0), inst) if getattr(args, "sample", False) else None
     startup_s = None
@@ -330,6 +333,8 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
         if applied:
             subprocess.run([str(HERE / "degrade_radio.sh"), "apply", applied], check=True, env=env,
                            stdout=subprocess.DEVNULL)
+        if hook:
+            cleanup = hook(env, inst, rundir)
         if not auto:
             bot = subprocess.Popen([sys.executable, str(HERE / "operator_bot.py"), f"{args.reaction / rtf:g}",
                                     f"{args.timeout / rtf:g}", f"{1.0 / rtf:g}"], env=env,
@@ -351,6 +356,8 @@ def run_one(args, profile, cond, netem, rep, outdir, name=None, extra_env=None, 
             sampler.stop()
         if bot:
             bot.terminate()
+        if cleanup:
+            cleanup()
         if applied:
             subprocess.run([str(HERE / "degrade_radio.sh"), "clear"], stdout=subprocess.DEVNULL, env=env)
         compose_down(inst)

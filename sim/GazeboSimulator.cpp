@@ -763,9 +763,17 @@ void GazeboSimulator::configure_fuze() {
             std::cerr << "[GazeboSimulator] radar parameters missing from the hardware record: " << e.what() << std::endl;
         }
         _contact_topic = "radar";
+        // Degradation for sweeps: true sensor worse than the record (drones still assume the record).
+        _radar_range_sigma = std::max(0.0, env_double("RADAR_RANGE_SIGMA_M", _radar_range_sigma));
+        _radar_az_sigma = std::max(0.0, env_double("RADAR_AZ_SIGMA_DEG", _radar_az_sigma * 180.0 / M_PI)) * M_PI / 180.0;
+        _radar_el_sigma = std::max(0.0, env_double("RADAR_EL_SIGMA_DEG", _radar_el_sigma * 180.0 / M_PI)) * M_PI / 180.0;
+        _fuze_latency = std::max(0.0, env_double("RADAR_LATENCY_S", _fuze_latency));
+        _radar_miss_p = std::clamp(env_double("RADAR_MISS_P", 0.0), 0.0, 1.0);
+        _radar_clutter = std::max(0.0, env_double("RADAR_CLUTTER", 0.0));
         std::cout << "[GazeboSimulator] Perception: mmWave radar " << _fuze_range << " m, " << 1.0 / _fuze_period
                   << " Hz, range sigma " << _radar_range_sigma << " m, angle sigma "
-                  << _radar_az_sigma * 180.0 / M_PI << " deg; lidar off" << std::endl;
+                  << _radar_az_sigma * 180.0 / M_PI << " deg, latency " << _fuze_latency << " s, miss p "
+                  << _radar_miss_p << ", clutter " << _radar_clutter << "/scan; lidar off" << std::endl;
     }
     std::cout << "[GazeboSimulator] Proximity fuze " << (_fuze_on ? "on" : "off") << ": range " << _fuze_range
               << " m, " << 1.0 / _fuze_period << " Hz, noise " << _fuze_noise << " m, latency " << _fuze_latency
@@ -798,6 +806,22 @@ void GazeboSimulator::publish_fuze(double sim_time, const std::vector<std::strin
             // nearest point of the hull, at the drone's altitude
             const double k = ship_radius / r_xy;
             seen.push_back(ignition::math::Vector3d(me.X() * k, me.Y() * k, me.Z()) - me);
+        }
+        if (_radar_mode && _radar_miss_p > 0.0) {
+            std::uniform_real_distribution<double> uni(0.0, 1.0);
+            seen.erase(std::remove_if(seen.begin(), seen.end(), [&](const auto&) { return uni(_fuze_rng) < _radar_miss_p; }),
+                       seen.end());
+        }
+        if (_radar_mode && _radar_clutter > 0.0) {
+            // false alarms: uniform in the radar's sphere; added after noise below would be the same, so before
+            std::poisson_distribution<int> count(_radar_clutter);
+            std::uniform_real_distribution<double> uni(-1.0, 1.0);
+            for (int n = count(_fuze_rng); n > 0;) {
+                ignition::math::Vector3d c(uni(_fuze_rng), uni(_fuze_rng), uni(_fuze_rng));
+                if (c.Length() > 1.0 || c.Length() < 1e-3) continue;
+                seen.push_back(c * _fuze_range);
+                --n;
+            }
         }
         json objects = json::array();
         for (const auto& rel : seen) {
@@ -922,6 +946,12 @@ void GazeboSimulator::configure_localization() {
         std::cerr << "[GazeboSimulator] UWB parameters missing from the hardware record: " << e.what() << std::endl;
     }
     _uwb_rng.seed(static_cast<unsigned>(env_double("UWB_SEED", 1.0)));
+    // Degradation for sweeps: the radio environment is worse than the record (drones keep the record's sigma).
+    _uwb_extra_sigma = std::max(0.0, env_double("UWB_EXTRA_SIGMA_M", 0.0));
+    _uwb_nlos_p = std::clamp(env_double("UWB_NLOS_P", 0.0), 0.0, 1.0);
+    _uwb_nlos_bias = std::max(0.0, env_double("UWB_NLOS_BIAS_M", 1.0));
+    _uwb_dropout = std::clamp(env_double("UWB_DROPOUT_P", _uwb_dropout), 0.0, 1.0);
+    _uwb_range = std::max(0.0, env_double("UWB_MAX_RANGE_M", _uwb_range));
     if (const char* jam = std::getenv("UWB_JAM"); jam != nullptr) {
         std::stringstream ss(jam);
         std::string item;
@@ -943,7 +973,8 @@ void GazeboSimulator::configure_localization() {
     std::cout << "[GazeboSimulator] Localization " << _loc_mode << ": x,y withheld; UWB " << _anchors.size()
               << " anchors, sigma " << _uwb_sigma << " m, max range " << _uwb_range << " m, anchors every "
               << _uwb_anchor_period << " s, peers every " << _uwb_peer_period << " s (max " << _uwb_max_peers
-              << "), " << _uwb_jam.size() << " jam window(s)" << std::endl;
+              << "), " << _uwb_jam.size() << " jam window(s); dropout " << _uwb_dropout << ", extra sigma "
+              << _uwb_extra_sigma << " m, NLOS p " << _uwb_nlos_p << " (bias mean " << _uwb_nlos_bias << " m)" << std::endl;
 }
 
 void GazeboSimulator::configure_environment() {
@@ -1003,7 +1034,14 @@ void GazeboSimulator::publish_uwb(double sim_time, const std::vector<std::string
         load += static_cast<double>(pos.size()) * _uwb_max_peers / _uwb_peer_period;
     const double p_overload = load > _uwb_capacity ? 1.0 - _uwb_capacity / load : 0.0;
     std::uniform_real_distribution<double> uni(0.0, 1.0);
-    std::normal_distribution<double> noise(0.0, _uwb_sigma);
+    std::normal_distribution<double> gauss(0.0, std::sqrt(_uwb_sigma * _uwb_sigma + _uwb_extra_sigma * _uwb_extra_sigma));
+    std::exponential_distribution<double> nlos(_uwb_nlos_bias > 0.0 ? 1.0 / _uwb_nlos_bias : 1.0);
+    // measurement error: noise, plus a positive non-line-of-sight bias (a longer, reflected path)
+    auto noise = [&](std::mt19937&) {
+        double e = gauss(_uwb_rng);
+        if (_uwb_nlos_p > 0.0 && uni(_uwb_rng) < _uwb_nlos_p) e += nlos(_uwb_rng);
+        return e;
+    };
     auto lost = [&]() { return uni(_uwb_rng) < _uwb_dropout || uni(_uwb_rng) < p_overload; };
     for (const auto& [id, me] : pos) {
         json out = {{"sim_time", sim_time}, {"anchors", json::array()}, {"peers", json::array()}};

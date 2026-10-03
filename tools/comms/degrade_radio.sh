@@ -10,7 +10,9 @@
 #
 #   netem args, e.g.:  "loss 10%"   "delay 200ms 50ms"   "rate 64kbit"   "loss 5% delay 100ms rate 256kbit"
 #   containers default to every drone and the ship of the running swarm.
-#   env: SWARM_INSTANCE (default 0) picks the swarm; RADIO_SUBNET overrides its radio subnet.
+#   env: SWARM_INSTANCE (default 0) picks the swarm; RADIO_SUBNET overrides its radio subnet;
+#        DST_IP impairs only UDP sent to that address (e.g. the drones' traffic to the ship).
+#   netem shapes what a container sends; to impair a link both ways, apply it at both ends.
 set -eu
 MODE=$1; shift
 ARGS=""
@@ -47,7 +49,7 @@ for c in "${CONTAINERS[@]}"; do
     docker run -i --rm --net "container:$c" --cap-add NET_ADMIN gaiadocker/iproute2 -batch - <<TC
 qdisc add dev $IF root handle 1: prio bands 3 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 qdisc add dev $IF parent 1:3 handle 30: netem $ARGS
-filter add dev $IF parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff flowid 1:3
+filter add dev $IF parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff ${DST_IP:+match ip dst $DST_IP/32 }flowid 1:3
 TC
   else
     docker run --rm --net "container:$c" --cap-add NET_ADMIN gaiadocker/iproute2 \

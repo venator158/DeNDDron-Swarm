@@ -48,6 +48,19 @@ services:
       PERCEPTION: ${PERCEPTION:-radar}                    # radar (hardware record's mmWave radar) | lidar (legacy)
       LOCALIZATION: ${LOCALIZATION:-coop}                 # coop | anchors | truth (UWB, hardware record)
       UWB_JAM: ${UWB_JAM:-}
+      UWB_SEED: ${UWB_SEED:-}
+      # Sensing degradation (tools/comms/sensing_sweep.py): empty = the hardware record; drones keep assuming it
+      UWB_EXTRA_SIGMA_M: ${UWB_EXTRA_SIGMA_M:-}
+      UWB_NLOS_P: ${UWB_NLOS_P:-}
+      UWB_NLOS_BIAS_M: ${UWB_NLOS_BIAS_M:-}
+      UWB_DROPOUT_P: ${UWB_DROPOUT_P:-}
+      UWB_MAX_RANGE_M: ${UWB_MAX_RANGE_M:-}
+      RADAR_RANGE_SIGMA_M: ${RADAR_RANGE_SIGMA_M:-}
+      RADAR_AZ_SIGMA_DEG: ${RADAR_AZ_SIGMA_DEG:-}
+      RADAR_EL_SIGMA_DEG: ${RADAR_EL_SIGMA_DEG:-}
+      RADAR_MISS_P: ${RADAR_MISS_P:-}
+      RADAR_CLUTTER: ${RADAR_CLUTTER:-}
+      RADAR_LATENCY_S: ${RADAR_LATENCY_S:-}
       # Proximity fuze sensor (drone/{id}/fuze); FUZE=0 turns it off
       FUZE: ${FUZE:-1}
       FUZE_HZ: ${FUZE_HZ:-50}
