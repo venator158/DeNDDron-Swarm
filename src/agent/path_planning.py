@@ -53,6 +53,11 @@ class APFStrategy(PathPlanningStrategy):
 
         self.max_repulsive_force = 10.0
         self.goal_repulsion_fade_m = 10.0   # repulsion fades to zero over the last 10 m to the goal
+        # Ship no-fly zone (radius from the centre; None: only the old keep-out above).  The barrier
+        # repels from the zone's boundary, pushed out by ship_margin (the agent sets it to 2 sigma of
+        # its own position uncertainty).
+        self.no_fly_radius = None
+        self.ship_margin = 0.0
         # Internal state.
         self.prev_v_total = np.zeros(3, dtype=float)
         self.last_pos = None
@@ -90,6 +95,7 @@ class APFStrategy(PathPlanningStrategy):
         self.braking_radius = float(config["braking_radius"])
         self.ship_keepout_radius = float(config["ship_keepout_radius"])
         self.ship_influence_radius = float(config["ship_influence_radius"])
+        self.no_fly_radius = config.get("no_fly_radius") or None
         self.apf_exponential_decay = float(config["apf_exponential_decay"])
         self.apf_inverse_square_scale = float(config["apf_inverse_square_scale"])
         self.apf_stuck_growth_rate = float(config["apf_stuck_growth_rate"])
@@ -132,7 +138,14 @@ class APFStrategy(PathPlanningStrategy):
         # Add central ship repulsion with same APF formula.
         ship_vec_2d = curr_pos[:2] - self.ship_center
         ship_dist = float(np.linalg.norm(ship_vec_2d))
-        if 1e-6 < ship_dist < self.ship_influence_radius:
+        if self.no_fly_radius:
+            # no-fly zone: repel from its boundary (+ margin); inside it, push out as from 0.3 m
+            d_b = ship_dist - (float(self.no_fly_radius) + self.ship_margin)
+            if ship_dist > 1e-6 and d_b < self.ship_influence_radius:
+                dd = max(d_b, 0.3)
+                force_mag = (1.0 / (b * dd * dd)) * np.exp(-a * dd)
+                v_rep[:2] += (ship_vec_2d / ship_dist) * (self.k_repulsive * force_mag)
+        elif 1e-6 < ship_dist < self.ship_influence_radius:
             force_mag = (1.0 / (b * ship_dist * ship_dist)) * np.exp(-a * ship_dist)
             v_rep[:2] += (ship_vec_2d / ship_dist) * (self.k_repulsive * force_mag)
 
@@ -311,6 +324,8 @@ class ORCAStrategy(PathPlanningStrategy):
         self.goal_tolerance     = float(config.get("goal_tolerance", self.goal_tolerance))
         self.braking_radius     = float(config.get("braking_radius", self.braking_radius))
         self.ship_keepout_radius = float(config.get("ship_keepout_radius", self.ship_keepout_radius))
+        if config.get("no_fly_radius"):
+            self.ship_keepout_radius = float(config["no_fly_radius"])      # the no-fly zone is the hard constraint
         self.min_z              = float(config.get("min_z", self.min_z))
         self.max_z              = float(config.get("max_z", self.max_z))
 

@@ -234,6 +234,9 @@ class DenddronAgent:
             )
         self.planner_cfg = planner_cfg
         self.path_planner.configure(planner_cfg)
+        # Ship no-fly zone (runtime config, --no-fly): routes go around it with a 3 m margin.
+        nf = float(planner_cfg.get("no_fly_radius") or 0.0)
+        self.no_fly_route = nf + 3.0 if nf > 0 else None
 
         self.max_control_dt = float(planner_cfg.get("max_control_dt", 0.2))
         self.sensor_timeout_s = float(planner_cfg.get("sensor_timeout_s", 0.5))
@@ -768,6 +771,9 @@ class DenddronAgent:
                     continue   # skip all APF work below
 
                 # ── ACTIVE NAVIGATION ────────────────────────────────────────
+                if self.loc is not None:
+                    # keep 2 sigma of our own position uncertainty off the ship's no-fly zone
+                    self.path_planner.ship_margin = 2.0 * (self._pos_sigma() or 0.0)
 
                 t_plan = time.perf_counter()
                 cmd = self.path_planner.compute_velocity(
@@ -1010,7 +1016,7 @@ class DenddronAgent:
             # Route around other jobs' blasts (holds included); a goal inside one is not an option.
             goal = (t.location["x"], t.location["y"], t.location["z"])
             route = plan_route(here, goal, now, self._blasts(exclude=t.threat_id), v_max, a_max,
-                               t_goal=t.t_engage)
+                               t_goal=t.t_engage, no_fly=self.no_fly_route)
             if route.blocked:
                 continue
             e = route.cost(ETA_MARGIN)
@@ -1113,12 +1119,12 @@ class DenddronAgent:
             to_slot = np.asarray(sp, dtype=float) - np.asarray(here, dtype=float)
             n = float(np.linalg.norm(to_slot))
             v0 = max(0.0, float(np.dot(vel, to_slot / n))) if n > 1e-6 else 0.0
-            route = plan_route(here, sp, now, blasts, *kin, t_goal=eng["t_engage"], v0=v0)
+            route = plan_route(here, sp, now, blasts, *kin, t_goal=eng["t_engage"], v0=v0, no_fly=self.no_fly_route)
             if route.exposed:
                 # Too close to get clear of these blasts anyway: an exit leg only costs time (and
                 # could make us give the job back for nothing).  Carry on to our own slot.
                 route = plan_route(here, sp, now, [b for b in blasts if b.threat_id not in route.exposed],
-                                   *kin, t_goal=eng["t_engage"], v0=v0)
+                                   *kin, t_goal=eng["t_engage"], v0=v0, no_fly=self.no_fly_route)
             eng["legs"] = route.legs
             eng["hold_s"] = round(route.hold_s, 1)
             # Give the job back only for a real conflict (our slot inside another job's blast), and only
@@ -1458,7 +1464,7 @@ class DenddronAgent:
             return
         t = self.sync.proto_time(self.clock.read(truth))      # the scan's time on our clock
         d = eng["fuze"].update(t, (pose["x"], pose["y"], pose["z"]), contacts, eng["t_engage"],
-                               self._track_predictor(eng))
+                               self._track_predictor(eng), gate_extra=3.0 * (self._pos_sigma() or 0.0))
         if d is not None:
             self._fuze_decision(eng, d)
 
@@ -1594,8 +1600,10 @@ class DenddronAgent:
         # Final check: non-job drones within CLEARANCE_M (positions from the ship's job topic).  The
         # target comes first: detonate anyway, at the risk of friendly fire.
         here = (pose["x"], pose["y"], pose["z"])
+        own_sigma = self._pos_sigma() or 0.0
         intruders = [i["id"] for i in eng.get("intruders", [])
-                     if math.dist(here, (i["pose"]["x"], i["pose"]["y"], i["pose"]["z"])) <= self.CLEARANCE_M]
+                     if math.dist(here, (i["pose"]["x"], i["pose"]["y"], i["pose"]["z"]))
+                     <= self.CLEARANCE_M + 2.0 * (own_sigma + float(i.get("sigma") or 0.0))]
         if intruders:
             logger.warning(f"[{self.agent_id}] Detonating on {threat.threat_id} with non-job drones within "
                            f"{self.CLEARANCE_M:.0f} m: {intruders} (risk of friendly fire)")

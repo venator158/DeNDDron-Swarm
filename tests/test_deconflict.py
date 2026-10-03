@@ -1,8 +1,8 @@
 import math
 import unittest
 
-from deconflict import (BLAST_TOL_S, Blast, Reservation, blast_radius, blast_separation, choose_intercept,
-                        plan_route, progress, stop_distance, travel_time)
+from deconflict import (BLAST_TOL_S, Blast, Reservation, _seg_dist, blast_radius, blast_separation, choose_intercept,
+                        detour, plan_route, progress, stop_distance, travel_time)
 from threats import engagement_point, eta, position_at
 
 V, A = 4.0, 1.0
@@ -209,6 +209,37 @@ class TestManeuverReplan(unittest.TestCase):
         self.assertIsNone(choose_intercept(*args, slack=4.0))
         ic = choose_intercept(*args, slack=1.0)
         self.assertGreater(math.hypot(ic.point[0], ic.point[1]), 80.0)
+
+
+
+class TestNoFlyDetour(unittest.TestCase):
+    R = 52.0     # no-fly radius + margin
+
+    def _legs_clear(self, start, pts, goal):
+        path = [start] + pts + [goal]
+        for a, b in zip(path, path[1:]):
+            self.assertGreaterEqual(_seg_dist((0, 0, 0), (a[0], a[1], 0), (b[0], b[1], 0)), self.R - 1e-6)
+
+    def test_detour_goes_around_the_shorter_way(self):
+        start, goal = (70.0, 10.0, 20.0), (-70.0, 30.0, 25.0)
+        pts = detour(start, goal, self.R)
+        self.assertTrue(pts)
+        self._legs_clear(start, pts, goal)
+        self.assertTrue(all(p[1] > 0 for p in pts))           # over the top (the goal is north)
+        self.assertTrue(all(20.0 <= p[2] <= 25.0 for p in pts))
+
+    def test_clear_path_needs_no_detour(self):
+        self.assertEqual(detour((70.0, 10.0, 20.0), (90.0, 60.0, 20.0), self.R), [])
+        self.assertEqual(detour((30.0, 0.0, 20.0), (-90.0, 0.0, 20.0), self.R), [])   # starts inside: nothing to do
+
+    def test_route_around_is_longer_and_flies_the_waypoints(self):
+        start, goal = (70.0, 0.0, 20.0), (-70.0, 5.0, 20.0)
+        direct = plan_route(start, goal, 0.0, [], V, A)
+        around = plan_route(start, goal, 0.0, [], V, A, no_fly=self.R)
+        self.assertGreater(around.travel_s, direct.travel_s + 10.0)
+        self.assertEqual(len(around.legs), len(detour(start, goal, self.R)) + 1)
+        self.assertEqual(around.legs[-1].target, goal)
+        self._legs_clear(start, [l.target for l in around.legs[:-1]], goal)
 
 
 if __name__ == "__main__":

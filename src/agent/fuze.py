@@ -150,9 +150,11 @@ class Fuze:
         return tuple(sum((h[0] - mt) * h[1][k] for h in hist) / stt for k in range(3))
 
     def update(self, t: float, own: Vec3, contacts: Sequence[Vec3], t_engage: float,
-               predict: Optional[Callable[[float], Optional[Vec3]]]) -> Optional[Decision]:
+               predict: Optional[Callable[[float], Optional[Vec3]]], gate_extra: float = 0.0) -> Optional[Decision]:
         """One fuze scan.  t: its protocol time; own: our world position; contacts: relative
-        positions; predict(t): the threat's predicted world position (None: no track, no trigger)."""
+        positions; predict(t): the threat's predicted world position (None: no track, no trigger).
+        gate_extra: widens the gate by our own position uncertainty (3 sigma), which shifts every
+        contact's world position by the same error."""
         if self.done:
             return None
         self._associate(t, own, contacts)
@@ -172,7 +174,7 @@ class Fuze:
         for tr in self.tracks:
             if tr.known or tr.t != t:
                 continue
-            tr.gated = p is not None and math.dist(tr.pos, p) <= self.cfg.gate_m
+            tr.gated = p is not None and math.dist(tr.pos, p) <= self.cfg.gate_m + gate_extra
             if not tr.gated:
                 continue
             kill = self.cfg.kill_radius_m

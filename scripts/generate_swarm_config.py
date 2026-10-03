@@ -156,6 +156,8 @@ def main():
     parser.add_argument("--max-radius", type=float, default=45.0, help="Maximum distance from center")
     parser.add_argument("--min-separation", type=float, default=8.0, help="Minimum spacing between agents")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for reproducible layouts")
+    parser.add_argument("--no-fly", type=float, default=0.0,
+                        help="ship no-fly zone radius (m): planners keep out, stations at R+5..R+45 m (0: off)")
     parser.add_argument("--no-goals", action="store_true",
                         help="Omit static goals; drones hold station until tasked (threat scenario)")
     parser.add_argument("--algorithm", type=str, default="apf", choices=["orca", "apf"], help="Path planning algorithm (orca or apf)")
@@ -187,6 +189,10 @@ def main():
     if args.seed is not None:
         random.seed(args.seed)
 
+    if args.no_fly > 0:
+        # Stations outside the ship's no-fly zone (shrapnel safety), planners keep out of it.
+        args.min_radius, args.max_radius = args.no_fly + 5.0, args.no_fly + 45.0
+        GLOBAL_DEFAULTS["path_planning"]["no_fly_radius"] = args.no_fly
     # Airframe limits come from the hardware record (real class performance x speed_scale).
     hw = hardware.load()
     GLOBAL_DEFAULTS["kinematics"].update(hardware.kinematics(hw))

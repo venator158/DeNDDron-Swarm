@@ -118,6 +118,7 @@ class MetricsNode:
         self._total_collisions = 0
         self._close_calls      = 0
         self._min_separation   = None   # closest true distance between two live drones (pairs < CLOSE_CALL_M)
+        self._min_ship_range   = None   # closest any live drone came to the ship's centre (ground plane)
         self._start_time       = time.monotonic()
         self._events: list = []
 
@@ -155,6 +156,9 @@ class MetricsNode:
             with self._lock:
                 for agent_id, (x, y, z, vx, vy, vz) in drones.items():
                     self._truth[agent_id] = (t, x, y, vx, vy)
+                    r = math.hypot(x, y)
+                    if self._min_ship_range is None or r < self._min_ship_range:
+                        self._min_ship_range = r
                 for agent_id, (x, y, z, vx, vy, vz) in drones.items():
                     if agent_id not in self._agents:
                         self._agents[agent_id] = AgentState(agent_id)
@@ -379,6 +383,7 @@ class MetricsNode:
                 "total_collisions":  self._total_collisions,
                 "close_calls":       self._close_calls,
                 "min_separation_m":  None if self._min_separation is None else round(self._min_separation, 2),
+                "min_ship_range_m":  None if self._min_ship_range is None else round(self._min_ship_range, 2),
                 **self._loc_summary(),
                 "avg_distance_m":    round(avg_dist, 2),
                 "avg_speed_mps":     round(avg_spd, 3),
