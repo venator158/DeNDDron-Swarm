@@ -1029,7 +1029,7 @@ tools/comms/            degraded-comms probes, radio cut helper, chaos script, s
 
 ## Next steps
 
-The plan, in priority order (written 2026-10-04). Each item is switchable, and is measured with the [sensing sweep](#sensing-and-ship-link-sweep) before it becomes a default. Items marked **decision** need the project owner's call before implementation.
+The plan, written 2026-10-04. Each item is switchable, gets its own branch off `main`, and is built in dependency order: 1 (independent), 4 (the EKF update that RDL and the GNSS comparator build on), 3, then 2. During development each item gets a light check (a few sweep conditions, one run each); the full [sensing sweep](#sensing-and-ship-link-sweep) with repeats is kept for system testing once all four are in place. Items marked **decision** still need the project owner's call.
 
 ### 1. Robust job confirmation (ship-link loss)
 
@@ -1045,20 +1045,20 @@ The plan, in priority order (written 2026-10-04). Each item is switchable, and i
 3. **Ship side.** The ship confirms from heartbeats as well as awards, and resends ACKs until the drone's heartbeat shows `confirmed: true`. A drone the ship has not confirmed still never detonates.
 4. **Measure.** `ship_loss30`, `ship_outage` and `combined`, 3 repeats, before and after; also `degradation_sweep.py` loss10 and loss30.
 
-**Decision:** whether an unconfirmed drone may keep flying towards a slot until its time runs out. This changes the engagement protocol, so two drones could briefly head for one slot until the ship arbitrates; the ship already NACKs the worse bid.
+**Decided (2026-10-04):** an unconfirmed drone keeps flying towards its slot until its time runs out. Two drones can briefly head for one slot until the ship arbitrates; the ship already NACKs the worse bid, and an unconfirmed drone never detonates.
 
 ### 2. GNSS as comparator and fallback
 
 GNSS is not used today: position comes from the ship's UWB anchors, which also work where GNSS is jammed or spoofed. Where it is available, it can check UWB and stand in for it.
 
 **Steps:**
-1. **Hardware record.** Add a `gnss` class: a multi-band, multi-constellation receiver with typical 1.5–3 m horizontal σ standalone (decimetres with RTK corrections from the ship), 5–10 Hz, and fix quality and satellite count. Add a ship `gnss` and heading entry, since positions are needed relative to the ship.
+1. **Hardware record.** Add a `gnss` class: a multi-band, multi-constellation receiver with typical 1.5–3 m horizontal σ standalone, 5–10 Hz, and fix quality and satellite count. No RTK: the ship is a moving base in the real world, so its corrections don't apply. Add a ship `gnss` and heading entry, since positions are needed relative to the ship.
 2. **Simulator.**
    - Publish `drone/{id}/gnss` with the record's noise and a slowly varying bias (Gauss–Markov, like real receiver errors).
    - Impairment knobs as for UWB: `GNSS_JAM` (outage windows, local or global) and `GNSS_SPOOF` (an offset that ramps in slowly, the hard case to detect). Like UWB noise, these are not speed-scaled.
 3. **Drone.**
-   - **Comparator mode (default when available):** check GNSS against the UWB estimate with a windowed normalized-innovation test. Disagreement is flagged in telemetry and heartbeats; GNSS is not fused, so a spoofer cannot pull the drone.
-   - **Fallback mode:** when the drone has no fresh anchor chain (no anchor and no fresher peer chain), fuse GNSS into the EKF with an inflated noise. Its status shows `gnss` and its σ shows the lower trust. The comparator stays active, so a sudden jump between GNSS and the dead-reckoned estimate rejects GNSS.
+   - **Comparator (on by default):** check GNSS against the UWB estimate with a windowed normalized-innovation test. GNSS is not fused into the position estimate, so a spoofer cannot pull the drone. Disagreement is flagged in telemetry and heartbeats.
+   - **On a detected spoof:** the drone reports it to the ship, then ignores GNSS and relies on UWB alone.
    - The ship-relative conversion uses the ship's own GNSS position and heading.
 4. **Sweep conditions:**
    - `gnss_fallback_uwb_short`: UWB to 80 m with GNSS on, the case where peer chains failed;
@@ -1066,9 +1066,9 @@ GNSS is not used today: position comes from the ship's UWB anchors, which also w
    - `gnss_spoof_ramp`;
    - `gnss_spoof` with `uwb_jam_all`, the worst case.
 
-**Decisions:**
-- whether GNSS may ever be fused while anchors are fresh (proposed: no, comparator only);
-- what the swarm does on a confirmed spoof (proposed: flag, ignore GNSS, report to the operator).
+**Decided (2026-10-04):** GNSS is a comparator for UWB, never fused while UWB is available; it is on by default and ignored once a spoof is detected (after reporting to the ship); no RTK.
+
+**Open:** whether GNSS may stand in for UWB when a drone has no anchor chain at all (the fallback mode first proposed), or is never fused.
 
 ### 3. Recursive decentralized localization (RDL)
 
@@ -1089,7 +1089,7 @@ GNSS is not used today: position comes from the ship's UWB anchors, which also w
    - exchange loss.
 2. **Exchange.** A range update changes both drones, so the initiator sends the responder its new state and factor in a reply. The simulator carries it in the next UWB frame, as `uwb_tx` payloads are carried now, with the same dropout and capacity model. A lost reply is detected by sequence number, and that pair falls back to covariance intersection.
 3. **Integration** behind `LOCALIZATION=rdl`, with `coop` the default until RDL beats it in the sweep (`uwb_short`, `uwb_jam_all`, `uwb_jam_local`, `combined`; NEES, p95 and max error, kills).
-4. **Cost.** State per drone grows with the peer count: 6 × 6 per factor, so about 1.5 kB at 6 peers. The UWB payload grows by one 6 × 6 factor per exchange (~150 B in float16): check it against the record's airtime model.
+4. **Cost.** State per drone grows with the peer count: 6 × 6 per factor, so about 1.5 kB at 6 peers. The UWB payload grows by one 6 × 6 factor per exchange (~150 B in float16), more than the record's 64 B. The payload may be expanded (DW3000-class radios carry frames up to 1023 B) if that brings a benefit: measure both and record the difference and the airtime.
 
 It can start now, independently of items 1 and 2. It is the larger job: about the size of the cooperative localization work.
 
@@ -1097,11 +1097,14 @@ It can start now, independently of items 1 and 2. It is the larger job: about th
 With UWB noise 3× the record's, the filter was overconfident (NEES 25), re-locked 86 times, and hit an 18.6 m excursion. The plan:
 - **Adaptive noise:** estimate the range noise from the innovations over a window, with a floor at the record's figure.
 - **Robust gating:** a Huber or Student-t update in place of the hard gate, so outliers are down-weighted rather than accepted or rejected.
-- **Safe re-locks:** require at least 4 anchors, with a residual check, so a re-lock cannot jump to a bad fix.
+- **Safe re-locks:** require at least 3 anchors with a residual check (localization is 2D, so 3 ranges leave one to check the fix), so a re-lock cannot jump to a bad fix.
 
 The `uwb_nlos` 14 m excursion is the same problem.
 
 ### 5. Already-open items
+
+The chain-fire and stack-spacing decisions are deferred until items 1–4 are done (2026-10-04).
+
 - **Chain fire for spread-out mates** (**decision**): fire only if the mate's own radar sees the threat inside the kill radius, otherwise wait for its own fuze.
 - **Three-drone stack spacing** (**decision**): spacing about 4 m, or a lower proximity threshold.
 - **Speed retune and 1 km detection:** `speed_scale` 0.2–0.4, threats faster, detection ~1 km out.
