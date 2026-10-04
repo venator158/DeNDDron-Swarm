@@ -325,7 +325,7 @@ One drone, from sensors to detonation (`src/agent/agent.py` unless noted):
 
 | Topic | Link | Direction | Payload |
 |---|---|---|---|
-| `drone/{id}/sensors` | onboard | sim → drone, metrics | `{sim_time, pose{z, yaw, ...}}` at 50 Hz: altitude and attitude only (legacy `truth`: the full pose; legacy `lidar`: plus `lidar{angle_step, ranges[], hits[]}` every 0.1 s) |
+| `drone/{id}/sensors` | onboard | sim → drone, metrics | `{sim_time, pose{z, yaw, ...}, imu{dt, dv[x, y]}}` at 50 Hz: altitude and attitude, and the IMU's horizontal delta-velocity since the last frame (legacy `truth`: the full pose; legacy `lidar`: plus `lidar{angle_step, ranges[], hits[]}` every 0.1 s) |
 | `drone/{id}/radar` | onboard | sim → drone | `{sim_time, objects[[dx, dy, dz], ...]}` from the hardware record's mmWave radar (30 m, 20 Hz, range/angle noise): every threat, other drone and the ship's hull, relative and unlabelled; feeds obstacle avoidance and the fuze |
 | `drone/{id}/fuze` | onboard | sim → drone | legacy `PERCEPTION=lidar` only: the same contact format at `FUZE_HZ` (50) within `FUZE_RANGE_M` (10) |
 | `drone/{id}/uwb` | onboard | sim → drone | `{sim_time, anchors[[k, range]], peers[[id, range, state]]}`: UWB ranges to the ship's anchors (and requested peers, with each peer's state); not with `truth` |
@@ -401,8 +401,15 @@ Drones localize themselves instead of receiving their true x,y, and avoid each o
 
 **Perception (`PERCEPTION=radar`, default).** The simulator turns the contact sensor into the record's 60 GHz mmWave radar (30 m, 20 Hz, 5 cm range and 2° angle noise, 360° from four boards; `drone/{id}/radar`) and stops computing lidar. The radar's contacts feed both the proximity fuze and obstacle avoidance. For avoidance, `radar_obstacles.py` builds exactly the obstacle points the planar lidar produced: the same 32 rays, each neighbour a 3 m circle at the drone's altitude, checked against a Python port of the simulator's lidar. The planners are unchanged, and nothing is ray-traced into a voxel map. Avoidance uses relative positions, so it does not depend on localization.
 
-**Localization (`LOCALIZATION=coop`, default, or `anchors`).** The simulator withholds x, y and the horizontal velocity, and gives UWB ranges instead (`drone/{id}/uwb`). Four anchors sit on the ship at the hull corners (±15 × ±5 m, 8 m up). The ranges have the record's characteristics: 10 cm noise, 250 m range, 2 % dropouts, and channel airtime. Each drone runs an EKF (`localization.py`) on [x, y, vx, vy, wind x, wind y]:
-- **prediction** with the velocity it commands, through the airframe's command response (the simulator's filter; on hardware, the identified response), plus the wind it cannot sense, which the anchors make observable;
+**Localization (`LOCALIZATION=coop`, default, or `anchors`).** The simulator withholds x, y and the horizontal velocity, and gives UWB ranges instead (`drone/{id}/uwb`). Four anchors sit on the ship at the hull corners (±15 × ±5 m, 8 m up). The ranges have the record's characteristics: 10 cm noise, 250 m range, 2 % dropouts, and channel airtime. Each drone runs an EKF (`localization.py`) on [x, y, vx, vy, bias x, bias y]:
+- **prediction from the flight controller's IMU** (`NAV_PREDICT=imu`, default). Each 50 Hz sensor frame carries the horizontal delta-velocity the accelerometer measured since the last one, over the ground, so gusts are in it. The filter integrates it and learns the accelerometer bias while the anchors are good, then carries it through an outage. The simulator's IMU is the [hardware record](#hardware-record)'s BMI088-class unit with these errors:
+  - a 1 mg accelerometer bias;
+  - a tilt-equivalent bias of g·sin(0.5°) from the attitude estimate, both drifting as Gauss–Markov processes;
+  - white noise and a 0.5 % scale factor.
+
+  The errors are scaled with the simulation's time stretch (see the record). The filter counts the scale factor at 10× its variance because its errors add up over a manoeuvre, and it counts the unknown moment within a frame when the velocity changed;
+- with `NAV_PREDICT=cmd`, prediction instead uses the velocity the drone commands, through the airframe's command response (the simulator's filter; on hardware, the identified response), with states 4–5 the wind it cannot sense, which the anchors make observable;
+- **drift monitor:** each anchor's normalized innovations over the last 20 ranges are tested for a persistent sign (|mean|·√n > 3.3). Against the IMU-held track, a slowly drifting range shows up as a bias while noise does not. Flagged anchors go into telemetry and heartbeats (`loc_flags`). With the robust filter, a single flagged anchor is left out until it agrees again. Several flagged at once is the environment (widespread NLOS) or the estimate itself, so they are kept;
 - **updates** from 3D anchor ranges with its altitude known, with an innovation gate and re-initialization after 5 rejections in a row;
 - **robust anchor updates** (`UWB_FILTER=robust`, default; `basic` is the plain filter), for an environment worse than the record:
   - *adaptive noise:* the range noise is estimated from the last 40 anchor innovations (the median, which outliers don't pull), floored at the record's 0.1 m and capped at 2 m;
@@ -913,7 +920,8 @@ Where each implemented feature lives.
 | | ship: `sent` stamps, exchange stamps and leader beacon in heartbeats and roster, true sync error | `ship.py` (`_stamped`, `_on_heartbeat`, `run`, `_on_clock_eval`) |
 | **Metrics** | positions, distance, proximity collisions (spatial hash); per-drone log when a localization error crosses 5/10/30/100 m | `src/metrics/main.py` |
 | **Localization** | UWB ranging (anchors, peers with state payloads, noise, range, dropouts, airtime, jamming), x,y withheld; wind | `GazeboSimulator.cpp` (`configure_localization`, `publish_uwb`, `on_uwb_tx`, `configure_environment`) |
-| | EKF (position, velocity, wind), gating, re-lock, multilateration; robust mode: adaptive noise, Huber update, residual-checked re-locks | `src/agent/localization.py` |
+| | flight-controller IMU: horizontal delta-velocity per sensor frame with accelerometer and tilt biases (Gauss–Markov), noise, scale factor, time-stretch scaling | `GazeboSimulator.cpp` (`configure_imu`, `imu_frame`), `src/common/hardware.py` (`imu_errors`) |
+| | EKF (position, velocity, accelerometer bias; or wind with the command model), IMU prediction, gating, re-lock, multilateration; robust mode: adaptive noise, Huber update, residual-checked re-locks; drift monitor | `src/agent/localization.py` |
 | | cooperative localization: neighbour table, anchor-time chains, peer fusion | `src/agent/coop.py` |
 | | drone integration, station keeping against wind | `agent.py` (`_loc_predict`, `_on_uwb`, `_send_uwb_tx`, `_reflex_control_loop`) |
 | | evaluation: errors, NEES, separations | `src/metrics/main.py` (`_on_loc`, `_loc_summary`) |
@@ -960,14 +968,19 @@ Where each implemented feature lives.
 - warhead (kill radius);
 - UWB radio and the ship's UWB anchors;
 - mmWave radar;
-- IMU, barometer and compass;
+- the flight controller's IMU (BMI088-class, the one a cheap drone already has) and its attitude estimate (`ahrs`: tilt error), barometer and compass;
 - the C2 radio.
 
 Simulation parameters are derived from it (`src/common/hardware.py`):
 - **airframe speeds and accelerations** are the real figures × `simulation.speed_scale` (0.1 reproduces the 4 m/s, 1 m/s² drones);
-- **sensor noise, range and rate** are used as recorded.
+- **sensor noise, range and rate** are used as recorded;
+- **IMU errors** follow the simulation's time stretch (`hardware.imu_errors`, `IMU_ERROR_SCALING=dilated`, owner's decision):
+  - distances are real but speeds are × s, so a mission phase lasts 1/s times longer in sim seconds;
+  - errors that grow with time are scaled so that a blackout drifts as far as the same phase would on hardware: biases × s², noise densities × s^1.5, correlation times ÷ s;
+  - a 60 s outage at s = 0.1 is then the equivalent of 6 s on hardware;
+  - `IMU_ERROR_SCALING=real` uses the figures unscaled, a stress setting with ~100× the drift per mission phase.
 
-Devices marked `"simulated": false` are recorded for hardware deployment but not modelled; for example, altitude, attitude and heading are taken as perfect. The launcher copies the record into `config/swarm_runtime.json` under `hardware`, where the simulator, drones and ship read it; `HARDWARE_RECORD=<file>` points the launcher at another one. When a sensor or airframe model is added or changed, its class and parameters go into the record first.
+Devices marked `"simulated": false` are recorded for hardware deployment but not modelled; altitude and heading are taken as perfect, and attitude too, apart from the tilt error. The launcher copies the record into `config/swarm_runtime.json` under `hardware`, where the simulator, drones and ship read it; `HARDWARE_RECORD=<file>` points the launcher at another one. When a sensor or airframe model is added or changed, its class and parameters go into the record first.
 
 `config/swarm_runtime.json` is generated on every launch and is not tracked in git. To change the defaults, edit `GLOBAL_DEFAULTS` in `scripts/generate_swarm_config.py`.
 
@@ -983,7 +996,7 @@ Simulation speed (env): `SIM_RTF` (1), set by `--rtf`.
 
 Ship no-fly zone (env): `NO_FLY_RADIUS_M` (50; 0 = off, stations at 30–45 m; `--no-fly R`, which also moves stations to R+5 … R+45 m).
 
-Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `anchors`, or legacy `truth`; `--localization`), `UWB_FILTER` (`robust`, or the plain `basic`), `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensing degradation (simulator only; empty = the record, which the drones keep assuming): `UWB_EXTRA_SIGMA_M`, `UWB_NLOS_P`, `UWB_NLOS_BIAS_M`, `UWB_DROPOUT_P`, `UWB_MAX_RANGE_M`, `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG`, `RADAR_MISS_P`, `RADAR_CLUTTER`, `RADAR_LATENCY_S` (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)). Sensor and environment parameters are in the [hardware record](#hardware-record).
+Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `anchors`, or legacy `truth`; `--localization`), `UWB_FILTER` (`robust`, or the plain `basic`), `NAV_PREDICT` (`imu`, or the command model `cmd`), `IMU_ERROR_SCALING` (`dilated`, or `real`; drones and simulator), `IMU_EXTRA_BIAS_MPS2` (simulator: a constant extra accelerometer bias, real m/s², scaled like the record's), `IMU_SEED`, `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensing degradation (simulator only; empty = the record, which the drones keep assuming): `UWB_EXTRA_SIGMA_M`, `UWB_NLOS_P`, `UWB_NLOS_BIAS_M`, `UWB_DROPOUT_P`, `UWB_MAX_RANGE_M`, `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG`, `RADAR_MISS_P`, `RADAR_CLUTTER`, `RADAR_LATENCY_S` (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)). Sensor and environment parameters are in the [hardware record](#hardware-record).
 
 Proximity fuze (env): `FUZE` (1; 0 = timed detonation), `FUZE_WINDOW_S` (2), `FUZE_GATE_M` (5), `FUZE_FIRE` (`cpa`), `FUZE_FALLBACK` (`hold`), and for the simulator's sensor `FUZE_RANGE_M` (10, drones too), `FUZE_HZ` (50), `FUZE_NOISE_M` (0.1), `FUZE_LATENCY_S` (0), `FUZE_SEED` (0). See [Proximity fuze](#proximity-fuze).
 
@@ -1008,10 +1021,10 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_threats.py` | CPA/TCPA, engagement point (CPA vs. defended-radius crossing), slots, ETA, TTI, serialization |
 | `test_jobs.py` | ship confirmation: best bids confirmed, distinct slots in drone-ID order, held slots kept; the ship's answer to each heartbeat (ACK again, NACK again, award from a heartbeat, release a dropped or closed job) |
 | `test_threat_queue.py` | min-heap ordering by TCPA, lazy removal |
-| `test_hardware.py` | hardware record complete, kinematics reproduce the original drones, runtime config wins; drones never read `sim/truth` |
+| `test_hardware.py` | hardware record complete, kinematics reproduce the original drones, IMU errors follow the time stretch (same drift per mission phase), runtime config wins; drones never read `sim/truth` |
 | `test_localclock.py` | perfect default, drift/offset model, jitter only in exchange stamps, reproducible per-node draw |
 | `test_deconflict.py` | spatial queue: speed profiles, routes with holds and exits around blasts, earliest-feasible intercepts, manoeuvre re-plan slack; routes around the no-fly zone (legs clear, shorter way, timing) |
-| `test_localization.py` | EKF from anchor ranges: multilateration, tracking a moving drone consistently (NEES), outlier gating, dropouts, re-lock after a corrupted estimate, uncertainty growth, wind learned, outage dead-reckoned with the wind; robust filter: adaptive noise at 3× the record's noise (with and without NLOS), re-lock leaving out a blocked anchor, refused re-lock when three anchors disagree |
+| `test_localization.py` | EKF from anchor ranges: multilateration, tracking a moving drone consistently (NEES), outlier gating, dropouts, re-lock after a corrupted estimate, uncertainty growth, wind learned, outage dead-reckoned with the wind; robust filter: adaptive noise at 3× the record's noise (with and without NLOS), re-lock leaving out a blocked anchor, refused re-lock when three anchors disagree; IMU prediction: consistent and tighter than the command model, through a 60 s outage, unscaled errors as a stress case; drift monitor: flags a persistent bias only, no flags in clean flights, a drifting anchor flagged and left out |
 | `test_coop.py` | cooperative localization: a drone beyond anchor range localized through anchored peers (consistent), drift without peers, no stale "anchored" loop with every anchor jammed, peer selection |
 | `test_radar_obstacles.py` | radar contacts give exactly the lidar's obstacle points (50 random layouts vs a port of the simulator's lidar), ship contacts dropped, staleness |
 | `test_fuze.py` | proximity fuze: fires at closest approach (three threat speeds), threat in range before arming not taken for a mate, mates never trigger, hold and timed fallbacks, closest approach beyond the kill radius, contacts off the predicted track ignored, radius mode, arming window, stale track, chain readiness, config |
@@ -1093,23 +1106,45 @@ Light check (sensing sweep, 15 drones, 8 threats, one run each; plain filter fro
 
 `uwb_short` stays bad: beyond anchor range only peers localize, which is item 4 (RDL). Applying the robust update to peer ranges too made it much worse (NEES 399, one drone 74 m off), so peers keep the plain gate. One `uwb_short` run with two swarms side by side had one drone 123 m off; a run alone did not repeat it. The remaining `uwb_noise` excursions (~10 m) are not yet traced to a drone (the metrics node now logs every drone whose error crosses 5, 10, 30 and 100 m).
 
-### 3. IMU dead reckoning
+### 3. IMU dead reckoning — done
 
-**Why.** Between UWB fixes the EKF predicts with the commanded-velocity response model, which on hardware is only approximately known, and the simulator applies exactly that model. An IMU measures the motion that actually happened, wind included. It is the layer under everything else:
-- it buys time in a UWB (and GNSS) blackout: the error grows from the IMU's bias, not from an unknown wind and response;
-- it is an independent reference to detect UWB drift (non-line-of-sight bias, a bad re-lock) and GNSS spoofing: a spoofer or a biased range can move the fix, but not the measured acceleration;
-- it gives RDL (item 4) and the GNSS comparator (item 5) a motion model whose uncertainty is known.
+Done on branch `imu-dead-reckoning` (2026-10-04), the default (`NAV_PREDICT=imu`; `cmd` is the command-response model). See [Localization and perception](#localization-and-perception) and the [hardware record](#hardware-record).
 
-**Class.** The record has a flight-controller MEMS IMU (BMI088-class, `simulated: false`). Its accelerometer bias after calibration is ~1 mg (0.01 m/s²); uncompensated, that is 0.5·b·t² of error: ~4.5 m after 30 s, ~18 m after 60 s. An industrial navigation-grade MEMS IMU (ADIS1650x-class, ~0.1 mg in-run bias) gives ~10× less. Both go in the record with noise density, bias instability, bias random walk, scale factor and rate, and the sweep shows how long each holds a position. Attitude stays perfect (as now), so a tilt error enters only as an equivalent accelerometer bias.
+**Owner's decisions (2026-10-04):**
+- **IMU class:** only the flight controller's own IMU (BMI088-class) is modelled. The goal is cheap drones deployed by the dozens; a navigation-grade IMU would mean custom hardware.
+- **Error scaling:** IMU errors follow the simulation's time stretch, so a blackout drifts as far as the same mission phase would on hardware (`IMU_ERROR_SCALING=real` is the stress setting).
+- **Attitude error:** the flight controller's tilt error is modelled as an equivalent accelerometer bias (`ahrs`: 0.5°, 20 s). At 0.086 m/s² it is ~9× the accelerometer's own 1 mg.
 
-**Steps:**
-1. **Hardware record.** Complete the `imu` class (above) and set it `simulated: true`; add the navigation-grade class as an alternative (`IMU_CLASS`).
-2. **Simulator.** Publish `drone/{id}/imu` as delta-velocity increments pre-integrated to 50 Hz, as a real IMU FIFO is read, not 400 Hz messages (50 drones × 400 Hz would load the bus). Errors: white noise, a bias (Gauss–Markov), scale factor; impairment knob `IMU_EXTRA_BIAS_MPS2`. Like UWB noise, not speed-scaled: at `speed_scale` 0.1 a blackout lasts longer in sim seconds than it would in the real world, which makes it a conservative test.
-3. **Drone.** The EKF predicts with the IMU (state: position, velocity, accelerometer bias in x,y) in place of the command model and its wind state; the command model stays as the fallback when the IMU is off (`NAV_PREDICT=imu|cmd`). The bias is learned while UWB is good and held through an outage.
-4. **Drift and spoof check.** A windowed innovation test between the IMU-propagated track and each absolute source (anchors, peers, GNSS), flagged in telemetry and heartbeats. Item 5 uses it for spoof detection.
-5. **Light check:** `baseline`, `uwb_jam_all` (dead-reckoning error after 60 s vs the bias figure), wind with gusts, `uwb_nlos`.
+**What was built:**
+- **Record:** complete `imu` and new `ahrs` entries; `hardware.imu_errors`.
+- **Simulator:** each 50 Hz sensor frame carries the horizontal delta-velocity over the ground, with the errors above (`configure_imu`, `imu_frame`). It rides in the existing frame, so no extra bus messages.
+- **Drone EKF:** predicts from the delta-velocity, with states 4–5 the accelerometer bias. Two consistency findings went into the model, both from the unit simulator:
+  - the scale factor counts at 10× its variance, because its error accumulates over a manoeuvre (NEES 3.1 → 1.7);
+  - the unknown moment within a frame when the velocity changed is counted (NEES 5.9 → 1.2 with every IMU error off).
+- **Drift monitor:** per-anchor windowed innovation bias. With the robust filter, a lone flagged anchor is left out until it agrees again.
 
-**Decided (2026-10-04):** the flight-controller class (BMI088-class) is the default and the only class modelled. The goal is cheap drones deployed by the dozens, using the IMU their flight controller already has; a navigation-grade IMU would mean custom hardware. The record keeps the navigation-grade class only as a reference figure.
+**Unit tests** (5 seeds; command model vs IMU, error p95 / max):
+
+| Case | Command model | IMU |
+|---|---|---|
+| calm | 0.59 / 1.01 m | 0.32 / 0.61 m |
+| 30 s outage | 2.19 / 4.53 m | 1.26 / 2.61 m |
+| 60 s outage | 4.27 / 8.48 m | 2.93 / 5.72 m |
+
+The IMU NEES is 1.6–2.0 throughout.
+
+A drifting anchor (2 cm/s from t = 60 s) is flagged 7–14 s after its drift begins. Leaving it out keeps the worst error at 0.74 m instead of 4.2 m with the IMU, and 1.3 m instead of 14.8 m with the command model. Clean flights raise no flag.
+
+**Light check** (sensing sweep, 15 drones, 8 threats, one run each; command model vs IMU; all 8/8 destroyed):
+
+| Condition | Error p95 / max | NEES |
+|---|---|---|
+| `baseline` | 0.43 / 1.33 → 0.27 / 1.11 m | 1.4 → 1.8 |
+| `uwb_jam_all` (60 s, all UWB) | 2.76 / 7.05 → **0.88 / 3.53 m** | 1.1 → 1.7 |
+| wind 5 m/s, gusts 1.5 m/s (real) | 0.54 / 1.44 → 0.27 / 1.43 m | 2.6 → 2.4 |
+| `uwb_nlos` | 0.54 / 5.8 → 0.32–0.39 / 9.8–15.0 m | 1.8 → 2.4 |
+
+The `uwb_nlos` maxima, in both modes, are start-up errors: in the first ~20 s, before any threat, a drone converging from its launch prior (σ 5 m) can settle off by several metres under NLOS (live: 6–15 m, claiming σ 0.3–2 m), then recovers. In the unit simulator the IMU halves it (p90 0.6 vs 2.7 m) but both modes have 4–5 m outliers. A first fix by multilateration made it worse (the anchor array is 30 × 10 m seen from 60–100 m). Still open.
 
 ### 4. Recursive decentralized localization (RDL)
 
@@ -1165,7 +1200,6 @@ The chain-fire and stack-spacing decisions are deferred until items 1–5 are do
 - **Three-drone stack spacing** (**decision**): spacing about 4 m, or a lower proximity threshold.
 - **Speed retune and 1 km detection:** `speed_scale` 0.2–0.4, threats faster, detection ~1 km out.
 - **Continuous position hold** in wind, instead of latch and re-approach.
-- **Motion-model mismatch:** drones use an approximate command response, not the simulator's exact one (largely replaced by the IMU prediction, item 3).
 - **Fuze window** centred on the predicted arrival rather than `t_engage`.
 - **Clocks:**
   - a timestamp-uncertainty term in the sync error bounds;
@@ -1174,7 +1208,8 @@ The chain-fire and stack-spacing decisions are deferred until items 1–5 are do
 - **Fewer idle wake-ups** (the [CPU profile](#scaling)): a slower control loop and radio for idle drones.
 
 ## Known limitations
-- **Localization is optimistic.** The drones' motion model is the simulator's exact command response, and wind is the only disturbance. On hardware the response must be identified and is only approximately known. By default, ultra-wideband (UWB) ranges have no blocked-path or multipath errors, and the radar has no clutter or false alarms. The [sensing sweep](#sensing-and-ship-link-sweep) adds them as impairments: a positive non-line-of-sight bias, missed detections and uniform clutter. These are simple models, not a propagation or radar-scene simulation.
+- **Localization is optimistic.** The IMU prediction (default) measures what the airframe does, but the IMU model is simple: Gauss–Markov biases, white noise and a constant scale factor, horizontal only, and the attitude error enters only as an equivalent tilt bias. Vibration, temperature drift, misalignment and the real coupling between manoeuvres and attitude error are not modelled. With `NAV_PREDICT=cmd`, the motion model is the simulator's exact command response. By default, ultra-wideband (UWB) ranges have no blocked-path or multipath errors, and the radar has no clutter or false alarms. The [sensing sweep](#sensing-and-ship-link-sweep) adds them as impairments: a positive non-line-of-sight bias, missed detections and uniform clutter. These are simple models, not a propagation or radar-scene simulation.
+- **Start-up under NLOS.** In the first ~20 s a drone converging from its launch prior can settle several metres off when 10 % of ranges are blocked (live: 6–15 m, before any threat), then recovers. A first fix by multilateration made it worse.
 - **No consistent fusion between unanchored drones.** Peers are used only along fresh anchor chains. With every anchor jammed, drones dead-reckon independently (their uncertainty grows honestly), and peer ranges keep nobody's estimate tight. Recursive decentralized localization (RDL), which tracks cross-covariances with pairwise exchanges, is the planned fix.
 - **Degraded sensing** (see the [sensing sweep](#sensing-and-ship-link-sweep)):
   - **Peer chains beyond anchor range:** with UWB range cut to 80 m, drones localized only through peers were tens of metres off while claiming sub-metre accuracy (NEES 50).

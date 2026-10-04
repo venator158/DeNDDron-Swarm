@@ -8,6 +8,7 @@ recorded.
 """
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Mapping, Optional
@@ -34,4 +35,38 @@ def kinematics(hw: Mapping) -> dict:
         "max_acceleration": round(a["max_accel_mps2"] * s, 6),
         "max_climb": round(a["max_climb_mps"] * s, 6),
         "max_descent": round(a["max_descent_mps"] * s, 6),
+    }
+
+
+G = 9.80665
+
+
+def imu_errors(hw: Mapping, scaling: Optional[str] = None) -> dict:
+    """Simulated horizontal IMU errors: the flight controller's accelerometer, and its attitude (tilt)
+    error, which leaks gravity into the horizontal axes as an equivalent accelerometer bias.
+
+    The simulation stretches time: distances are real, speeds are x speed_scale (s), so a mission
+    phase takes 1/s times longer in sim seconds.  An error that grows with time is scaled so that a
+    blackout drifts as far in the simulation as the same phase would in reality (IMU_ERROR_SCALING
+    "dilated", the default, owner's decision): biases (m/s^2) x s^2, noise densities
+    (m/s^2/sqrt(Hz)) x s^1.5, correlation times / s; the scale factor is dimensionless.  "real" uses
+    the record's figures unscaled: a stress setting (at s = 0.1, ~100x the drift per mission phase).
+    The simulator applies the same rule (GazeboSimulator.cpp, configure_imu).
+
+    Returns sim units: accel_bias (m/s^2, 1 sigma per axis), accel_bias_tau (s), tilt_bias (m/s^2,
+    g sin tilt), tilt_tau (s), noise_density (m/s^2/sqrt(Hz)), scale_factor, output_hz, scaling.
+    """
+    scaling = (scaling or os.environ.get("IMU_ERROR_SCALING") or "dilated").strip().lower()
+    s = float(hw["simulation"]["speed_scale"]) if scaling == "dilated" else 1.0
+    imu, ahrs = hw["imu"], hw.get("ahrs", {})
+    tilt = math.radians(float(ahrs.get("tilt_sigma_deg", 0.0)))
+    return {
+        "accel_bias": float(imu.get("accel_bias_mg", 0.0)) * 1e-3 * G * s * s,
+        "accel_bias_tau": float(imu.get("accel_bias_tau_s", 300.0)) / s,
+        "tilt_bias": G * math.sin(tilt) * s * s,
+        "tilt_tau": float(ahrs.get("tilt_tau_s", 20.0)) / s,
+        "noise_density": float(imu.get("accel_noise_ug_rthz", 0.0)) * 1e-6 * G * s ** 1.5,
+        "scale_factor": float(imu.get("accel_scale_factor", 0.0)),
+        "output_hz": float(imu.get("output_hz", 50.0)),
+        "scaling": scaling,
     }

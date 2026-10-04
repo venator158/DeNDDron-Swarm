@@ -37,6 +37,22 @@ Robust mode (robust=True, UWB_FILTER=robust): the environment can be worse than 
 - Safe re-lock: a fix from 3+ anchors must pass a residual (chi-square) test at the estimated noise;
   with 4+ anchors, leaving one out is tried, so one blocked-path anchor cannot pull the fix.
 
+IMU mode (imu=hardware.imu_errors(...), NAV_PREDICT=imu): the prediction comes from the flight
+controller's accelerometer instead of the command response.  State [x, y, vx, vy, bx, by]: v is the
+velocity over the ground (wind included: the accelerometer measures what the drone actually does)
+and b the accelerometer bias, its own plus the tilt-equivalent one (g sin tilt).  Each frame brings
+the delta-velocity dv over dt_imu: v <- v + dv - b dt, p <- p + v dt + (dv - b dt) dt / 2.  Process
+noise: the accelerometer's noise density and scale factor, and the bias as a Gauss-Markov process
+(the tilt's correlation time, the shorter one).  The bias is learned while the anchors are good and
+carried through an outage, so dead-reckoning error grows from what the bias does since, not from an
+unknown wind or command response.
+
+Consistency monitor: every range's normalized innovation (before gating) goes into a window per
+source (anchor or peer).  A source whose innovations keep one sign (|mean| sqrt(n) beyond `z`) is
+flagged: against the IMU-propagated track, a slowly drifting range (a blocked path that persists, a
+mis-surveyed anchor, later a spoofed GNSS) shows up as a bias, while noise does not.  Flags are
+reported (telemetry, heartbeats), not acted on.
+
 Peer ranges (LOCALIZATION=coop) are handled in coop.py on top of this.
 """
 
@@ -49,14 +65,45 @@ import numpy as np
 Vec3 = Tuple[float, float, float]
 
 
+class InnovationMonitor:
+    """Per-source window of normalized innovations e = y / sqrt(S); flags a persistent bias."""
+
+    def __init__(self, window: int = 20, min_n: int = 10, z: float = 3.3):
+        self.window, self.min_n, self.z = window, min_n, z
+        self._e: Dict[str, deque] = {}
+
+    def record(self, source: str, e: float) -> None:
+        self._e.setdefault(source, deque(maxlen=self.window)).append(e)
+
+    def bias(self, source: str) -> Optional[float]:
+        """Mean normalized innovation of the window, in units of its standard error (None: too few)."""
+        e = self._e.get(source)
+        if e is None or len(e) < self.min_n:
+            return None
+        return float(np.mean(e)) * math.sqrt(len(e))
+
+    def flagged(self) -> list:
+        return sorted(s for s in self._e if (b := self.bias(s)) is not None and abs(b) > self.z)
+
+
 class Localizer:
     CHI2_1_MEDIAN = 0.4549         # median of chi-square with 1 dof
     CHI2_99 = {1: 6.63, 2: 9.21, 3: 11.34, 4: 13.28}   # residual test for a re-lock fix, by dof
+    SF_CORRELATION = 10.0          # IMU scale-factor variance multiplier (see predict_imu)
 
     def __init__(self, range_sigma: float = 0.1, accel_sigma: float = 0.5, alpha: float = 0.35,
                  gate: float = 3.29, relock: int = 5, init_sigma: float = 5.0, tick_s: float = 0.02,
                  wind_walk: float = 0.05, wind_sigma0: float = 0.5, robust: bool = False,
-                 huber_k: float = 2.5, far_gate: float = 8.0, noise_window: int = 40, sigma_cap: float = 2.0):
+                 huber_k: float = 2.5, far_gate: float = 8.0, noise_window: int = 40, sigma_cap: float = 2.0,
+                 imu: Optional[Dict] = None, imu_accel_floor: float = 2e-3, exclude_flagged: bool = False):
+        self.imu = imu                       # sim-unit IMU errors (hardware.imu_errors): IMU mode
+        if imu is not None:
+            self.bias_sigma = math.hypot(imu["accel_bias"], imu["tilt_bias"])
+            self.bias_tau = min(imu["accel_bias_tau"], imu["tilt_tau"])
+        self.imu_accel_floor = imu_accel_floor   # m/s^2 white, for what the IMU model misses
+        self.monitor = InnovationMonitor()
+        self.exclude_flagged = exclude_flagged   # stop using a lone flagged source (still watched)
+        self.excluded = 0
         self.range_sigma = range_sigma       # the record's figure (the floor in robust mode)
         self.robust = robust
         self.huber_k = huber_k
@@ -86,9 +133,13 @@ class Localizer:
     def ready(self) -> bool:
         return self.x is not None
 
+    def _tail_var(self) -> float:
+        """Prior variance of states 4-5: the wind drift, or in IMU mode the accelerometer bias."""
+        return self.bias_sigma ** 2 if self.imu is not None else self.wind_sigma0 ** 2
+
     def init_prior(self, x: float, y: float, sigma: Optional[float] = None) -> None:
         s = self.init_sigma if sigma is None else sigma
-        w = self.wind_sigma0 ** 2
+        w = self._tail_var()
         self.x = np.array([x, y, 0.0, 0.0, 0.0, 0.0])
         self.P = np.diag([s * s, s * s, 0.25, 0.25, w, w])
 
@@ -96,11 +147,17 @@ class Localizer:
         return float(self.x[0]), float(self.x[1])
 
     def velocity(self) -> Tuple[float, float]:
-        """Velocity over the ground: the airframe's own plus the wind drift."""
+        """Velocity over the ground: the airframe's own plus the wind drift (IMU mode: the state)."""
+        if self.imu is not None:
+            return float(self.x[2]), float(self.x[3])
         return float(self.x[2] + self.x[4]), float(self.x[3] + self.x[5])
 
     def wind(self) -> Tuple[float, float]:
-        return float(self.x[4]), float(self.x[5])
+        """The learned wind drift (IMU mode: not a state; the ground velocity carries it)."""
+        return (0.0, 0.0) if self.imu is not None else (float(self.x[4]), float(self.x[5]))
+
+    def accel_bias(self) -> Tuple[float, float]:
+        return (float(self.x[4]), float(self.x[5])) if self.imu is not None else (0.0, 0.0)
 
     def pos_cov(self) -> np.ndarray:
         return self.P[:2, :2].copy()
@@ -138,12 +195,46 @@ class Localizer:
         Q[4, 4] = Q[5, 5] = self.wind_walk ** 2 * dt
         self.P = F @ self.P @ F.T + Q
 
+    def predict_imu(self, dt: float, dv: Tuple[float, float], dt_imu: Optional[float] = None) -> None:
+        """IMU mode: advance dt seconds with the accelerometer's delta-velocity dv measured over
+        dt_imu (normally the same interval; a longer dt, e.g. after a lost frame, is flown at
+        constant velocity for the rest)."""
+        if self.x is None or dt <= 0.0:
+            return
+        dti = dt if dt_imu is None or dt_imu <= 0.0 else min(dt_imu, dt)
+        imu = self.imu
+        k = math.exp(-dt / self.bias_tau)
+        F = np.eye(6)
+        F[0, 2] = F[1, 3] = dt
+        F[0, 4] = F[1, 5] = -dti * (dt - 0.5 * dti)     # the bias over the IMU interval, then carried
+        F[2, 4] = F[3, 5] = -dti
+        F[4, 4] = F[5, 5] = k
+        dvx, dvy = float(dv[0]), float(dv[1])
+        u = np.array([dvx * (dt - 0.5 * dti), dvy * (dt - 0.5 * dti), dvx, dvy, 0.0, 0.0])
+        self.x = F @ self.x + u
+        # Velocity noise: the noise density over the interval, the scale factor on what was measured,
+        # and a floor for what the model misses; it enters position through the same interval.  The
+        # scale factor is a constant per axis, so its errors add up over a manoeuvre instead of
+        # averaging out; counted as white noise with SF_CORRELATION x its variance (calibrated in
+        # simulation: x1 gave NEES 3.1, x10 1.7 with 96 % inside the 95 % ellipse, more is pessimistic).
+        qv = imu["noise_density"] ** 2 * dti \
+            + self.SF_CORRELATION * (imu["scale_factor"] * math.hypot(dvx, dvy)) ** 2 \
+            + (self.imu_accel_floor * dt) ** 2
+        G = np.array([[0.5 * dt, 0], [0, 0.5 * dt], [1, 0], [0, 1], [0, 0], [0, 0]])
+        Q = qv * (G @ G.T)
+        # When within the frame the velocity changed is unknown (the airframe responds to commands as
+        # they arrive): the mid-frame assumption is off by up to dv dt / 2, uniform: variance (dv dt)^2/12.
+        Q[0, 0] += (dvx * dti) ** 2 / 12.0
+        Q[1, 1] += (dvy * dti) ** 2 / 12.0
+        Q[4, 4] = Q[5, 5] = self.bias_sigma ** 2 * (1.0 - k * k)
+        self.P = F @ self.P @ F.T + Q
+
     # --- measurements ---------------------------------------------------
     def update_range(self, anchor: Vec3, r: float, z: float, sigma: Optional[float] = None,
-                     t: Optional[float] = None) -> bool:
+                     t: Optional[float] = None, source: Optional[str] = None) -> bool:
         """A range to a known point.  z: our altitude.  sigma: its noise if not the filter's own
         (peers: theirs added); only ranges with sigma=None (anchors) train the noise estimate.
-        Returns False if gated out."""
+        source: the anchor's or peer's id, for the consistency monitor.  Returns False if gated out."""
         if self.x is None:
             return False
         s = self.noise_sigma() if sigma is None else sigma
@@ -155,6 +246,13 @@ class Localizer:
         hph = float((H @ self.P @ H.T)[0, 0])
         S = hph + s * s
         y = r - h
+        if source is not None:
+            self.monitor.record(source, y / math.sqrt(S))
+            # One source drifting against the track: watched, not used, until it agrees again.  Several
+            # at once is the environment (widespread NLOS) or our own estimate, not a culprit: keep them.
+            if self.exclude_flagged and self.monitor.flagged() == [source]:
+                self.excluded += 1
+                return False
         # Robust handling is for anchor ranges only.  A peer's error is its estimate's, not a blocked
         # path: with Huber and the far gate on peers, peer-only drones beyond anchor range were pulled
         # far off (uwb_short: NEES 50 -> 399); consistent peer fusion is RDL's job.
@@ -256,7 +354,7 @@ class Localizer:
         self.P = np.zeros((6, 6))
         self.P[:2, :2] = C * self.noise_sigma() ** 2 + np.eye(2) * 1e-4
         self.P[2, 2] = self.P[3, 3] = 0.25
-        self.P[4, 4] = self.P[5, 5] = self.wind_sigma0 ** 2
+        self.P[4, 4] = self.P[5, 5] = self._tail_var()
         self._run = 0
         return True
 

@@ -67,6 +67,7 @@ class DenddronAgent:
     # Altitude and attitude are always given.
     LOCALIZATION = (os.environ.get("LOCALIZATION") or "coop").strip().lower()
     UWB_FILTER = (os.environ.get("UWB_FILTER") or "robust").strip().lower()   # robust | basic (localization.py)
+    NAV_PREDICT = (os.environ.get("NAV_PREDICT") or "imu").strip().lower()     # imu | cmd (localization.py)
     LOC_EVAL_PERIOD_S = 0.5    # sim s between localization reports for evaluation (drone/{id}/loc)
     # Station keeping: drift (wind) beyond this from the hold point, or beyond the distance a goal
     # latched at, flies the drone back.  Never triggers in calm air (a holding drone does not move).
@@ -186,14 +187,18 @@ class DenddronAgent:
         if self.LOCALIZATION != "truth":
             uwb = self.hw.get("uwb", {})
             self.anchors = anchors_from_record(self.hw)
-            self.loc = Localizer(range_sigma=float(uwb.get("range_sigma_m", 0.1)), robust=self.UWB_FILTER == "robust")
+            robust = self.UWB_FILTER == "robust"
+            imu = hardware.imu_errors(self.hw) if self.NAV_PREDICT == "imu" and "imu" in self.hw else None
+            self.loc = Localizer(range_sigma=float(uwb.get("range_sigma_m", 0.1)), robust=robust, imu=imu,
+                                 exclude_flagged=robust)
             # launch position known to a few metres; the anchors refine it within seconds
             self.loc.init_prior(float(self.spawn_pose["x"]), float(self.spawn_pose["y"]))
         self.coop = None
         if self.LOCALIZATION == "coop":
             self.coop = Coop(self.agent_id, max_peers=int(self.hw.get("uwb", {}).get("max_peers", 6)))
             logger.info(f"[{self.agent_id}] Localization {self.LOCALIZATION}: {len(self.anchors)} UWB anchors, "
-                        f"range sigma {self.loc.range_sigma} m, {self.UWB_FILTER} filter")
+                        f"range sigma {self.loc.range_sigma} m, {self.UWB_FILTER} filter, "
+                        f"prediction {'imu (' + imu['scaling'] + ')' if imu else 'cmd'}")
 
         # --- Path Planner: strategy selection ---
         planner_cfg = dict(global_cfg.get("path_planning", {}))
@@ -415,9 +420,9 @@ class DenddronAgent:
                 "yaw": pose.get("yaw", 0.0)
             }
             if self.loc is not None and sim_time is not None:
-                # x, y are not given: predict our estimate to this frame with the command we sent
-                # (frame sim time drives the integration step, as for the controller)
-                current_pose["x"], current_pose["y"] = self._loc_predict(float(sim_time))
+                # x, y are not given: predict our estimate to this frame with the IMU's delta-velocity
+                # (or the command we sent); frame sim time drives the integration step
+                current_pose["x"], current_pose["y"] = self._loc_predict(float(sim_time), payload.get("imu"))
 
             accepted, timing_state = self.timing.record_sensor(sim_time)
             if not accepted:
@@ -461,10 +466,16 @@ class DenddronAgent:
         except Exception:
             return 0.0, 0.0
 
-    def _loc_predict(self, t: float):
+    def _loc_predict(self, t: float, imu: dict = None):
         with self._loc_lock:
             if self._loc_frame_t is not None and t > self._loc_frame_t:
-                self.loc.predict(t - self._loc_frame_t, self._last_cmd_xy())
+                dt = t - self._loc_frame_t
+                if self.loc.imu is not None:
+                    # no IMU data in a frame (the simulator's first): constant velocity over it
+                    dv, dti = ((float(imu["dv"][0]), float(imu["dv"][1])), float(imu["dt"])) if imu else ((0.0, 0.0), 0.0)
+                    self.loc.predict_imu(dt, dv, dti)
+                else:
+                    self.loc.predict(dt, self._last_cmd_xy())
             self._loc_frame_t = t
             x, y = self.loc.position()
             report = t - self._loc_report_t >= self.LOC_EVAL_PERIOD_S
@@ -475,7 +486,10 @@ class DenddronAgent:
                        "cov": [round(float(P[0, 0]), 5), round(float(P[0, 1]), 5), round(float(P[1, 1]), 5)],
                        "status": self.loc.status(), "updates": self.loc.updates, "rejected": self.loc.rejected,
                        "relocks": self.loc.relocks, "noise_sigma": round(self.loc.noise_sigma(), 3),
-                       "downweighted": self.loc.downweighted}
+                       "downweighted": self.loc.downweighted, "flags": self.loc.monitor.flagged(),
+                       "excluded": self.loc.excluded}
+                if self.loc.imu is not None:
+                    msg["accel_bias"] = [round(b, 6) for b in self.loc.accel_bias()]
                 if self.coop is not None:
                     msg.update(hops=self.coop.hops(t), peer_updates=self.coop.peer_updates)
         if report:
@@ -495,11 +509,12 @@ class DenddronAgent:
         if z is None:
             return
         anchor_ids = list(self.anchors)
+        ids = [anchor_ids[int(k)] for k, _ in m.get("anchors", []) if int(k) < len(anchor_ids)]
         got = [(self.anchors[anchor_ids[int(k)]], float(r)) for k, r in m.get("anchors", []) if int(k) < len(anchor_ids)]
         t = m.get("sim_time")
         with self._loc_lock:
-            for a, r in got:
-                if self.loc.update_range(a, r, z, t=t) and self.coop is not None:
+            for aid, (a, r) in zip(ids, got):
+                if self.loc.update_range(a, r, z, t=t, source=aid) and self.coop is not None:
                     self.coop.on_anchor_update(t)
             if self.coop is not None and m.get("peers"):
                 ref = self.coop.anchor_t()                # our chain before this round
@@ -531,6 +546,12 @@ class DenddronAgent:
             return None
         with self._loc_lock:
             return round(self.loc.sigma_max(), 2)
+
+    def _loc_flags(self):
+        if self.loc is None:
+            return []
+        with self._loc_lock:
+            return self.loc.monitor.flagged()
 
     def _process_lidar(self, scan: dict, pose: dict):
         """scan: {"angle_step", "ranges": [...], "hits": [0/1, ...]}; ray i points at i * angle_step."""
@@ -1716,6 +1737,7 @@ class DenddronAgent:
             "link": self._link_up(),
             "pose": None if pose is None else {k: round(pose[k], 2) for k in ("x", "y", "z")},
             "pos_sigma": self._pos_sigma(),         # 1-sigma horizontal position uncertainty (None: truth)
+            "loc_flags": self._loc_flags(),         # range sources drifting against our track (anchors)
             "threat_id": eng["threat"].threat_id if eng else None,
             "t_engage": eng["t_engage"] if eng else None,
             "confirmed": eng["confirmed"] if eng else None,
