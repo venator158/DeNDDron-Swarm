@@ -18,7 +18,7 @@ from timing import TimingManager, TimingState
 from auction import AuctionManager
 from telemetry import Telemetry
 from threats import ETA_MARGIN, ORDER_SLACK_S, Threat, slot_point
-from deconflict import SLOT_RADIUS_M, Blast, plan_route
+from deconflict import SLOT_SPACING_M, Blast, plan_route
 import fuze as fuzelib
 from links import open_onboard
 from radio_process import RadioProcess
@@ -50,7 +50,7 @@ class DenddronAgent:
     BID_COPY_GAP_S = 0.2       # 1 s bid window: a winner that misses a mate's bid drops a level-2 threat
     CONFIRM_TRACE = os.environ.get("CONFIRM_TRACE") == "1"   # log award/ACK/job traffic with sim times
     RETARGET_MIN_M = 0.5       # job updates that move our slot less than this do not change the goal
-    SLOT_RADIUS = SLOT_RADIUS_M  # m, job-mates stacked vertically within +-this of the engagement point
+    SLOT_SPACING = SLOT_SPACING_M  # m, job-mates stacked vertically this far apart through the engagement point
     DETONATE_RADIUS = 8.0      # m, must be this close to the slot at t_engage to detonate (= kill radius)
     KILL_RADIUS = 8.0          # m, a detonation destroys any drone this close (friendly fire included)
     CLEARANCE_M = 12.0         # m, non-job drones are kept this far from a detonation (ship's zones)
@@ -1216,7 +1216,7 @@ class DenddronAgent:
     def _set_engagement(self, eng):
         """Install an engagement (a new dict): plan the route to its slot around other jobs' blasts
         (holds included) and fly its first leg.  Caller holds _eng_lock."""
-        sp = slot_point(eng["point"], eng["slot"], eng["n_slots"], self.SLOT_RADIUS)
+        sp = slot_point(eng["point"], eng["slot"], eng["n_slots"], self.SLOT_SPACING)
         eng["slot_point"] = {"x": sp[0], "y": sp[1], "z": sp[2]}
         with self.state_lock:
             pose = dict(self.current_pose) if self.current_pose is not None else None

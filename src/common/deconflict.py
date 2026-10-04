@@ -28,7 +28,9 @@ from threats import ETA_MARGIN, eta
 Vec3 = Tuple[float, float, float]
 
 CLEARANCE_M = 12.0         # non-job drones are kept this far from a detonation (kill radius 8 m + margin)
-SLOT_RADIUS_M = 3.0        # job-mates are stacked within +-this of the engagement point (multi-drone jobs)
+SLOT_SPACING_M = 4.0       # vertical spacing of job-mates stacked through the engagement point (owner's decision:
+                           # at 3 m, with 0.5 m altitude latching, mates came 2.0-2.5 m apart, inside the 2.5 m
+                           # proximity threshold); a three-drone stack spans +-4 m, a two-drone one +-2 m
 def _blast_tol() -> float:
     """Detonation time uncertainty: 1.5 s for timed detonation; with the proximity fuze (FUZE, on by
     default) a drone may fire anywhere in its window, t_engage +- FUZE_WINDOW_S, so at least that."""
@@ -43,7 +45,8 @@ SAMPLE_S = 0.1             # route sampling step inside a blast window
 
 
 def slot_radius(level: int) -> float:
-    return SLOT_RADIUS_M if level > 1 else 0.0
+    """How far a job's outermost slot is from its engagement point."""
+    return SLOT_SPACING_M * (level - 1) / 2.0 if level > 1 else 0.0
 
 
 def blast_radius(level: int) -> float:

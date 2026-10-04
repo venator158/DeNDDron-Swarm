@@ -86,16 +86,16 @@ def engagement_point(p0: Vec3, v: Vec3, t0: float, defended_radius: float) -> Tu
     return position_at(p0, v, t0, t0 + s), t0 + s
 
 
-def slot_point(point: Vec3, slot: int, n_slots: int, radius: float) -> Vec3:
-    """Stack n drones vertically through the engagement point, evenly within +-radius.
+def slot_point(point: Vec3, slot: int, n_slots: int, spacing: float) -> Vec3:
+    """Stack n drones vertically through the engagement point, `spacing` m apart, centred on it.
 
-    Vertical, not a horizontal circle: the drones' lidar is planar (obstacles within ~1.75 m of
-    their altitude), so job-mates a few metres apart vertically do not repel each other off their
-    slots, and each is at most `radius` from the point (the threat) - fewer misses.
+    Vertical, not a horizontal circle: obstacle avoidance is planar (contacts within ~1.75 m of the
+    drone's altitude), so job-mates a few metres apart vertically do not repel each other off their
+    slots, and each stays close to the point (the threat) - fewer misses.
     """
     if n_slots <= 1:
         return point
-    dz = -radius + 2.0 * radius * slot / (n_slots - 1)
+    dz = (slot - (n_slots - 1) / 2.0) * spacing
     return (point[0], point[1], point[2] + dz)
 
 
