@@ -125,7 +125,7 @@ void GazeboSimulator::init() {
     configure_localization();
     configure_environment();
     configure_imu();
-    if (_loc_mode == "coop") {
+    if (_loc_mode == "coop" || _loc_mode == "rdl") {
         auto sub_opt_uwb = zenoh::Session::SubscriberOptions::create_default();
         _sub_uwb_tx.emplace(_session->declare_subscriber(
             zenoh::KeyExpr("drone/*/uwb_tx"),
@@ -938,6 +938,11 @@ void GazeboSimulator::configure_localization() {
         _uwb_range = u.at("max_range_m").get<double>();
         _uwb_dropout = u.value("dropout_p", 0.0);
         _uwb_capacity = u.value("channel_capacity_per_s", 1000.0);
+        if (_loc_mode == "rdl") {
+            // RDL's larger payload (state, covariance, factor, reply) takes longer on air per exchange
+            const double base = u.value("exchange_airtime_s", 0.001);
+            _uwb_capacity *= base / u.value("rdl_exchange_airtime_s", base);
+        }
         _uwb_anchor_period = 1.0 / std::max(0.1, u.at("anchor_rate_hz").get<double>());
         _uwb_peer_period = 1.0 / std::max(0.1, u.at("peer_rate_hz").get<double>());
         _uwb_max_peers = u.value("max_peers", 6);
@@ -973,7 +978,7 @@ void GazeboSimulator::configure_localization() {
     }
     std::cout << "[GazeboSimulator] Localization " << _loc_mode << ": x,y withheld; UWB " << _anchors.size()
               << " anchors, sigma " << _uwb_sigma << " m, max range " << _uwb_range << " m, anchors every "
-              << _uwb_anchor_period << " s, peers every " << _uwb_peer_period << " s (max " << _uwb_max_peers
+              << _uwb_anchor_period << " s, peers every " << _uwb_peer_period << " s (max " << _uwb_max_peers << ", channel " << _uwb_capacity << " exchanges/s"
               << "), " << _uwb_jam.size() << " jam window(s); dropout " << _uwb_dropout << ", extra sigma "
               << _uwb_extra_sigma << " m, NLOS p " << _uwb_nlos_p << " (bias mean " << _uwb_nlos_bias << " m)" << std::endl;
 }
@@ -1107,7 +1112,7 @@ void GazeboSimulator::publish_uwb(double sim_time, const std::vector<std::string
     }
     // Channel airtime: exchanges wanted per second vs the channel's capacity -> extra loss.
     double load = static_cast<double>(pos.size()) * _anchors.size() / _uwb_anchor_period;
-    if (_loc_mode == "coop")
+    if (_loc_mode == "coop" || _loc_mode == "rdl")
         load += static_cast<double>(pos.size()) * _uwb_max_peers / _uwb_peer_period;
     const double p_overload = load > _uwb_capacity ? 1.0 - _uwb_capacity / load : 0.0;
     std::uniform_real_distribution<double> uni(0.0, 1.0);
@@ -1121,7 +1126,7 @@ void GazeboSimulator::publish_uwb(double sim_time, const std::vector<std::string
     };
     auto lost = [&]() { return uni(_uwb_rng) < _uwb_dropout || uni(_uwb_rng) < p_overload; };
     for (const auto& [id, me] : pos) {
-        json out = {{"sim_time", sim_time}, {"anchors", json::array()}, {"peers", json::array()}};
+        json out = {{"sim_time", sim_time}, {"anchors", json::array()}, {"peers", json::array()}, {"replies", json::array()}};
         if (anchors && !uwb_jammed("anchors", sim_time, me)) {
             for (size_t k = 0; k < _anchors.size(); ++k) {
                 const double d = (_anchors[k] - me).Length();
@@ -1146,8 +1151,22 @@ void GazeboSimulator::publish_uwb(double sim_time, const std::vector<std::string
                                             ptx->second.value("state", json::object())});
                 }
             }
+            // RDL: replies other drones addressed to this one (the corrections of their joint updates),
+            // carried like a peer exchange: in range, not jammed at either end, lost like one.  A reply
+            // stays in its sender's uwb_tx for a while, so it is offered again; the drone applies it once.
+            if (_loc_mode == "rdl") {
+                for (const auto& [sender, stx] : tx) {
+                    if (sender == id || !stx.contains("replies") || !stx["replies"].is_object()) continue;
+                    auto rep = stx["replies"].find(id);
+                    auto q = pos.find(sender);
+                    if (rep == stx["replies"].end() || q == pos.end()) continue;
+                    if ((q->second - me).Length() > _uwb_range || uwb_jammed("peers", sim_time, q->second) || lost())
+                        continue;
+                    out["replies"].push_back({sender, *rep});
+                }
+            }
         }
-        if (!out["anchors"].empty() || !out["peers"].empty()) put("drone/" + id + "/uwb", out.dump());
+        if (!out["anchors"].empty() || !out["peers"].empty() || !out["replies"].empty()) put("drone/" + id + "/uwb", out.dump());
     }
 }
 
@@ -1304,7 +1323,7 @@ void GazeboSimulator::step() {
 
     if (_loc_mode != "truth") {
         const bool due_anchors = current_sim_time - _last_uwb_anchor_time >= _uwb_anchor_period - 1e-3;
-        const bool due_peers = _loc_mode == "coop" && current_sim_time - _last_uwb_peer_time >= _uwb_peer_period - 1e-3;
+        const bool due_peers = (_loc_mode == "coop" || _loc_mode == "rdl") && current_sim_time - _last_uwb_peer_time >= _uwb_peer_period - 1e-3;
         if (due_anchors) _last_uwb_anchor_time = current_sim_time;
         if (due_peers) _last_uwb_peer_time = current_sim_time;
         if (due_anchors || due_peers) publish_uwb(current_sim_time, active_agents, due_anchors, due_peers);

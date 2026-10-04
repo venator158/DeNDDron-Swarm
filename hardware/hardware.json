@@ -29,6 +29,9 @@
     "max_peers": 6,
     "dropout_p": 0.02,
     "payload_bytes": 64,
+    "rdl_payload_bytes": 176,
+    "rdl_exchange_airtime_s": 0.00116,
+    "_rdl_payload": "LOCALIZATION=rdl: 150 B per exchange (state 6 x float32, covariance 21 x float16, the one cross-covariance factor 36 x float16, header) plus a 26 B reply carried in a later frame; float16 left the simulated results unchanged. Needs 802.15.4z extended frames (DW3000-class: up to 1023 B); +112 B at 6.8 Mbps is ~0.16 ms per exchange, so the channel carries ~860 instead of 1000 exchanges/s.",
     "simulated": true
   },
   "uwb_anchors": {

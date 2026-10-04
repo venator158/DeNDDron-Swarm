@@ -67,7 +67,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --localization)
-      # coop (default: UWB to the ship's anchors + peers) | anchors (anchors only) | truth (simulator x,y)
+      # coop (default: UWB to the ship's anchors + peers) | rdl (peers fused consistently, rdl.py) | anchors (anchors only) | truth (simulator x,y)
       export LOCALIZATION="$2"
       shift 2
       ;;
