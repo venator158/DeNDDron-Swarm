@@ -125,6 +125,7 @@ services:
       CLOCK_STEP_S: ${CLOCK_STEP_S:-0.05}
       PERCEPTION: ${PERCEPTION:-radar}                    # obstacle avoidance from the radar, or lidar + voxel map (legacy)
       LOCALIZATION: ${LOCALIZATION:-coop}                 # coop | anchors | truth (UWB, hardware record)
+      UWB_FILTER: ${UWB_FILTER:-robust}                   # robust (adaptive noise, Huber, safe re-locks) | basic
       UWB_JAM: ${UWB_JAM:-}
       # Proximity fuze (src/agent/fuze.py); FUZE=0 = timed detonation at t_engage
       FUZE: ${FUZE:-1}

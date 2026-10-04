@@ -152,7 +152,7 @@ class Coop:
             self.peer_skipped += 1
             return False
         px, py, P = n.at(t, self.accel_sigma)
-        s = loc.range_sigma if sigma is None else sigma
+        s = loc.noise_sigma() if sigma is None else sigma
         dx, dy, dz = loc.x[0] - px, loc.x[1] - py, z - n.z
         h = math.sqrt(dx * dx + dy * dy + dz * dz)
         if h < 1e-6:

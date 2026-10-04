@@ -130,6 +130,7 @@ class MetricsNode:
         # compared with sim/truth extrapolated to the report's sim time.
         self._truth = {}                 # agent -> (sim_time, x, y, vx, vy)
         self._loc_errs = []              # recent position errors (m), for percentiles
+        self._loc_level = {}             # drone -> highest error level logged (m)
         self._loc_stats = {"n": 0, "sum": 0.0, "max": 0.0, "nees_sum": 0.0, "within95": 0, "relocks": {}}
         self._sub_loc = session.declare_subscriber("drone/*/loc", self._on_loc)
         self._sub_join = session.declare_subscriber(
@@ -201,6 +202,14 @@ class MetricsNode:
                 st["nees_sum"] += min(nees, 1e6)
                 st["within95"] += nees <= 5.99
                 st["relocks"][agent_id] = m.get("relocks", 0)
+                # Log each drone's error the first time it crosses 5, 10, 30, 100 m (diagnosis)
+                level = max([x for x in (5.0, 10.0, 30.0, 100.0) if err >= x], default=0.0)
+                if level > self._loc_level.get(agent_id, 0.0):
+                    self._loc_level[agent_id] = level
+                    log.info(f"loc error {agent_id} >= {level:.0f} m at t={m['sim_time']:.1f}: {err:.1f} m, "
+                             f"claimed sigma {math.sqrt(max(a, c)):.2f} m, status {m.get('status')}, "
+                             f"hops {m.get('hops')}, relocks {m.get('relocks')}, noise {m.get('noise_sigma')}, "
+                             f"truth ({tr[1]:.0f}, {tr[2]:.0f})")
                 self._loc_errs.append(err)
                 if len(self._loc_errs) > 20000:
                     del self._loc_errs[:5000]
