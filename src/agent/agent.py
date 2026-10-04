@@ -44,7 +44,8 @@ class DenddronAgent:
     TELEMETRY_HZ = 1.0
     LINK_TIMEOUT_S = 3.0       # no radio traffic for this long = disconnected from the swarm
     AWARD_RESENDS = 2          # extra copies of each award/withdrawal, one per heartbeat tick (lossy radio)
-    INBOX_REDECLARE_S = 1.5    # sim s: inbox silent this long while awaiting the ship (and hearing it): re-subscribe
+    BID_COPIES = 3             # each bid is sent this many times, BID_COPY_GAP_S (sim s) apart, inside the
+    BID_COPY_GAP_S = 0.2       # 1 s bid window: a winner that misses a mate's bid drops a level-2 threat
     CONFIRM_TRACE = os.environ.get("CONFIRM_TRACE") == "1"   # log award/ACK/job traffic with sim times
     RETARGET_MIN_M = 0.5       # job updates that move our slot less than this do not change the goal
     SLOT_RADIUS = SLOT_RADIUS_M  # m, job-mates stacked vertically within +-this of the engagement point
@@ -291,9 +292,6 @@ class DenddronAgent:
         # Engagement: set on winning an auction (tentative), confirmed by the ship's ACK or by appearing
         # in a job update's holders, updated by job updates.  Replaced whole, under _eng_lock.
         self._eng_lock = threading.RLock()
-        self._last_inbox_rx = None     # simclock time of the last message in our inbox
-        self._last_roster_rx = None    # simclock time of the last roster (the ship is heard)
-        self._inbox_declared = 0.0     # simclock time the inbox subscription was (re)declared
         self._award_lock = threading.Lock()
 
         # --- Onboard bus (simulator) ---
@@ -328,13 +326,9 @@ class DenddronAgent:
         # hears, and drones in the roster relay it (_relay_unheard_peers).
         self.pub_help      = self.radio.declare_publisher(f"swarm/heartbeat_help/{self.agent_id}")
         self.sub_help      = self.radio.declare_subscriber("swarm/heartbeat_help/*", self._on_peer_help)
-        # Our inbox: the ship's ACKs/NACKs and job updates for us.  Declared once, at startup.  Over the
-        # lossy UDP radio a subscriber declaration can be lost and is not retried (only 70 % of
-        # subscriptions declared at 30 % loss heard anything within 3 s, some none in 40 s;
-        # tools/comms/declare_probe.sh), so job updates do not use a per-job subscription, and the
-        # inbox is re-declared if it stays silent while we wait on the ship (_check_inbox).
+        # Our inbox: the ship's ACKs/NACKs and job updates for us, declared once at startup rather
+        # than a subscription per job (see links.py on why late declarations used to be lost).
         self.sub_inbox     = self.radio.declare_subscriber(f"ship/ack/{self.agent_id}", self._on_inbox)
-        self._inbox_declared = simclock.now()
         # Engagement zones: keep clear of other jobs' detonations (_service_zones, _keepout).
         self.zones = {}                # threat_id -> (zone, simclock time received)
         self._zones_sig = None
@@ -1052,7 +1046,14 @@ class DenddronAgent:
     # PILLAR 4: CONSENSUS MECHANISM
     # ==========================================
     def _propose_bid(self, wave_id, costs):
-        self._radio_put(self.pub_bids, "swarm/bids", {"agent_id": self.agent_id, "wave_id": wave_id, "costs": costs})
+        """Publish our bid, with repeats (receivers keep the latest bid per drone and wave).  The
+        assignment is all-or-nothing: with a lost bid a drone computes a different assignment, and
+        at 30 % loss a level-2 threat's winners missed each other's bids and neither engaged."""
+        bid = {"agent_id": self.agent_id, "wave_id": wave_id, "costs": costs}
+        self._radio_put(self.pub_bids, "swarm/bids", bid)
+        for k in range(1, self.BID_COPIES):
+            delay = k * self.BID_COPY_GAP_S / max(simclock.rate(), 0.1)
+            threading.Timer(delay, self._radio_put, args=(self.pub_bids, "swarm/bids", bid)).start()
         logger.info(f"[{self.agent_id}] Bid in {wave_id} (ETA s): "
                     + ", ".join(f"{k}={v:.1f}" for k, v in costs.items()))
 
@@ -1246,7 +1247,6 @@ class DenddronAgent:
         """Our inbox (ship/ack/{id}): ACK/NACK (has 'accepted') or a job update."""
         local_rx = self._stamp()
         self._radio_heard()
-        self._last_inbox_rx = simclock.now()
         try:
             msg = self._inbound_job(self._parse(sample), local_rx)
         except Exception as e:
@@ -1517,26 +1517,6 @@ class DenddronAgent:
             if cur is not None and cur["threat"].threat_id == tid and not self.destroyed:
                 self._abandon(tid, "no_detection")
 
-    def _check_inbox(self):
-        """Re-declare our inbox subscription if it has gone quiet while we wait on the ship.
-
-        Awaiting confirmation, the ship answers each heartbeat (2 Hz) with an ACK; confirmed, job
-        updates arrive at 2 Hz.  If none has arrived for INBOX_REDECLARE_S while the ship's roster is
-        heard, the ship probably never got our subscription (a lost declaration is not retried)."""
-        eng = self.engagement
-        now = simclock.now()
-        if eng is None or self._last_roster_rx is None or now - self._last_roster_rx > self.INBOX_REDECLARE_S:
-            return
-        quiet_since = max(eng["since"] or now, self._last_inbox_rx or 0.0, self._inbox_declared)
-        if now - quiet_since < self.INBOX_REDECLARE_S:
-            return
-        old = self.sub_inbox
-        self.sub_inbox = self.radio.declare_subscriber(f"ship/ack/{self.agent_id}", self._on_inbox)
-        self._inbox_declared = now
-        old.undeclare()
-        logger.warning(f"[{self.agent_id}] Inbox silent for {now - quiet_since:.1f}s while engaged on "
-                       f"{eng['threat'].threat_id}; re-declared it")
-
     def _disengage(self, threat_id: str, status: str):
         with self._eng_lock:
             self.engaged_threat = None
@@ -1755,7 +1735,6 @@ class DenddronAgent:
             try:
                 self._send_heartbeat()
                 self._resend_awards()
-                self._check_inbox()
                 tick += 1
                 if tick % ticks_per_telemetry == 0:
                     self._relay_unheard_peers()
@@ -1886,7 +1865,6 @@ class DenddronAgent:
     def _on_roster(self, sample):
         t4 = self._stamp()
         self._radio_heard()
-        self._last_roster_rx = simclock.now()
         self.telemetry.rx("ship/roster")
         try:
             msg = self._parse(sample)

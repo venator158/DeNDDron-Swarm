@@ -67,38 +67,51 @@ QOS_PROFILES = {
 }
 
 
+QUIC_PORT_OFFSET = 1   # a node's QUIC link listens on its UDP port + this (both are UDP sockets)
+
+
+def _port(proto: str, port: int) -> int:
+    return port + QUIC_PORT_OFFSET if proto == "quic" and port else port
+
+
 def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = None) -> zenoh.Session:
     """Peer-mode session bound to the radio network only.
 
     Agents and the ship open this inside a RadioProcess (radio_process.py), so that
     no radio problem can freeze their onboard link.
 
-    - protocol (RADIO_PROTO, udp): see the comment below.
+    - protocol (RADIO_PROTO, quic,udp): see the comments below.
     - QoS profile (RADIO_QOS, default): per-topic priority/congestion rules, QOS_PROFILES.
-    - lease (RADIO_LEASE_MS, 2 s): how soon a lost peer is noticed.
+    - lease (RADIO_LEASE_MS, 6 s): how soon a lost peer's session closes.  At 2 s, 30 % loss lost
+      enough keep-alives in a row to close and reopen sessions several times a run (50 % loss: 54
+      times in 2 min, 8 peers), and a reopened session must declare everything again; at 6 s, none.
     - open/accept timeout (RADIO_OPEN_TIMEOUT_MS, 1 s): bounds connection attempts.
     - routing_mode (RADIO_ROUTING) only exists before Zenoh 1.1; newer versions
       always route peer-to-peer and ignore it.
     """
     subnet = subnet or os.environ.get("RADIO_SUBNET", "172.21.0.0/16")
     routing_mode = routing_mode or os.environ.get("RADIO_ROUTING", "linkstate")
-    lease_ms = lease_ms or int(os.environ.get("RADIO_LEASE_MS") or 2000)
+    lease_ms = lease_ms or int(os.environ.get("RADIO_LEASE_MS") or 6000)
     open_ms = int(os.environ.get("RADIO_OPEN_TIMEOUT_MS") or 1000)
     iface, ip = find_interface(subnet)
     conf = zenoh.Config()
     conf.insert_json5("mode", '"peer"')
     # Listen only on the radio address so every peer link runs over the radio network.
-    # RADIO_PROTO: "udp" (default), "tcp", or "tcp,udp". With any TCP link, jamming one peer stalled
-    # other peers' traffic (and the jammed node's other Zenoh sessions) for ~10 s inside Zenoh's TCP
-    # link handling; over UDP that does not happen. UDP means best-effort delivery: the protocol
-    # recovers from lost orders/bids/awards by re-announcement and conflict repair.
-    protos = [p.strip() for p in (os.environ.get("RADIO_PROTO") or "udp").split(",") if p.strip()]
+    # RADIO_PROTO: "quic,udp" (default), "udp", "tcp", or "tcp,udp". With any TCP link, jamming one
+    # peer stalled other peers' traffic (and the jammed node's other Zenoh sessions) for ~10 s inside
+    # Zenoh's TCP link handling; over UDP and QUIC that does not happen (radio_probe.sh). Data is
+    # best-effort over UDP: the protocol recovers from lost orders/bids/awards by repeats,
+    # re-announcement and conflict repair. QUIC carries Zenoh's control messages (below).
+    protos = [p.strip() for p in (os.environ.get("RADIO_PROTO") or "quic,udp").split(",") if p.strip()]
     port = int(os.environ.get("RADIO_LISTEN_PORT") or 0)       # the ship listens on a fixed port
-    conf.insert_json5("listen/endpoints", json.dumps([f"{p}/{ip}:{port}" for p in protos]))
+    conf.insert_json5("listen/endpoints", json.dumps([f"{p}/{ip}:{_port(p, port)}" for p in protos]))
     # Meeting point: also connect to the ship's fixed radio address (RADIO_CONNECT), retrying until
     # it is up.  Multicast discovery alone occasionally missed a node when ~50 start at once, and
     # a drone with no radio session is silent; peer gossip introduces the others once connected.
     connect = [e.strip() for e in (os.environ.get("RADIO_CONNECT") or "").split(",") if e.strip()]
+    if "quic" in protos:   # the meeting point's QUIC link listens next to its UDP one
+        connect += [f"quic/{host}:{_port('quic', int(p))}" for host, p in
+                    (e[len("udp/"):].rsplit(":", 1) for e in connect if e.startswith("udp/"))]
     if connect:
         conf.insert_json5("connect/endpoints", json.dumps(connect))
         conf.insert_json5("connect/exit_on_failure", "false")
@@ -116,9 +129,24 @@ def open_radio(subnet: str = None, routing_mode: str = None, lease_ms: int = Non
             conf.insert_json5(key, value)
         except zenoh.ZError:
             pass   # key not supported by this Zenoh version
+    if "quic" in protos:
+        # Reliable control plane.  Over UDP, Zenoh sends its control messages once: a lost key
+        # expression declaration makes every later message that names it undecodable at that peer
+        # ("Unknown wire expr"), so a subscription or a publisher's data to that peer stays dead
+        # (tools/comms/declare_probe.sh, mesh_probe.sh).  A QUIC link next to the UDP one carries
+        # the reliable messages (declarations, interests); publications are best-effort (below),
+        # so data keeps using UDP and is never retransmitted late.
+        tls = os.path.join(os.path.dirname(os.path.abspath(__file__)), "radio_tls")
+        for key, value in (("root_ca_certificate", "ca.pem"), ("listen_certificate", "radio.pem"),
+                           ("listen_private_key", "radio.key")):
+            conf.insert_json5(f"transport/link/tls/{key}", json.dumps(os.path.join(tls, value)))
+        conf.insert_json5("transport/link/tls/verify_name_on_connect", "false")
     qos = os.environ.get("RADIO_QOS") or "default"
-    if QOS_PROFILES[qos]:
-        conf.insert_json5("qos/publication", json.dumps(QOS_PROFILES[qos]))
+    publication = list(QOS_PROFILES[qos])
+    if "quic" in protos and "udp" in protos:
+        publication.append({"key_exprs": ["**"], "config": {"reliability": "best_effort"}})
+    if publication:
+        conf.insert_json5("qos/publication", json.dumps(publication))
     # Extra Zenoh settings for experiments, e.g. RADIO_ZENOH_CONFIG='{"routing/interests/timeout": 1000}'.
     # Unknown keys fail loudly here, so a typo cannot silently change nothing.
     for key, value in json.loads(os.environ.get("RADIO_ZENOH_CONFIG") or "{}").items():

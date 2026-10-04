@@ -13,6 +13,8 @@ import os
 import threading
 import time
 
+import zenoh
+
 from links import open_radio
 
 N = int(os.environ.get("TRIALS", "40"))
@@ -22,6 +24,8 @@ START_S = float(os.environ.get("START_S", "10"))   # sessions up and impairment 
 
 def main():
     role, test = os.environ["ROLE"], os.environ["TEST"]
+    if os.environ.get("RUST_LOG", "error") != "error":
+        zenoh.init_log_from_env_or("error")
     s = open_radio(os.environ.get("RADIO_SUBNET"))
     t0 = time.monotonic()
     if role == "pub":
@@ -55,10 +59,37 @@ def main():
             return on
 
         time.sleep(START_S + 1.0)          # PUB is publishing every key by now
-        subs = []
+        refresh_s = float(os.environ.get("REFRESH_S") or 0)
+        mode = os.environ.get("REFRESH_MODE", "same")      # same: undeclare + declare the key; fresh: new keyexpr
+        subs = {}
+        nforms = {}
+
+        def refresher():
+            k = 0
+            while refresh_s > 0:
+                time.sleep(refresh_s)
+                k += 1
+                keys = [x for x in list(subs) if not isinstance(x, tuple)]
+                if mode == "gap":                 # undeclare all, let it reach the wire, declare all again
+                    for i in keys:
+                        subs[i].undeclare()
+                    time.sleep(0.2)
+                    for i in keys:
+                        subs[i] = s.declare_subscriber(f"late/{i}", cb(i))
+                    continue
+                for i in [x for x in keys if not isinstance(x, tuple)]:
+                    if mode == "same":
+                        subs[i].undeclare()
+                        subs[i] = s.declare_subscriber(f"late/{i}", cb(i))
+                    elif mode == "forms":   # a new key expression matching late/i each time, kept
+                        nforms[i] = nforms.get(i, 0) + 1
+                        if nforms[i] <= 3:
+                            form = [f"late/{i}/**", f"late/{i}$*", f"late/{i}$*/**"][nforms[i] - 1]
+                            subs[("x", i, nforms[i])] = s.declare_subscriber(form, zenoh.handlers.RingChannel(1))
+        threading.Thread(target=refresher, daemon=True).start()
         for i in range(N):
             declared[i] = time.monotonic()
-            subs.append(s.declare_subscriber(f"late/{i}", cb(i)))
+            subs[i] = s.declare_subscriber(f"late/{i}", cb(i))
             time.sleep(0.5)
         time.sleep(WATCH_S)
         heard = [i for i in range(N) if i in first]
