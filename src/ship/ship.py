@@ -35,13 +35,20 @@ import localclock
 import simclock
 from radio_process import RadioProcess
 from deconflict import Reservation, blast_radius, choose_intercept, plan_route
-from jobs import arbitrate
+from jobs import arbitrate, heartbeat_answer
 from threat_queue import ThreatQueue
 from threats import (DEFAULT_THREAT_TYPES, ORDER_SLACK_S, Threat, aim_velocity, closest_point_of_approach,
                      engagement_point, parse_threat_types, position_at)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [Ship] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("Ship")
+CONFIRM_TRACE = os.environ.get("CONFIRM_TRACE") == "1"   # log award/ACK/job traffic with sim times
+
+
+def _trace(what, **fields):
+    if CONFIRM_TRACE:
+        t = simclock.truth_now()
+        log.info("TRACE %s t=%.3f %s", what, -1.0 if t is None else t, " ".join(f"{k}={v}" for k, v in fields.items()))
 
 HERE = Path(__file__).resolve().parent
 MEMBER_TIMEOUT_S = 3.0     # seconds (simclock) without a heartbeat before a drone leaves the roster
@@ -52,6 +59,8 @@ SHIP_RADIUS = 16.0
 ACK_WINDOW_S = 0.3         # collect competing awards for a threat this long before confirming
 JOB_HZ = 2.0               # job topic updates per (sim) second
 JOB_CLOSE_REPEATS = 3      # "closed" job updates sent after a threat is resolved (lossy radio)
+ORDER_COPIES = 3           # each order is sent this many times (drones ignore repeats): a lost order to the
+ORDER_COPY_GAP_S = 0.15    # one drone that can make an intercept loses the threat; re-announcing takes 3 s
 HB_MISMATCH_S = 2.0        # a confirmed drone whose heartbeat shows another job this long is dropped
 INTERCEPT_REPLAN_S = 0.5   # intercept search results are reused this long (dashboard polls several times/s)
 # Slack before a re-planned intercept (after a manoeuvre) for the job's own drones.  A new order needs
@@ -106,6 +115,7 @@ class Track:
         self.mismatch = {}              # confirmed drone -> simclock time its heartbeat started disagreeing
         self.job_seq = 0
         self.close_repeats = 0
+        self.crew = set()               # drones pending or confirmed (and not withdrawn): job updates go to them
         self.maneuver_at = None         # sim time of the planned heading change, if any
         self.maneuvers = 0
         self.intercept_range = None     # distance from the ship of the chosen intercept point
@@ -200,6 +210,7 @@ class Ship:
         self.next_detection = None
         self.detected = 0
         self.order_seq = 0
+        self._order_copies = []          # [due simclock time, order message, copies left]
 
         self.drones = {}                 # id -> {"hb": heartbeat, "seen": wall, "telemetry": {...}}
         self.expended = set()
@@ -300,6 +311,37 @@ class Ship:
                 d["sync"] = (hb["t1"], t2)
             if hb.get("state") == "expended":
                 self.expended.add(hb["agent_id"])
+            else:
+                self._answer_heartbeat(hb["agent_id"], hb)
+
+    def _answer_heartbeat(self, agent, hb):
+        """Reconcile a drone's view of its job with ours from its heartbeat (2 Hz).  Caller holds the lock.
+
+        ACKs, awards and job updates can all be lost; the heartbeat says what the drone believes, so
+        each one gets the answer that fixes a disagreement: an unconfirmed holder gets its ACK again,
+        an unconfirmed drone whose award never arrived is taken into arbitration (the heartbeat
+        carries its bid), a refused one gets its NACK again, and a drone that believes in a job we
+        no longer give it gets the job update that releases it."""
+        tid = hb.get("threat_id")
+        tr = self.tracks.get(tid) if tid else None
+        if tr is None or agent in tr.detonated:
+            return
+        wave = hb.get("wave_id")
+        answer = heartbeat_answer(tr.status, agent in tr.confirmed, agent in tr.pending,
+                                  (agent, wave) in tr.rejected, bool(hb.get("confirmed")))
+        if answer == "job":
+            self._send_job_to(tr, agent)
+        elif answer in ("ack", "nack"):
+            self._send_ack(tr, agent, answer == "ack", wave)
+        elif answer == "pending":
+            if not tr.pending:
+                tr.pending_since = simclock.now()
+            tr.pending[agent] = (float(hb.get("cost") or 0.0), wave)
+            tr.holds[agent] = float(hb.get("hold_s") or 0.0)
+            tr.crew.add(agent)
+            if (agent, "engaged", wave) not in tr.award_events:
+                tr.award_events.add((agent, "engaged", wave))
+                self.event("award", threat=tr.threat_id, drone=agent, cost=hb.get("cost"), order=wave, via="heartbeat")
 
     def _on_relayed_heartbeat(self, sample):
         """A peer forwarded the heartbeat of a drone we could not hear directly."""
@@ -359,6 +401,7 @@ class Ship:
             if tr is None:
                 return
             agent, status, wave = a["agent_id"], a.get("status", "engaged"), a.get("wave_id")
+            _trace("award_rx", threat=tr.threat_id, drone=agent, status=status, wave=wave)
             first = (agent, status, wave) not in tr.award_events
             tr.award_events.add((agent, status, wave))
             if status == "engaged":
@@ -374,6 +417,7 @@ class Ship:
                     tr.pending_since = simclock.now()
                 tr.pending[agent] = (float(a.get("cost") or 0.0), wave)
                 tr.holds[agent] = float(a.get("hold_s") or 0.0)
+                tr.crew.add(agent)
                 if tr.approved_wall is not None and tr.first_award_ms is None:
                     tr.first_award_ms = round((simclock.now() - tr.approved_wall) * 1000)
                 if first:
@@ -382,6 +426,7 @@ class Ship:
                 tr.confirmed.pop(agent, None)
                 tr.pending.pop(agent, None)
                 tr.mismatch.pop(agent, None)
+                tr.crew.discard(agent)
                 if status == "missed":
                     tr.missed.add(agent)
                 elif status == "no_detection":
@@ -391,10 +436,10 @@ class Ship:
 
     # ----------------------------------------------------------------- jobs
     def _send_ack(self, tr, agent, accepted, wave=None):
-        msg = {"threat_id": tr.threat_id, "agent_id": agent, "wave_id": wave, "accepted": accepted,
-               "job": f"ship/jobs/{tr.threat_id}"}
+        msg = {"threat_id": tr.threat_id, "agent_id": agent, "wave_id": wave, "accepted": accepted}
         if accepted:
             msg.update(self._job_msg(tr))
+        _trace("ack_tx", threat=tr.threat_id, drone=agent, accepted=accepted, wave=wave)
         self.radio.put(f"ship/ack/{agent}", json.dumps(self._stamped(msg)))
 
     def _job_msg(self, tr):
@@ -459,8 +504,16 @@ class Ship:
         self.pub_zones.put(json.dumps(self._stamped({"zones": zones})))
 
     def _publish_job(self, tr):
+        """A job update to each of the job's drones, in its inbox (ship/ack/{drone}).  The radio is
+        peer-to-peer, so one shared topic would cost the same sends, but its subscription would be
+        declared when a drone wins, and a lost declaration is not retried."""
         tr.job_seq += 1
-        self.radio.put(f"ship/jobs/{tr.threat_id}", json.dumps(self._stamped(self._job_msg(tr))))
+        _trace("job_tx", threat=tr.threat_id, seq=tr.job_seq, holders=",".join(sorted(tr.confirmed)) or "-")
+        for agent in sorted(tr.crew - set(tr.detonated) - self.expended):
+            self._send_job_to(tr, agent)
+
+    def _send_job_to(self, tr, agent):
+        self.radio.put(f"ship/ack/{agent}", json.dumps(self._stamped(self._job_msg(tr))))
 
     def _arbitrate(self):
         """Confirm the best pending awards per threat once the collection window has passed."""
@@ -758,9 +811,20 @@ class Ship:
         self.order_seq += 1
         tr.orders.append(f"O{self.order_seq}")
         order = Threat(tr.threat_id, tr.type, tr.level, required, _xyz(tr.point), tr.t_engage)
-        self.pub_orders.put(json.dumps(self._stamped({"wave_id": f"O{self.order_seq}", "threats": [order.to_dict()]})))
+        msg = json.dumps(self._stamped({"wave_id": f"O{self.order_seq}", "threats": [order.to_dict()]}))
+        self.pub_orders.put(msg)
+        self._order_copies.append([simclock.now() + ORDER_COPY_GAP_S, msg, ORDER_COPIES - 1])
         tr.announces += 1
         tr.last_announce = simclock.now()
+
+    def _send_order_copies(self):
+        """Repeat copies of recent orders (same order id and 'sent' stamp; drones ignore repeats)."""
+        due = simclock.now()
+        for entry in [e for e in self._order_copies if e[0] <= due]:
+            self.pub_orders.put(entry[1])
+            entry[0] += ORDER_COPY_GAP_S
+            entry[2] -= 1
+        self._order_copies = [e for e in self._order_copies if e[2] > 0]
 
     def _engaged_by_heartbeat(self, tr):
         """Roster members whose latest heartbeat says they are engaging this threat."""
@@ -797,6 +861,7 @@ class Ship:
                     self._maneuver(now)
                     self._age_tracks(now)
                     self._arbitrate()
+                    self._send_order_copies()
                     self._reconcile()
                     self._retry_underassigned(now)
                     self._auto_approve(now)

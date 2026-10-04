@@ -37,6 +37,20 @@ def _worker(conn, subnet, routing_mode, lease_ms):
     if debug:
         print("[radio child] open_timeout", session.config().get_json("transport/unicast/open_timeout")
               if hasattr(session, "config") else "?", file=sys.stderr, flush=True)
+    if os.environ.get("RADIO_PEER_LOG") == "1":
+        # Diagnostics: our Zenoh id, then every peer session that opens or closes (wall time).
+        def peer_log():
+            print(f"[radio] zid {session.info.zid()}", file=sys.stderr, flush=True)
+            known = set()
+            while True:
+                now = {str(z) for z in session.info.peers_zid()}
+                for z in sorted(now - known):
+                    print(f"[radio] {time.time():.3f} peer + {z}", file=sys.stderr, flush=True)
+                for z in sorted(known - now):
+                    print(f"[radio] {time.time():.3f} peer - {z}", file=sys.stderr, flush=True)
+                known = now
+                time.sleep(0.1)
+        threading.Thread(target=peer_log, name="radio-peer-log", daemon=True).start()
     stats = {"put_max": 0.0, "last_rx": time.monotonic(), "rx_gap": 0.0, "t": time.monotonic()}
     publishers, subscribers = {}, {}
     send_lock = threading.Lock()

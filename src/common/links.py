@@ -53,7 +53,7 @@ QOS_PROFILES = {
     "default": [],   # Zenoh defaults for everything
     "tuned": [
         {"key_exprs": ["swarm/threats", "swarm/awards", "ship/threat_status",      # orders, awards, jobs
-                       "ship/ack/**", "ship/jobs/**"],
+                       "ship/ack/**"],
          "config": {"priority": "real_time", "express": True, "congestion_control": "block"}},
         {"key_exprs": ["swarm/bids"],
          "config": {"priority": "interactive_high", "express": True, "congestion_control": "block"}},

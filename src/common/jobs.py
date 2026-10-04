@@ -34,3 +34,27 @@ def arbitrate(pending: Dict[str, float], confirmed: Dict[str, int], need: int,
             rejected.append(agent)
     accepted = dict(zip(sorted(winners), free))
     return accepted, rejected
+
+
+def heartbeat_answer(status: str, holder: bool, pending: bool, rejected: bool, hb_confirmed: bool) -> str:
+    """What the ship sends a drone whose heartbeat names this job (ACKs, awards and job updates can
+    all be lost; the heartbeat says what the drone believes, and the answer fixes a disagreement).
+
+    status: the threat's status ("approved" while the job is open); holder: we confirmed the drone;
+    pending: its award awaits arbitration; rejected: we refused this award (drone, order) before;
+    hb_confirmed: the drone believes it is confirmed.  Returns:
+      "job"     a job update: the job is closed, or the drone was dropped (holders without it);
+      "ack"     the ACK again (a holder that has not seen it);
+      "nack"    the NACK again;
+      "pending" take the heartbeat as the award (its award never arrived) into arbitration;
+      "none"    views agree, or arbitration is under way.
+    """
+    if status != "approved":
+        return "job"
+    if holder:
+        return "none" if hb_confirmed else "ack"
+    if hb_confirmed:
+        return "job"
+    if pending:
+        return "none"
+    return "nack" if rejected else "pending"

@@ -44,7 +44,8 @@ class DenddronAgent:
     TELEMETRY_HZ = 1.0
     LINK_TIMEOUT_S = 3.0       # no radio traffic for this long = disconnected from the swarm
     AWARD_RESENDS = 2          # extra copies of each award/withdrawal, one per heartbeat tick (lossy radio)
-    ACK_TIMEOUT_S = 3.0        # sim s: a won job the ship has not confirmed by then is abandoned
+    INBOX_REDECLARE_S = 1.5    # sim s: inbox silent this long while awaiting the ship (and hearing it): re-subscribe
+    CONFIRM_TRACE = os.environ.get("CONFIRM_TRACE") == "1"   # log award/ACK/job traffic with sim times
     RETARGET_MIN_M = 0.5       # job updates that move our slot less than this do not change the goal
     SLOT_RADIUS = SLOT_RADIUS_M  # m, job-mates stacked vertically within +-this of the engagement point
     DETONATE_RADIUS = 8.0      # m, must be this close to the slot at t_engage to detonate (= kill radius)
@@ -288,9 +289,11 @@ class DenddronAgent:
         self._link_was_up = False
         self._award_resends = {}       # threat_id -> [award payload, copies left]; newest status wins
         # Engagement: set on winning an auction (tentative), confirmed by the ship's ACK or by appearing
-        # in the job topic's holders, updated from the job topic.  Replaced whole, under _eng_lock.
+        # in a job update's holders, updated by job updates.  Replaced whole, under _eng_lock.
         self._eng_lock = threading.RLock()
-        self._job_sub = None           # subscription to ship/jobs/{threat_id} while engaged
+        self._last_inbox_rx = None     # simclock time of the last message in our inbox
+        self._last_roster_rx = None    # simclock time of the last roster (the ship is heard)
+        self._inbox_declared = 0.0     # simclock time the inbox subscription was (re)declared
         self._award_lock = threading.Lock()
 
         # --- Onboard bus (simulator) ---
@@ -325,7 +328,13 @@ class DenddronAgent:
         # hears, and drones in the roster relay it (_relay_unheard_peers).
         self.pub_help      = self.radio.declare_publisher(f"swarm/heartbeat_help/{self.agent_id}")
         self.sub_help      = self.radio.declare_subscriber("swarm/heartbeat_help/*", self._on_peer_help)
-        self.sub_ack       = self.radio.declare_subscriber(f"ship/ack/{self.agent_id}", self._on_ack)
+        # Our inbox: the ship's ACKs/NACKs and job updates for us.  Declared once, at startup.  Over the
+        # lossy UDP radio a subscriber declaration can be lost and is not retried (only 70 % of
+        # subscriptions declared at 30 % loss heard anything within 3 s, some none in 40 s;
+        # tools/comms/declare_probe.sh), so job updates do not use a per-job subscription, and the
+        # inbox is re-declared if it stays silent while we wait on the ship (_check_inbox).
+        self.sub_inbox     = self.radio.declare_subscriber(f"ship/ack/{self.agent_id}", self._on_inbox)
+        self._inbox_declared = simclock.now()
         # Engagement zones: keep clear of other jobs' detonations (_service_zones, _keepout).
         self.zones = {}                # threat_id -> (zone, simclock time received)
         self._zones_sig = None
@@ -990,17 +999,19 @@ class DenddronAgent:
             logger.warning(f"[{self.agent_id}] Ignoring malformed threat order: {e}")
             return
 
-        logger.info(
-            f"[{self.agent_id}] Order {wave_id}: "
-            + ", ".join(f"{t.threat_id}({t.type}, level {t.level}, need {t.required}, "
-                        f"t_engage {t.t_engage:.1f})" for t in threats)
-        )
         with self._auction_lock:
             if not self.auction.on_wave(wave_id, threats, self._auction_now()):
-                return
+                return    # a repeat copy (the ship sends each order more than once) or a stale order
+            logger.info(
+                f"[{self.agent_id}] Order {wave_id}: "
+                + ", ".join(f"{t.threat_id}({t.type}, level {t.level}, need {t.required}, "
+                            f"t_engage {t.t_engage:.1f})" for t in threats)
+            )
             # A drone already tasked or waiting on another wave sits this one out,
             # otherwise it could be assigned to two threats.
             if not self._is_free():
+                self._trace("order_skip", wave=wave_id, why="busy", engaged=self.engaged_threat is not None,
+                            pending=self._pending_wave_id)
                 return
             costs = self._calculate_costs(threats)
             if not costs:
@@ -1027,10 +1038,14 @@ class DenddronAgent:
             route = plan_route(here, goal, now, self._blasts(exclude=t.threat_id), v_max, a_max,
                                t_goal=t.t_engage, no_fly=self.no_fly_route)
             if route.blocked:
+                self._trace("order_skip", threat=t.threat_id, why="blocked")
                 continue
             e = route.cost(ETA_MARGIN)
             if now + slack + e <= t.t_engage:
                 costs[t.threat_id] = round(e, 2)
+            else:
+                self._trace("order_skip", threat=t.threat_id, why="late", now=round(now, 2), eta=round(e, 2),
+                            slack=slack, t_engage=round(t.t_engage, 2))
         return costs
 
     # ==========================================
@@ -1093,11 +1108,11 @@ class DenddronAgent:
                 self.pub_job.put(json.dumps({"job": t.threat_id}))   # the simulator exempts us from its blasts
                 self._set_engagement({
                     "threat": t, "wave_id": r.wave_id, "confirmed": False, "since": simclock.now(), "seq": -1,
+                    "cost": r.my_cost,
                     "point": (loc["x"], loc["y"], loc["z"]), "t_engage": t.t_engage,
                     "slot": slot, "n_slots": len(winners),
                     "fuze": fuzelib.Fuze(self.fuze_cfg) if self.FUZE_ON else None, "track": None,
                 })
-                self._job_sub = self.radio.declare_subscriber(f"ship/jobs/{t.threat_id}", self._on_job)
             sp = self.engagement["slot_point"]
             logger.info(f"[{self.agent_id}] ENGAGING {t.threat_id} ({t.type}, level {t.level}), awaiting ACK: "
                         f"slot {slot + 1}/{len(winners)} at ({sp['x']:.1f}, {sp['y']:.1f}, {sp['z']:.1f}), "
@@ -1227,16 +1242,30 @@ class DenddronAgent:
                         f"{math.dist(new['point'], eng['point']):.1f} m, t_engage {new['t_engage']:.1f}")
         self._set_engagement(new)
 
-    def _on_ack(self, sample):
+    def _on_inbox(self, sample):
+        """Our inbox (ship/ack/{id}): ACK/NACK (has 'accepted') or a job update."""
         local_rx = self._stamp()
         self._radio_heard()
-        self.telemetry.rx("ship/ack")
+        self._last_inbox_rx = simclock.now()
         try:
-            ack = self._inbound_job(self._parse(sample), local_rx)
+            msg = self._inbound_job(self._parse(sample), local_rx)
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] Ignoring malformed inbox message: {e}")
+            return
+        if "accepted" in msg:
+            self.telemetry.rx("ship/ack")
+            self._on_ack(msg)
+        else:
+            self.telemetry.rx("ship/jobs")
+            self._on_job(msg)
+
+    def _on_ack(self, ack: dict):
+        try:
             threat_id, accepted = str(ack["threat_id"]), bool(ack["accepted"])
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed ACK: {e}")
             return
+        self._trace("ack_rx", threat=threat_id, accepted=accepted, wave=ack.get("wave_id"))
         with self._eng_lock:
             eng = self.engagement
             if eng is None or eng["threat"].threat_id != threat_id:
@@ -1250,16 +1279,13 @@ class DenddronAgent:
                 logger.warning(f"[{self.agent_id}] Job {threat_id} REJECTED by ship (better bids confirmed)")
                 self._abandon(threat_id, "withdrawn")
 
-    def _on_job(self, sample):
-        local_rx = self._stamp()
-        self._radio_heard()
-        self.telemetry.rx("ship/jobs")
+    def _on_job(self, job: dict):
         try:
-            job = self._inbound_job(self._parse(sample), local_rx)
             threat_id = str(job["threat_id"])
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed job update: {e}")
             return
+        self._trace("job_rx", threat=threat_id, seq=job.get("seq"), holder=self.agent_id in job.get("holders", {}))
         with self._eng_lock:
             eng = self.engagement
             if eng is None or eng["threat"].threat_id != threat_id or int(job.get("seq", 0)) < eng["seq"]:
@@ -1410,7 +1436,6 @@ class DenddronAgent:
         with self._eng_lock:
             self.engaged_threat = None
             self.engagement = None
-            self._drop_job_sub()
         self.destroyed = True
         self._send_heartbeat()
         threading.Timer(1.0, self.radio.close).start()
@@ -1492,18 +1517,39 @@ class DenddronAgent:
             if cur is not None and cur["threat"].threat_id == tid and not self.destroyed:
                 self._abandon(tid, "no_detection")
 
-    def _drop_job_sub(self):
-        if self._job_sub is not None:
-            self._job_sub.undeclare()
-            self._job_sub = None
+    def _check_inbox(self):
+        """Re-declare our inbox subscription if it has gone quiet while we wait on the ship.
+
+        Awaiting confirmation, the ship answers each heartbeat (2 Hz) with an ACK; confirmed, job
+        updates arrive at 2 Hz.  If none has arrived for INBOX_REDECLARE_S while the ship's roster is
+        heard, the ship probably never got our subscription (a lost declaration is not retried)."""
+        eng = self.engagement
+        now = simclock.now()
+        if eng is None or self._last_roster_rx is None or now - self._last_roster_rx > self.INBOX_REDECLARE_S:
+            return
+        quiet_since = max(eng["since"] or now, self._last_inbox_rx or 0.0, self._inbox_declared)
+        if now - quiet_since < self.INBOX_REDECLARE_S:
+            return
+        old = self.sub_inbox
+        self.sub_inbox = self.radio.declare_subscriber(f"ship/ack/{self.agent_id}", self._on_inbox)
+        self._inbox_declared = now
+        old.undeclare()
+        logger.warning(f"[{self.agent_id}] Inbox silent for {now - quiet_since:.1f}s while engaged on "
+                       f"{eng['threat'].threat_id}; re-declared it")
 
     def _disengage(self, threat_id: str, status: str):
         with self._eng_lock:
             self.engaged_threat = None
             self.engagement = None
-            self._drop_job_sub()
         self.set_goal(None)   # hold position
         self._publish_award({"threat_id": threat_id, "agent_id": self.agent_id, "status": status})
+
+    def _trace(self, what: str, **fields) -> None:
+        """CONFIRM_TRACE: one line per award/ACK/job message, stamped with truth sim time."""
+        if self.CONFIRM_TRACE:
+            t = simclock.truth_now()
+            logger.info(f"[{self.agent_id}] TRACE {what} t={-1.0 if t is None else t:.3f} "
+                        + " ".join(f"{k}={v}" for k, v in fields.items()))
 
     def _publish_award(self, award: dict):
         """Send an award (or withdrawal) now and again on the next AWARD_RESENDS heartbeat ticks.
@@ -1514,6 +1560,7 @@ class DenddronAgent:
         """
         with self._award_lock:
             self._award_resends[award["threat_id"]] = [award, self.AWARD_RESENDS]
+        self._trace("award_tx", threat=award["threat_id"], status=award.get("status"), copy=0)
         self._radio_put(self.pub_awards, "swarm/awards", award)
 
     def _resend_awards(self):
@@ -1524,6 +1571,7 @@ class DenddronAgent:
                 if self._award_resends[tid][1] <= 0:
                     del self._award_resends[tid]
         for award in due:
+            self._trace("award_tx", threat=award["threat_id"], status=award.get("status"), copy="resend")
             self._radio_put(self.pub_awards, "swarm/awards", award)
 
     def _check_engagement(self):
@@ -1553,9 +1601,16 @@ class DenddronAgent:
                         f"(dz {sp['z'] - pose['z']:+.1f}), speed {speed:.1f} m/s, {eng['t_engage'] - now:.1f}s left, "
                         f"legs {len(eng.get('legs') or [])}, state {self._state_name()}")
         if not eng["confirmed"]:
-            if eng["since"] is None or simclock.now() - eng["since"] > self.ACK_TIMEOUT_S or now >= eng["t_engage"]:
-                logger.warning(f"[{self.agent_id}] No ACK from the ship for {eng['threat'].threat_id} within "
-                               f"{self.ACK_TIMEOUT_S:.0f}s; abandoning the job")
+            # Keep flying and asking (every heartbeat carries the job, unconfirmed; the ship answers it)
+            # until a confirmation could no longer help: the engagement time has come, or even a
+            # straight flight at full speed would arrive after it.  Never detonate unconfirmed.
+            sp = eng["slot_point"]
+            dist = math.dist((pose["x"], pose["y"], pose["z"]), (sp["x"], sp["y"], sp["z"]))
+            reach = dist / max(float(self.kinematics["max_velocity"]), 1e-6)
+            if now >= eng["t_engage"] or now + reach > eng["t_engage"]:
+                logger.warning(f"[{self.agent_id}] No ACK from the ship for {eng['threat'].threat_id} after "
+                               f"{simclock.now() - (eng['since'] or simclock.now()):.1f}s and no time left "
+                               f"({dist:.1f} m to slot, {eng['t_engage'] - now:.1f}s); abandoning the job")
                 with self._eng_lock:
                     if self.engagement is eng:
                         self._abandon(eng["threat"].threat_id, "withdrawn")
@@ -1635,7 +1690,6 @@ class DenddronAgent:
         with self._eng_lock:
             self.engaged_threat = None
             self.engagement = None
-            self._drop_job_sub()
         self.destroyed = True
         self._send_heartbeat()   # final "expended" heartbeat
         # An expended drone has nothing left to say: close the radio (it cost ~1.6% of a core and
@@ -1684,6 +1738,9 @@ class DenddronAgent:
             "t_engage": eng["t_engage"] if eng else None,
             "confirmed": eng["confirmed"] if eng else None,
         }
+        if eng and not eng["confirmed"]:
+            # The award again, so the ship can confirm us from a heartbeat if our award was lost.
+            hb.update(wave_id=eng["wave_id"], cost=eng.get("cost"), hold_s=eng.get("hold_s", 0.0))
         if self.sync.mode in ("master", "consensus"):
             hb["t1"] = self._stamp()               # two-way exchange: echoed by the ship's roster
         self._radio_put(self.pub_heartbeat, "swarm/heartbeat", hb)
@@ -1698,6 +1755,7 @@ class DenddronAgent:
             try:
                 self._send_heartbeat()
                 self._resend_awards()
+                self._check_inbox()
                 tick += 1
                 if tick % ticks_per_telemetry == 0:
                     self._relay_unheard_peers()
@@ -1828,6 +1886,7 @@ class DenddronAgent:
     def _on_roster(self, sample):
         t4 = self._stamp()
         self._radio_heard()
+        self._last_roster_rx = simclock.now()
         self.telemetry.rx("ship/roster")
         try:
             msg = self._parse(sample)

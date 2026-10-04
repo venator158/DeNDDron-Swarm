@@ -1,6 +1,6 @@
 import unittest
 
-from jobs import arbitrate
+from jobs import arbitrate, heartbeat_answer
 
 
 class TestArbitrate(unittest.TestCase):
@@ -41,6 +41,36 @@ class TestArbitrate(unittest.TestCase):
     def test_tie_broken_by_id(self):
         accepted, _ = arbitrate({"d2": 5.0, "d1": 5.0}, {}, need=1, n_slots=1)
         self.assertEqual(accepted, {"d1": 0})
+
+
+class TestHeartbeatAnswer(unittest.TestCase):
+    """The ship's answer to a heartbeat that names a job (lost ACKs, awards and job updates)."""
+
+    def answer(self, status="approved", holder=False, pending=False, rejected=False, hb_confirmed=False):
+        return heartbeat_answer(status, holder, pending, rejected, hb_confirmed)
+
+    def test_holder_that_missed_its_ack_gets_it_again(self):
+        self.assertEqual(self.answer(holder=True), "ack")
+
+    def test_holder_that_knows_needs_nothing(self):
+        self.assertEqual(self.answer(holder=True, hb_confirmed=True), "none")
+
+    def test_lost_award_is_taken_from_the_heartbeat(self):
+        self.assertEqual(self.answer(), "pending")
+
+    def test_pending_award_waits_for_arbitration(self):
+        self.assertEqual(self.answer(pending=True), "none")
+
+    def test_refused_award_gets_its_nack_again(self):
+        self.assertEqual(self.answer(rejected=True), "nack")
+
+    def test_dropped_drone_that_believes_it_holds_gets_the_job_update(self):
+        self.assertEqual(self.answer(hb_confirmed=True), "job")
+
+    def test_closed_job_releases_any_drone(self):
+        for status in ("destroyed", "leaked", "failed", "impact"):
+            for holder in (False, True):
+                self.assertEqual(self.answer(status=status, holder=holder, hb_confirmed=holder), "job")
 
 
 if __name__ == "__main__":
