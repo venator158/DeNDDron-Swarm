@@ -69,12 +69,25 @@
     "simulated": true
   },
   "imu": {
-    "class": "MEMS 6-axis IMU (BMI088-class)",
+    "class": "MEMS 6-axis IMU on the flight controller (BMI088-class): the IMU a cheap drone already has, no custom unit",
     "gyro_noise_dps_rthz": 0.014,
     "accel_noise_ug_rthz": 175,
+    "accel_bias_mg": 1.0,
+    "_accel_bias_mg": "residual accelerometer bias after calibration, 1 sigma per axis; drifts in flight as a Gauss-Markov process with accel_bias_tau_s",
+    "accel_bias_tau_s": 300.0,
+    "accel_scale_factor": 0.005,
     "rate_hz": 400,
-    "simulated": false,
-    "_note": "recorded for hardware deployment; x,y dead reckoning uses the commanded-velocity response model instead"
+    "output_hz": 50,
+    "_output_hz": "the drone reads delta-velocity pre-integrated over each 50 Hz frame (the FIFO), not 400 Hz samples",
+    "simulated": true,
+    "_note": "horizontal delta-velocity in the level frame (attitude from the AHRS entry) drives the EKF's prediction (NAV_PREDICT=imu). Error scaling follows the simulation's time stretch (hardware.imu_errors)."
+  },
+  "ahrs": {
+    "class": "flight-controller attitude estimate (gyro + accelerometer + magnetometer, complementary filter / EKF)",
+    "tilt_sigma_deg": 0.5,
+    "tilt_tau_s": 20.0,
+    "simulated": true,
+    "_note": "attitude is otherwise taken as perfect; a tilt error leaks gravity into the horizontal axes, an equivalent accelerometer bias g*sin(tilt) (0.5 deg = 0.086 m/s^2, ~9x the accelerometer's own). Heading stays perfect (compass)."
   },
   "barometer": {
     "class": "MEMS barometer (BMP390-class), fused with the IMU",
@@ -88,7 +101,7 @@
     "heading_sigma_deg": 1.0,
     "rate_hz": 50,
     "simulated": false,
-    "_note": "attitude and heading taken as perfect"
+    "_note": "heading taken as perfect; the attitude (tilt) error is modelled under ahrs"
   },
   "c2_radio": {
     "class": "peer-to-peer data radio (Zenoh over UDP in the simulation)",

@@ -61,6 +61,10 @@ services:
       RADAR_MISS_P: ${RADAR_MISS_P:-}
       RADAR_CLUTTER: ${RADAR_CLUTTER:-}
       RADAR_LATENCY_S: ${RADAR_LATENCY_S:-}
+      # IMU (hardware record imu + ahrs): error scaling with the time stretch (dilated) or the real figures
+      IMU_ERROR_SCALING: ${IMU_ERROR_SCALING:-dilated}
+      IMU_EXTRA_BIAS_MPS2: ${IMU_EXTRA_BIAS_MPS2:-}
+      IMU_SEED: ${IMU_SEED:-}
       # Proximity fuze sensor (drone/{id}/fuze); FUZE=0 turns it off
       FUZE: ${FUZE:-1}
       FUZE_HZ: ${FUZE_HZ:-50}
@@ -125,7 +129,9 @@ services:
       CLOCK_STEP_S: ${CLOCK_STEP_S:-0.05}
       PERCEPTION: ${PERCEPTION:-radar}                    # obstacle avoidance from the radar, or lidar + voxel map (legacy)
       LOCALIZATION: ${LOCALIZATION:-coop}                 # coop | anchors | truth (UWB, hardware record)
-      UWB_FILTER: ${UWB_FILTER:-robust}                   # robust (adaptive noise, Huber, safe re-locks) | basic
+      UWB_FILTER: ${UWB_FILTER:-robust}                   # robust (adaptive noise, Huber, safe re-locks, drift exclusion) | basic
+      NAV_PREDICT: ${NAV_PREDICT:-imu}                    # imu (flight controller's accelerometer) | cmd (command response model)
+      IMU_ERROR_SCALING: ${IMU_ERROR_SCALING:-dilated}    # must match the simulator's
       UWB_JAM: ${UWB_JAM:-}
       # Proximity fuze (src/agent/fuze.py); FUZE=0 = timed detonation at t_engage
       FUZE: ${FUZE:-1}

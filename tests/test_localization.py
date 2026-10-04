@@ -5,26 +5,38 @@ import unittest
 
 import numpy as np
 
-from localization import Localizer, nees
+import hardware
+from localization import InnovationMonitor, Localizer, nees
+
+IMU = hardware.imu_errors(hardware.load(), "dilated")   # the flight controller's IMU, simulation units
 
 ANCHORS = [(15.0, 5.0, 8.0), (15.0, -5.0, 8.0), (-15.0, 5.0, 8.0), (-15.0, -5.0, 8.0)]   # hardware record
 
 
 def fly(seconds=120.0, start=(70.0, 20.0), z=20.0, sigma=0.1, rate_hz=2.0, seed=1, disturb=0.2,
         outlier=None, dropout=0.0, alpha=0.35, waypoints=((90.0, -30.0), (60.0, 40.0), (100.0, 10.0)),
-        wind=(0.0, 0.0), jam=None, true_sigma=None, nlos=None, robust=False, relock=False):
+        wind=(0.0, 0.0), jam=None, true_sigma=None, nlos=None, robust=False, relock=False,
+        imu=None, imu_bias_extra=0.0, anchor_bias=None, errs_from=10.0, exclude=False):
     """A drone flying waypoints under the simulator's command response, plus an unmodelled gust.
     sigma: the record's range noise (what the filter assumes); true_sigma: the environment's (default
     the same); nlos: (probability, mean bias m) of a blocked path (positive, exponential); relock:
     re-lock from the round's anchors after a lock-out, as the drone does.
+    imu: IMU errors (hardware.imu_errors) to predict with the accelerometer instead of the command
+    (the truth then includes the flight controller's accelerometer and tilt biases, noise and scale
+    factor); imu_bias_extra: m/s^2 added to the true bias; anchor_bias: (index, metres) on one anchor.
     Returns (errors, nees values, localizer)."""
     rng = random.Random(seed)
     dt = 0.02
     true_sigma = sigma if true_sigma is None else true_sigma
-    loc = Localizer(range_sigma=sigma, robust=robust)
+    loc = Localizer(range_sigma=sigma, robust=robust, imu=imu, exclude_flagged=exclude)
     loc.init_prior(start[0] + rng.gauss(0, 3), start[1] + rng.gauss(0, 3))
     p = np.array(start, float)
     v = np.zeros(2)
+    if imu is not None:
+        b_acc = np.array([rng.gauss(0, imu["accel_bias"]) for _ in range(2)])
+        b_tilt = np.array([rng.gauss(0, imu["tilt_bias"]) for _ in range(2)])
+        sf = np.array([rng.gauss(0, imu["scale_factor"]) for _ in range(2)])
+        vg_last = v + np.array(wind)
     errs, ns = [], []
     wp = 0
     t = 0.0
@@ -36,9 +48,28 @@ def fly(seconds=120.0, start=(70.0, 20.0), z=20.0, sigma=0.1, rate_hz=2.0, seed=
         d = goal - p
         cmd = d / max(np.linalg.norm(d), 1e-6) * min(4.0, np.linalg.norm(d))
         gust = np.array([rng.gauss(0, disturb), rng.gauss(0, disturb)])
+        v_old = v
         v = v + alpha * (cmd - v) + gust * dt          # the truth: response + unmodelled gust
-        p = p + (v + np.array(wind)) * dt              # wind the drone cannot sense
-        loc.predict(dt, (float(cmd[0]), float(cmd[1])))
+        if imu is None:
+            p = p + (v + np.array(wind)) * dt          # wind the drone cannot sense
+        else:
+            # as in the simulator, the velocity changes when the command arrives, somewhere in the frame
+            u = rng.random()
+            p = p + ((1 - u) * v_old + u * v + np.array(wind)) * dt
+        if imu is None:
+            loc.predict(dt, (float(cmd[0]), float(cmd[1])))
+        else:
+            # the flight controller's accelerometer: true delta-velocity over the ground, with errors
+            for b, tau, sig in ((b_acc, imu["accel_bias_tau"], imu["accel_bias"]),
+                                (b_tilt, imu["tilt_tau"], imu["tilt_bias"])):
+                k = math.exp(-dt / tau)
+                b *= k
+                b += np.array([rng.gauss(0, sig * math.sqrt(1 - k * k)) for _ in range(2)])
+            vg = v + np.array(wind)
+            dv = (1 + sf) * (vg - vg_last) + (b_acc + b_tilt + imu_bias_extra) * dt \
+                + np.array([rng.gauss(0, imu["noise_density"] * math.sqrt(dt)) for _ in range(2)])
+            vg_last = vg
+            loc.predict_imu(dt, (float(dv[0]), float(dv[1])), dt)
         t += dt
         if t >= next_range:
             next_range += 1.0 / rate_hz
@@ -53,12 +84,15 @@ def fly(seconds=120.0, start=(70.0, 20.0), z=20.0, sigma=0.1, rate_hz=2.0, seed=
                     r += 5.0                            # a blocked path: +5 m bias on one anchor
                 if nlos and rng.random() < nlos[0]:
                     r += rng.expovariate(1.0 / nlos[1])
-                loc.update_range(a, r, z, t=t)
+                if anchor_bias and anchor_bias[0] == i:
+                    # (index, metres) from the start, or (index, m/s, start) a drift ramping in
+                    r += anchor_bias[1] if len(anchor_bias) == 2 else anchor_bias[1] * max(0.0, t - anchor_bias[2])
+                loc.update_range(a, r, z, t=t, source=f"A{i + 1}")
                 got.append((a, r))
             if relock and loc.needs_relock() and len(got) >= 3:
                 loc.relock_from([a for a, _ in got], [r for _, r in got], z)
             e = np.array(loc.position()) - p
-            if t > 10.0:
+            if t > errs_from:
                 errs.append(float(np.linalg.norm(e)))
                 ns.append(nees(e, loc.pos_cov()))
     return errs, ns, loc
@@ -197,6 +231,68 @@ class TestRobustLocalizer(unittest.TestCase):
         loc = self.corrupted(robust=True)
         self.assertTrue(loc.relock_from(ANCHORS[:3], ranges, 20.0))
         self.assertLess(math.dist(loc.position(), (70.0, 20.0)), 0.5)
+
+
+def summary(runs):
+    """(mean NEES, mean p95 error, worst error) over fly() runs."""
+    nees_mean = sum(sum(n) / len(n) for _, n, _ in runs) / len(runs)
+    p95 = sum(sorted(e)[int(0.95 * len(e))] for e, _, _ in runs) / len(runs)
+    return nees_mean, p95, max(max(e) for e, _, _ in runs)
+
+
+class TestImuPrediction(unittest.TestCase):
+    """NAV_PREDICT=imu: the flight controller's accelerometer (bias, tilt, noise, scale factor) drives
+    the prediction instead of the command response."""
+
+    def test_consistent_and_tighter_than_the_command_model(self):
+        cmd = summary([fly(seed=s) for s in (1, 2, 3)])
+        imu = summary([fly(seed=s, imu=IMU) for s in (1, 2, 3)])
+        self.assertGreater(imu[0], 0.7)
+        self.assertLess(imu[0], 4.0)
+        self.assertLess(imu[1], cmd[1])                     # p95 0.32 vs 0.59 m
+
+    def test_dead_reckons_through_a_60s_anchor_outage(self):
+        kw = dict(jam=(60.0, 120.0), seconds=125.0, wind=(0.5, 0.0))
+        cmd = summary([fly(seed=s, **kw) for s in (1, 2, 3)])
+        imu = summary([fly(seed=s, imu=IMU, **kw) for s in (1, 2, 3)])
+        self.assertLess(imu[0], 4.0)                        # honest through the outage
+        self.assertLess(imu[2], cmd[2])                     # worst 5.7 vs 8.5 m (5 seeds)
+
+    def test_unscaled_errors_are_a_stress_setting(self):
+        # The record's figures unscaled: ~100x the drift per mission phase at speed_scale 0.1
+        real = hardware.imu_errors(hardware.load(), "real")
+        _, _, worst = summary([fly(seed=1, imu=real, jam=(60.0, 120.0), seconds=125.0)])
+        self.assertGreater(worst, 20.0)
+
+
+class TestDriftMonitor(unittest.TestCase):
+    """InnovationMonitor: a source whose innovations keep one sign against the track is flagged."""
+
+    def test_monitor_flags_a_persistent_bias_only(self):
+        m = InnovationMonitor()
+        rng = random.Random(3)
+        for _ in range(20):
+            m.record("A1", rng.gauss(1.5, 1.0))             # biased by 1.5 sigma
+            m.record("A2", rng.gauss(0.0, 1.0))
+        self.assertEqual(m.flagged(), ["A1"])
+        self.assertIsNone(InnovationMonitor().bias("A1"))  # too few samples
+
+    def test_no_flags_in_clean_flights(self):
+        for s in (1, 2, 3, 4):
+            _, _, loc = fly(seed=s, imu=IMU, robust=True, seconds=240.0)
+            self.assertEqual(loc.monitor.flagged(), [])
+
+    def test_a_drifting_anchor_is_flagged_and_left_out(self):
+        drift = (0, 0.02, 60.0)                             # anchor 1: 2 cm/s from t = 60 s (3.6 m by 240 s)
+        kept = summary([fly(seed=s, imu=IMU, robust=True, seconds=240.0, anchor_bias=drift) for s in (1, 2, 3)])
+        runs = [fly(seed=s, imu=IMU, robust=True, seconds=240.0, anchor_bias=drift, exclude=True) for s in (1, 2, 3)]
+        for _, _, loc in runs:
+            self.assertEqual(loc.monitor.flagged(), ["A1"])
+            self.assertGreater(loc.excluded, 100)
+        left_out = summary(runs)
+        self.assertGreater(kept[0], 5.0)                    # used, it pulls the estimate (NEES 9.6)
+        self.assertLess(left_out[0], 4.0)
+        self.assertLess(left_out[2], 1.5)                   # worst 0.74 m (8 seeds) vs 4.2 m
 
 
 if __name__ == "__main__":

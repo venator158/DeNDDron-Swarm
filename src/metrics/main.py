@@ -209,7 +209,8 @@ class MetricsNode:
                     log.info(f"loc error {agent_id} >= {level:.0f} m at t={m['sim_time']:.1f}: {err:.1f} m, "
                              f"claimed sigma {math.sqrt(max(a, c)):.2f} m, status {m.get('status')}, "
                              f"hops {m.get('hops')}, relocks {m.get('relocks')}, noise {m.get('noise_sigma')}, "
-                             f"truth ({tr[1]:.0f}, {tr[2]:.0f})")
+                             f"flags {m.get('flags')}, excluded {m.get('excluded')}, "
+                             f"est ({m['est'][0]:.1f}, {m['est'][1]:.1f}), truth ({tr[1]:.1f}, {tr[2]:.1f})")
                 self._loc_errs.append(err)
                 if len(self._loc_errs) > 20000:
                     del self._loc_errs[:5000]

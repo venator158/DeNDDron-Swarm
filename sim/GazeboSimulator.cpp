@@ -124,6 +124,7 @@ void GazeboSimulator::init() {
     configure_fuze();
     configure_localization();
     configure_environment();
+    configure_imu();
     if (_loc_mode == "coop") {
         auto sub_opt_uwb = zenoh::Session::SubscriberOptions::create_default();
         _sub_uwb_tx.emplace(_session->declare_subscriber(
@@ -1000,6 +1001,82 @@ void GazeboSimulator::configure_environment() {
                   << _gust_sigma << " m/s, tau " << _gust_tau << " s" << std::endl;
 }
 
+void GazeboSimulator::configure_imu() {
+    if (_loc_mode == "truth") return;
+    const double g = 9.80665;
+    double s = 0.1;
+    try {
+        s = _hw.at("simulation").at("speed_scale").get<double>();
+        const json& imu = _hw.at("imu");
+        const json& ahrs = _hw.contains("ahrs") ? _hw.at("ahrs") : json::object();
+        _imu_bias = imu.value("accel_bias_mg", 0.0) * 1e-3 * g;
+        _imu_bias_tau = imu.value("accel_bias_tau_s", 300.0);
+        _imu_noise = imu.value("accel_noise_ug_rthz", 0.0) * 1e-6 * g;
+        _imu_sf = imu.value("accel_scale_factor", 0.0);
+        _imu_tilt = g * std::sin(ahrs.value("tilt_sigma_deg", 0.0) * M_PI / 180.0);
+        _imu_tilt_tau = ahrs.value("tilt_tau_s", 20.0);
+        _imu_on = true;
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] IMU parameters missing from the hardware record: " << e.what() << std::endl;
+        return;
+    }
+    _imu_extra = env_double("IMU_EXTRA_BIAS_MPS2", 0.0);
+    const char* sc = std::getenv("IMU_ERROR_SCALING");
+    const std::string scaling = (sc != nullptr && std::strlen(sc) > 0) ? sc : "dilated";
+    const double k = scaling == "dilated" ? s : 1.0;     // the time stretch (hardware.imu_errors)
+    _imu_bias *= k * k;
+    _imu_tilt *= k * k;
+    _imu_extra *= k * k;
+    _imu_noise *= std::pow(k, 1.5);
+    _imu_bias_tau /= k;
+    _imu_tilt_tau /= k;
+    _imu_rng.seed(static_cast<unsigned>(env_double("IMU_SEED", 11.0)));
+    std::cout << "[GazeboSimulator] IMU (" << scaling << "): accel bias " << _imu_bias << " m/s^2 (tau "
+              << _imu_bias_tau << " s), tilt bias " << _imu_tilt << " m/s^2 (tau " << _imu_tilt_tau
+              << " s), noise " << _imu_noise << " m/s^2/rtHz, scale factor " << _imu_sf << ", extra bias "
+              << _imu_extra << " m/s^2" << std::endl;
+}
+
+json GazeboSimulator::imu_frame(const std::string& agent_id, double sim_time) {
+    // Ground velocity: the airframe's own plus the wind and this drone's gust (what an accelerometer
+    // integrates; the drones cannot sense the wind otherwise).
+    ignition::math::Vector3d vg;
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        auto it = _drone_states.find(agent_id);
+        if (it == _drone_states.end()) return nullptr;
+        vg = it->second.linear_velocity + _wind;
+    }
+    if (auto gi = _gust.find(agent_id); gi != _gust.end()) vg += gi->second;
+    std::normal_distribution<double> unit(0.0, 1.0);
+    auto& st = _imu[agent_id];
+    if (st.t_last < 0.0) {                       // first frame: draw this drone's errors
+        for (int a = 0; a < 2; ++a) {
+            st.ba[a] = _imu_bias * unit(_imu_rng);
+            st.bt[a] = _imu_tilt * unit(_imu_rng);
+            st.sf[a] = _imu_sf * unit(_imu_rng);
+        }
+        st.vg_last = vg;
+        st.t_last = sim_time;
+        return nullptr;
+    }
+    const double dt = sim_time - st.t_last;
+    if (dt <= 0.0) return nullptr;
+    const double ka = std::exp(-dt / std::max(_imu_bias_tau, 1e-3));
+    const double kt = std::exp(-dt / std::max(_imu_tilt_tau, 1e-3));
+    double dv[2];
+    const double dv_true[2] = {vg.X() - st.vg_last.X(), vg.Y() - st.vg_last.Y()};
+    for (int a = 0; a < 2; ++a) {
+        st.ba[a] = st.ba[a] * ka + _imu_bias * std::sqrt(std::max(0.0, 1.0 - ka * ka)) * unit(_imu_rng);
+        st.bt[a] = st.bt[a] * kt + _imu_tilt * std::sqrt(std::max(0.0, 1.0 - kt * kt)) * unit(_imu_rng);
+        dv[a] = (1.0 + st.sf[a]) * dv_true[a] + (st.ba[a] + st.bt[a] + _imu_extra) * dt
+                + _imu_noise * std::sqrt(dt) * unit(_imu_rng);
+    }
+    st.vg_last = vg;
+    st.t_last = sim_time;
+    return {{"dt", dt}, {"dv", {dv[0], dv[1]}}};
+}
+
 void GazeboSimulator::on_uwb_tx(const zenoh::Sample& sample) {
     try {
         const std::string agent_id = key_agent(std::string(sample.get_keyexpr().as_string_view()));
@@ -1201,6 +1278,10 @@ void GazeboSimulator::step() {
             if (_loc_mode != "truth") {
                 // the drone localizes itself: only altitude and attitude (baro/IMU/compass) are given
                 for (const char* k : {"x", "y", "vx", "vy"}) sensor_data["pose"].erase(k);
+                if (_imu_on) {
+                    json imu = imu_frame(agent_id, current_sim_time);
+                    if (!imu.is_null()) sensor_data["imu"] = imu;
+                }
             }
             if (with_lidar) {
                 sensor_data["lidar"] = simulate_lidar(agent_id);

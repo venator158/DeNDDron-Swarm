@@ -185,6 +185,26 @@ private:
     std::map<std::string, ignition::math::Vector3d> _gust;     // per drone (step thread only)
     std::mt19937 _env_rng{7};
     void configure_environment();
+
+    // IMU (hardware record "imu" + "ahrs"; not with LOCALIZATION=truth): each sensor frame carries the
+    // flight controller's horizontal delta-velocity since the previous frame ("imu": {dt, dv}),
+    // measured over the ground (so gusts are in it): (1 + scale factor) dv_true + (accelerometer bias
+    // + tilt-equivalent bias g sin(tilt)) dt + white noise.  Both biases are Gauss-Markov per drone.
+    // Error scaling follows the simulation's time stretch (IMU_ERROR_SCALING=dilated|real, as
+    // hardware.imu_errors): biases x s^2, noise density x s^1.5, correlation times / s.
+    // IMU_EXTRA_BIAS_MPS2 (real m/s^2, scaled the same way) adds a constant bias, for sweeps.
+    struct ImuState {
+        ignition::math::Vector3d vg_last{0, 0, 0};    // ground velocity at the previous frame
+        double t_last = -1.0;
+        double ba[2] = {0, 0}, bt[2] = {0, 0}, sf[2] = {0, 0};
+    };
+    bool _imu_on = false;
+    double _imu_bias = 0.0, _imu_bias_tau = 3000.0, _imu_tilt = 0.0, _imu_tilt_tau = 200.0;
+    double _imu_noise = 0.0, _imu_sf = 0.0, _imu_extra = 0.0;
+    std::map<std::string, ImuState> _imu;                       // per drone (step thread only)
+    std::mt19937 _imu_rng{11};
+    void configure_imu();
+    json imu_frame(const std::string& agent_id, double sim_time);
     void on_uwb_tx(const zenoh::Sample& sample);
     bool uwb_jammed(const std::string& what, double t, const ignition::math::Vector3d& at) const;
     void publish_uwb(double sim_time, const std::vector<std::string>& agents, bool anchors, bool peers);
