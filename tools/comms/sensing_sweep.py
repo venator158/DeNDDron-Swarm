@@ -60,6 +60,17 @@ CONDITIONS = {
     "radar_clutter": ("radar: 2 false contacts per scan", {"RADAR_CLUTTER": "2"}, None, None),
     "radar_latency": ("radar scans 0.1 s late", {"RADAR_LATENCY_S": "0.1"}, None, None),
     # everything moderate at once
+    # GNSS (README next steps, item 5).  The spoofer covers the eastern stations, not the ship: a spoofer
+    # covering the ship too would shift both fixes alike, which cancels in the drone-minus-ship fix.
+    "gnss_fallback_uwb_short": ("UWB range 80 m with GNSS on (compare uwb_short with GNSS=0)",
+                                {"UWB_MAX_RANGE_M": "80"}, None, None),
+    "gnss_jam": ("GNSS jammed everywhere from t = 60 s", {"GNSS_JAM": "60:100000"}, None, None),
+    "gnss_spoof_ramp": ("GNSS spoofed within 60 m of (85, 0) from t = 60 s: 0.1 m/s ramp",
+                        {"GNSS_SPOOF": "60:45:0.1:0:85:0:60"}, None, None),
+    "gnss_spoof_step": ("GNSS spoofed within 60 m of (85, 0) from t = 60 s: 20 m step",
+                        {"GNSS_SPOOF": "60:45:0:20:85:0:60"}, None, None),
+    "gnss_spoof_uwb_jam": ("all UWB jammed t = 60-120 s and GNSS spoofed (0.1 m/s ramp) near (85, 0) from 60 s",
+                           {"UWB_JAM": "all:60:120", "GNSS_SPOOF": "60:45:0.1:0:85:0:60"}, None, None),
     "combined": ("UWB noise + NLOS, radar noise + clutter, ship link 30 % loss",
                  {"UWB_EXTRA_SIGMA_M": "0.2", "UWB_NLOS_P": "0.05", "UWB_NLOS_BIAS_M": "1.0",
                   "RADAR_RANGE_SIGMA_M": "0.2", "RADAR_AZ_SIGMA_DEG": "4", "RADAR_EL_SIGMA_DEG": "4",
@@ -69,7 +80,7 @@ CONDITIONS = {
 KEY = ["condition", "rep", "approved", "destroyed", "kill_ratio", "det_miss_m_mean", "det_miss_m_max", "det_reasons",
        "fuze_no_detection", "fuze_false_triggers", "missed_slots", "never_fully_assigned", "reannounces",
        "friendly_fire", "collisions", "min_separation_m", "min_ship_range_m", "loc_err_mean_m", "loc_err_p95_m",
-       "loc_err_max_m", "loc_nees_mean", "loc_within95", "loc_relocks", "award_latency_ms_mean", "wall_s"]
+       "loc_err_max_m", "loc_nees_mean", "loc_within95", "loc_relocks", "gnss_spoof_reports", "award_latency_ms_mean", "wall_s"]
 AGGREGATE = ["destroyed", "kill_ratio", "det_miss_m_mean", "fuze_no_detection", "fuze_false_triggers", "missed_slots",
              "loc_err_p95_m", "loc_err_max_m", "loc_nees_mean", "min_separation_m"]
 

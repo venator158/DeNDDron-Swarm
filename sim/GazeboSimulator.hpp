@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 #include <zenoh.hxx>
 #include <optional>
+#include <array>
 #include <algorithm>
 #include <chrono>
 #include <map>
@@ -205,6 +206,27 @@ private:
     std::mt19937 _imu_rng{11};
     void configure_imu();
     json imu_frame(const std::string& agent_id, double sim_time);
+
+    // GNSS (hardware record "gnss", "ship_gnss"; not with LOCALIZATION=truth): every drone gets fixes
+    // in a world frame (drone/{id}/gnss), the ship its own fix and heading (sim/ship_gnss), at
+    // gnss.rate_hz.  The ship sits at ship_gnss.geo_origin_enu_m with heading_deg, so drones must
+    // convert.  Errors per receiver: a common Gauss-Markov part shared by all (cancels in the
+    // difference), its own Gauss-Markov part, white noise; the heading a constant error.
+    // GNSS_JAM "t0:t1[:x:y:r]" (no fix), GNSS_SPOOF "t0:dir_deg:rate_mps[:step_m[:x:y:r]]" (an offset
+    // ramping in, plus a step), both on receivers within r m of (x, y) (ship frame) or everywhere.
+    // Positions are not speed-scaled; correlation times follow the time stretch (hardware.gnss_errors).
+    bool _gnss_on = false;
+    double _gnss_period = 0.2, _last_gnss_time = 0.0;
+    double _gnss_common_sigma = 0, _gnss_common_tau = 1, _gnss_rx_sigma = 0, _gnss_rx_tau = 1, _gnss_white = 0;
+    double _ship_heading = 0.0, _ship_heading_err = 0.0, _ship_heading_sigma = 0.0;
+    ignition::math::Vector3d _geo_origin{0, 0, 0};
+    double _gnss_common[2] = {0, 0};
+    std::map<std::string, std::array<double, 2>> _gnss_rx;     // per receiver ("ship" too; step thread only)
+    struct GnssWindow { double t0, t1 = 1e18, dir = 0, rate = 0, step = 0; bool local = false; double x = 0, y = 0, r = 0; };
+    std::vector<GnssWindow> _gnss_jam, _gnss_spoof;
+    std::mt19937 _gnss_rng{13};
+    void configure_gnss();
+    void publish_gnss(double sim_time, const std::vector<std::string>& agents);
     void on_uwb_tx(const zenoh::Sample& sample);
     bool uwb_jammed(const std::string& what, double t, const ignition::math::Vector3d& at) const;
     void publish_uwb(double sim_time, const std::vector<std::string>& agents, bool anchors, bool peers);

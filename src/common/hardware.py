@@ -70,3 +70,24 @@ def imu_errors(hw: Mapping, scaling: Optional[str] = None) -> dict:
         "output_hz": float(imu.get("output_hz", 50.0)),
         "scaling": scaling,
     }
+
+
+def gnss_errors(hw: Mapping) -> dict:
+    """Simulated GNSS errors (metres, per horizontal axis, 1 sigma) and the drone-relative-to-ship
+    figure the drones assume.  Positions are not speed-scaled; correlation times follow the
+    simulation's time stretch (/ speed_scale), as the IMU's do.
+
+    Returns common (sigma, tau), receiver (sigma, tau), white, rate_hz, min_sats, heading_sigma (rad),
+    rel_sigma (the relative fix's per-axis noise without the heading term: both receivers' own parts
+    and white noise; the common part cancels) and rel_bias_sigma (its slowly varying part)."""
+    s = float(hw["simulation"]["speed_scale"])
+    g, sg = hw["gnss"], hw.get("ship_gnss", {})
+    rec, white = float(g["receiver_sigma_m"]), float(g["white_sigma_m"])
+    return {
+        "common_sigma": float(g["common_sigma_m"]), "common_tau": float(g["common_tau_s"]) / s,
+        "receiver_sigma": rec, "receiver_tau": float(g["receiver_tau_s"]) / s,
+        "white_sigma": white, "rate_hz": float(g.get("rate_hz", 5.0)), "min_sats": int(g.get("min_sats", 6)),
+        "heading_sigma": math.radians(float(sg.get("heading_sigma_deg", 0.0))),
+        "rel_bias_sigma": math.sqrt(2.0) * rec,
+        "rel_sigma": math.sqrt(2.0 * rec * rec + 2.0 * white * white),
+    }

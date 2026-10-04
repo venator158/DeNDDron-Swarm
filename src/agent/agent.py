@@ -12,6 +12,7 @@ from radar_obstacles import RadarObstacles
 from localization import Localizer, anchors_from_record
 from coop import Coop, state_payload
 from rdl import RDL
+from gnss import Gnss
 from path_planning import APFStrategy, ORCAStrategy
 from timing import TimingManager, TimingState
 from auction import AuctionManager
@@ -69,6 +70,8 @@ class DenddronAgent:
     LOCALIZATION = (os.environ.get("LOCALIZATION") or "coop").strip().lower()
     UWB_FILTER = (os.environ.get("UWB_FILTER") or "robust").strip().lower()   # robust | basic (localization.py)
     NAV_PREDICT = (os.environ.get("NAV_PREDICT") or "imu").strip().lower()     # imu | cmd (localization.py)
+    GNSS = (os.environ.get("GNSS") or "1").strip() != "0"                      # GNSS comparator/fallback (gnss.py)
+    GNSS_FALLBACK = (os.environ.get("GNSS_FALLBACK") or "on").strip().lower() != 'off'
     LOC_EVAL_PERIOD_S = 0.5    # sim s between localization reports for evaluation (drone/{id}/loc)
     # Station keeping: drift (wind) beyond this from the hold point, or beyond the distance a goal
     # latched at, flies the drone back.  Never triggers in calm air (a holding drone does not move).
@@ -202,10 +205,15 @@ class DenddronAgent:
         elif self.LOCALIZATION == "rdl":
             # consistent peer fusion: cross-covariance factors, pairwise exchanges (rdl.py)
             self.rdl = RDL(self.agent_id, self.loc, max_peers=max_peers, imu=self.loc.imu is not None)
+        self.gnss = None
+        if self.loc is not None and self.GNSS and "gnss" in self.hw:
+            self.gnss = Gnss(self.loc, hardware.gnss_errors(self.hw), fallback=self.GNSS_FALLBACK)
+            self._gnss_state = None
         if self.loc is not None:
             logger.info(f"[{self.agent_id}] Localization {self.LOCALIZATION}: {len(self.anchors)} UWB anchors, "
                         f"range sigma {self.loc.range_sigma} m, {self.UWB_FILTER} filter, "
-                        f"prediction {'imu (' + imu['scaling'] + ')' if imu else 'cmd'}")
+                        f"prediction {'imu (' + imu['scaling'] + ')' if imu else 'cmd'}, GNSS "
+                        f"{'off' if self.gnss is None else 'comparator' + (' + fallback' if self.GNSS_FALLBACK else '')}")
 
         # --- Path Planner: strategy selection ---
         planner_cfg = dict(global_cfg.get("path_planning", {}))
@@ -320,6 +328,8 @@ class DenddronAgent:
         if self.loc is not None:
             self.sub_uwb = self.onboard.declare_subscriber(f"drone/{self.agent_id}/uwb", self._on_uwb)
             self.pub_loc = self.onboard.declare_publisher(f"drone/{self.agent_id}/loc")   # evaluation only
+        if self.gnss is not None:
+            self.sub_gnss = self.onboard.declare_subscriber(f"drone/{self.agent_id}/gnss", self._on_gnss)
         if self.coop is not None or self.rdl is not None:
             # our UWB transmissions: the state our ranging frames carry, and which peers to range
             self.pub_uwb_tx = self.onboard.declare_publisher(f"drone/{self.agent_id}/uwb_tx")
@@ -481,8 +491,13 @@ class DenddronAgent:
                     # no IMU data in a frame (the simulator's first): constant velocity over it
                     dv, dti = ((float(imu["dv"][0]), float(imu["dv"][1])), float(imu["dt"])) if imu else ((0.0, 0.0), 0.0)
                     self.loc.predict_imu(dt, dv, dti)
+                    if self.gnss is not None:
+                        self.gnss.shadow_predict_imu(dt, dv, dti)
                 else:
-                    self.loc.predict(dt, self._last_cmd_xy())
+                    cmd = self._last_cmd_xy()
+                    self.loc.predict(dt, cmd)
+                    if self.gnss is not None:
+                        self.gnss.shadow_predict_cmd(dt, cmd)
             self._loc_frame_t = t
             x, y = self.loc.position()
             report = t - self._loc_report_t >= self.LOC_EVAL_PERIOD_S
@@ -499,6 +514,9 @@ class DenddronAgent:
                     msg["accel_bias"] = [round(b, 6) for b in self.loc.accel_bias()]
                 if self.coop is not None:
                     msg.update(hops=self.coop.hops(t), peer_updates=self.coop.peer_updates)
+                if self.gnss is not None:
+                    msg["gnss"] = {"state": self.gnss.state, "fused": self.gnss.fused,
+                                   "nis": None if self.gnss.last_nis is None else round(self.gnss.last_nis, 2)}
                 if self.rdl is not None:
                     r = self.rdl
                     msg.update(peer_updates=r.joint_updates + r.ci_updates, rdl={
@@ -567,6 +585,26 @@ class DenddronAgent:
                 peers = self.coop.choose_peers(self.loc.position(), t, self.roster)
                 tx = {"state": state, "peers": peers}
         self.pub_uwb_tx.put(json.dumps(tx))
+
+    def _on_gnss(self, sample):
+        """Our GNSS fix (drone/{id}/gnss): checked against UWB, or standing in for it (gnss.py)."""
+        if self.destroyed:
+            return
+        try:
+            m = self._parse(sample)
+            t = float(m["sim_time"])
+        except Exception:
+            return
+        with self._loc_lock:
+            state = self.gnss.on_fix(t, m.get("enu") or (0.0, 0.0), bool(m.get("fix")) and m.get("enu") is not None,
+                                     int(m.get("sats", 0)))
+        if state != self._gnss_state:
+            if state == "spoofed":
+                logger.warning(f"[{self.agent_id}] GNSS SPOOFED at t={t:.1f} (NIS {self.gnss.last_nis:.1f}): "
+                               f"reported to the ship, GNSS ignored from now on")
+            else:
+                logger.info(f"[{self.agent_id}] GNSS {state} at t={t:.1f}")
+            self._gnss_state = state
 
     def _pos_sigma(self):
         if self.loc is None:
@@ -1765,6 +1803,7 @@ class DenddronAgent:
             "pose": None if pose is None else {k: round(pose[k], 2) for k in ("x", "y", "z")},
             "pos_sigma": self._pos_sigma(),         # 1-sigma horizontal position uncertainty (None: truth)
             "loc_flags": self._loc_flags(),         # range sources drifting against our track (anchors)
+            "gnss": None if self.gnss is None else self.gnss.state,   # ok | fallback | no_fix | spoofed
             "threat_id": eng["threat"].threat_id if eng else None,
             "t_engage": eng["t_engage"] if eng else None,
             "confirmed": eng["confirmed"] if eng else None,
@@ -1927,6 +1966,11 @@ class DenddronAgent:
                 self.sync.on_leader(float(msg["beacon"]), t4, (mine[0], mine[1]) if mine else None)
             self.roster = list(msg.get("members", []))
             self.roster_relayed = set(msg.get("relayed", []))
+            g = msg.get("gnss")
+            if self.gnss is not None and g and g.get("t") is not None:
+                with self._loc_lock:
+                    self.gnss.on_ship(float(g["t"]), g.get("enu") or (0.0, 0.0), float(g.get("heading") or 0.0),
+                                      bool(g.get("fix")) and g.get("enu") is not None)
             self._roster_time = simclock.now()
         except Exception as e:
             logger.warning(f"[{self.agent_id}] Ignoring malformed roster: {e}")

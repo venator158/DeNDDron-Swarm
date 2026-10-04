@@ -11,7 +11,8 @@ REPO = Path(__file__).resolve().parents[1]
 class TestHardwareRecord(unittest.TestCase):
     def test_every_class_documented(self):
         hw = hardware.load()
-        for key in ("airframe", "warhead", "uwb", "uwb_anchors", "radar", "imu", "ahrs", "barometer", "compass"):
+        for key in ("airframe", "warhead", "uwb", "uwb_anchors", "radar", "imu", "ahrs", "barometer", "compass",
+                    "gnss", "ship_gnss"):
             self.assertIn("class", hw[key], key)
             self.assertIn("simulated", hw[key], key)
 
@@ -32,6 +33,14 @@ class TestHardwareRecord(unittest.TestCase):
         # the same drift over the same mission phase: 1/2 b t^2 with t_sim = t_real / s
         t_real = 6.0
         self.assertAlmostEqual(0.5 * sim["tilt_bias"] * (t_real / s) ** 2, 0.5 * real["tilt_bias"] * t_real ** 2)
+
+    def test_gnss_errors(self):
+        hw = hardware.load()
+        g = hardware.gnss_errors(hw)
+        s = hw["simulation"]["speed_scale"]
+        self.assertAlmostEqual(g["receiver_tau"], hw["gnss"]["receiver_tau_s"] / s)     # time-stretched
+        self.assertAlmostEqual(g["receiver_sigma"], hw["gnss"]["receiver_sigma_m"])     # metres: not scaled
+        self.assertLess(g["rel_sigma"], g["common_sigma"])                               # the common part cancels
 
     def test_runtime_config_section_wins(self):
         self.assertEqual(hardware.load({"hardware": {"x": 1}}), {"x": 1})

@@ -65,6 +65,11 @@ services:
       IMU_ERROR_SCALING: ${IMU_ERROR_SCALING:-dilated}
       IMU_EXTRA_BIAS_MPS2: ${IMU_EXTRA_BIAS_MPS2:-}
       IMU_SEED: ${IMU_SEED:-}
+      # GNSS (hardware record gnss, ship_gnss): GNSS=0 off; GNSS_JAM "t0:t1[:x:y:r]"; GNSS_SPOOF "t0:dir_deg:rate[:step[:x:y:r]]"
+      GNSS: ${GNSS:-1}
+      GNSS_JAM: ${GNSS_JAM:-}
+      GNSS_SPOOF: ${GNSS_SPOOF:-}
+      GNSS_SEED: ${GNSS_SEED:-}
       # Proximity fuze sensor (drone/{id}/fuze); FUZE=0 turns it off
       FUZE: ${FUZE:-1}
       FUZE_HZ: ${FUZE_HZ:-50}
@@ -132,6 +137,8 @@ services:
       UWB_FILTER: ${UWB_FILTER:-robust}                   # robust (adaptive noise, Huber, safe re-locks, drift exclusion) | basic
       NAV_PREDICT: ${NAV_PREDICT:-imu}                    # imu (flight controller's accelerometer) | cmd (command response model)
       IMU_ERROR_SCALING: ${IMU_ERROR_SCALING:-dilated}    # must match the simulator's
+      GNSS: ${GNSS:-1}                                    # comparator for UWB (gnss.py); 0 = off
+      GNSS_FALLBACK: ${GNSS_FALLBACK:-on}                 # stand in when our own anchors are stale | off
       UWB_JAM: ${UWB_JAM:-}
       # Proximity fuze (src/agent/fuze.py); FUZE=0 = timed detonation at t_engage
       FUZE: ${FUZE:-1}
