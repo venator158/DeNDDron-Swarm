@@ -270,7 +270,7 @@ The latest acceptable point, used as a fallback, is the old rule, with the defen
 - the CPA, if the threat passes outside the defended radius;
 - otherwise, the point where the track first crosses the defended radius.
 
-The assigned drones take up slots **stacked vertically** through that point (within ±3 m). Around the allocated time, the moment the threat should arrive, their **proximity fuze** arms, and each drone detonates as the threat passes closest; its job-mates fire with it (chain fire). With `--fuze off`, they detonate at the allocated time instead. Vertical stacking matters: obstacle avoidance is planar (radar contacts become points at the drone's own altitude, as the lidar's were), so job-mates stacked 3 m apart don't repel each other off their slots (a horizontal ring did). The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
+The assigned drones take up slots **stacked vertically** through that point, 4 m apart and centred on it: ±2 m for two drones, −4, 0, +4 m for three. Around the allocated time, the moment the threat should arrive, their **proximity fuze** arms, and each drone detonates as the threat passes closest; its job-mates fire with it (chain fire). With `--fuze off`, they detonate at the allocated time instead. Vertical stacking matters: obstacle avoidance is planar (radar contacts become points at the drone's own altitude, as the lidar's were), so stacked job-mates don't repel each other off their slots (a horizontal ring did). The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
 
 ## Architecture
 
@@ -1277,10 +1277,13 @@ GNSS fixes `uwb_short`, which neither `coop` nor RDL did: errors bounded and an 
 
 ### 6. Already-open items
 
-The chain-fire and stack-spacing decisions were deferred until items 1–5 are done (2026-10-04); items 1–5 are now done, so they are next.
+**Decided (2026-10-04):**
+- **Chain fire:** stays on the job-mate's detonation signal alone, with no secondary confirmation from the mate's own radar; a confirmation would add delay.
+- **Stack spacing:** 4 m vertical, done on branch `stack-spacing`.
+  - At 30 drones the closest pair was 3.6 m (was 2.0–2.5 m with 3 m stacks), with no collisions and no friendly fire.
+  - A cruise-missile (three-drone) stack destroyed its threat with misses of 1.9, 5.0 and 6.3 m (3 m stacks on the same scenario: worst 7.0 m).
+  - In that all-cruise-missile scenario only 1 of 5 threats was feasible with 15 drones, the same with 3 m stacks: the missiles outrun the drones.
 
-- **Chain fire for spread-out mates** (**decision**): fire only if the mate's own radar sees the threat inside the kill radius, otherwise wait for its own fuze.
-- **Three-drone stack spacing** (**decision**): spacing about 4 m, or a lower proximity threshold.
 - **Speed retune and 1 km detection:** `speed_scale` 0.2–0.4, threats faster, detection ~1 km out.
 - **Continuous position hold** in wind, instead of latch and re-approach.
 - **Fuze window** centred on the predicted arrival rather than `t_engage`.
@@ -1299,11 +1302,11 @@ The chain-fire and stack-spacing decisions were deferred until items 1–5 are d
 - **Station keeping in wind.** Drones latch up to 3 m from their goal, then drift downwind until they re-approach: 2.6–2.9 m misses in a 0.5 m/s wind, with true positions too. Continuous position hold would remove most of it.
 - **Not yet done:** the planned speed retune (`speed_scale` 0.2–0.4, threats faster) and 1 km threat detection.
 - **Routes around the no-fly zone are timed conservatively:** each detour waypoint is planned from rest, so ETAs over-estimate.
-- **Chain-fire delay.** A real mate-to-mate trigger such as a barometric shock travels at about the speed of sound: ~17 ms across a 6 m stack, which lets a fast threat escape. A barometric trigger would also respond to unrelated blasts. The simulation uses the detonation topic as an idealized, job-selective trigger (measured delivery 1.5–32 ms at `--rtf 3`).
+- **Chain-fire delay.** A real mate-to-mate trigger such as a barometric shock travels at about the speed of sound: ~23 ms across an 8 m three-drone stack, which lets a fast threat escape. A barometric trigger would also respond to unrelated blasts. The simulation uses the detonation topic as an idealized, job-selective trigger (measured delivery 1.5–32 ms at `--rtf 3`).
 - **Closing-speed discrimination.** Closing speed would separate threats from drones only at real speeds, not at the simulation's scaled ones, so the fuze does not use it.
 - **Fuze window and clocks.** The window is centred on `t_engage`, but threats arrive ~1.1 s late (drones stop short), so without clock sync a clock ~1 s ahead closes the window too early (see [Proximity fuze](#proximity-fuze)).
-- **Chain fire fires spread-out mates early.** Job-mates end up several metres apart along the threat's track, and chain fire sets them all off when the first one's fuze fires, up to 2 s before the threat reaches the last. At 50 drones this cost two three-drone kills in one run (misses of 8.4 and 9.5 m, where each drone's own fuze would have missed by 1–3 m).
-- **Stack spacing vs proximity.** Three-drone stacks are 3 m apart vertically; with 0.5 m altitude latching, stacked mates can be 2.0–2.5 m apart, under the metrics node's 2.5 m proximity threshold.
+- **Chain fire fires spread-out mates early.** Job-mates end up several metres apart along the threat's track, and chain fire sets them all off when the first one's fuze fires, up to 2 s before the threat reaches the last. At 50 drones this cost two three-drone kills in one run (misses of 8.4 and 9.5 m, where each drone's own fuze would have missed by 1–3 m). Kept by the owner's decision (2026-10-04): a confirmation from the mate's own radar would add delay.
+- **Stacked mates are close calls by design.** Job-mates are 4 m apart vertically (3.6 m closest measured), inside the metrics node's 5 m close-call count, but outside its 2.5 m proximity threshold.
 - **Late job-mates.** A job-mate that enters fuze range after the mates were recorded (still flying in) is a new track; if it passes within the gate of the predicted threat position it could trigger the fuze. The evaluation labels every trigger; none was false in the runs so far.
 - **GNSS spoofing that covers the ship too** cancels in the drone-minus-ship fix and isn't detected; GNSS jamming only removes the comparator and the fallback.
 - **Best-effort radio.** Data runs over UDP, so messages can be lost under packet loss; Zenoh's control messages go over QUIC and are retransmitted. At 50 % loss QUIC's own recovery slows down and new subscriptions are often still dead after 10 s. See [Degraded communications](#degraded-communications).

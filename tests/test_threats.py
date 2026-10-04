@@ -58,10 +58,17 @@ class TestGeometry(unittest.TestCase):
         self.assertEqual(t, 7.0)
 
     def test_slots_stacked_through_point(self):
-        pts = [slot_point((5.0, 6.0, 20.0), k, 3, 3.0) for k in range(3)]
-        self.assertEqual(pts, [(5.0, 6.0, 17.0), (5.0, 6.0, 20.0), (5.0, 6.0, 23.0)])
-        self.assertEqual([slot_point((5.0, 6.0, 20.0), k, 2, 3.0)[2] for k in range(2)], [17.0, 23.0])
-        self.assertEqual(slot_point((1.0, 2.0, 3.0), 0, 1, 3.0), (1.0, 2.0, 3.0))
+        # 4 m apart, centred on the point (owner's decision): a three-drone stack spans +-4 m, two +-2 m
+        pts = [slot_point((5.0, 6.0, 20.0), k, 3, 4.0) for k in range(3)]
+        self.assertEqual(pts, [(5.0, 6.0, 16.0), (5.0, 6.0, 20.0), (5.0, 6.0, 24.0)])
+        self.assertEqual([slot_point((5.0, 6.0, 20.0), k, 2, 4.0)[2] for k in range(2)], [18.0, 22.0])
+        self.assertEqual(slot_point((1.0, 2.0, 3.0), 0, 1, 4.0), (1.0, 2.0, 3.0))
+
+    def test_stack_extent_matches_blast_keepout(self):
+        from deconflict import SLOT_SPACING_M, slot_radius
+        for level in (1, 2, 3):
+            zs = [slot_point((0.0, 0.0, 20.0), k, level, SLOT_SPACING_M)[2] for k in range(level)]
+            self.assertAlmostEqual(max(abs(z - 20.0) for z in zs), slot_radius(level))
 
 
 class TestEta(unittest.TestCase):
