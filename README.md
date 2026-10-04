@@ -1109,7 +1109,7 @@ Light check (sensing sweep, 15 drones, 8 threats, one run each; plain filter fro
 4. **Drift and spoof check.** A windowed innovation test between the IMU-propagated track and each absolute source (anchors, peers, GNSS), flagged in telemetry and heartbeats. Item 5 uses it for spoof detection.
 5. **Light check:** `baseline`, `uwb_jam_all` (dead-reckoning error after 60 s vs the bias figure), wind with gusts, `uwb_nlos`.
 
-**Decision:** which IMU class is the default (proposed: the flight-controller class, the conservative one; the navigation-grade class as the comparison).
+**Decided (2026-10-04):** the flight-controller class (BMI088-class) is the default and the only class modelled. The goal is cheap drones deployed by the dozens, using the IMU their flight controller already has; a navigation-grade IMU would mean custom hardware. The record keeps the navigation-grade class only as a reference figure.
 
 ### 4. Recursive decentralized localization (RDL)
 
