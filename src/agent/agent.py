@@ -11,6 +11,7 @@ import os
 from radar_obstacles import RadarObstacles
 from localization import Localizer, anchors_from_record
 from coop import Coop, state_payload
+from rdl import RDL
 from path_planning import APFStrategy, ORCAStrategy
 from timing import TimingManager, TimingState
 from auction import AuctionManager
@@ -194,8 +195,14 @@ class DenddronAgent:
             # launch position known to a few metres; the anchors refine it within seconds
             self.loc.init_prior(float(self.spawn_pose["x"]), float(self.spawn_pose["y"]))
         self.coop = None
+        self.rdl = None
+        max_peers = int(self.hw.get("uwb", {}).get("max_peers", 6))
         if self.LOCALIZATION == "coop":
-            self.coop = Coop(self.agent_id, max_peers=int(self.hw.get("uwb", {}).get("max_peers", 6)))
+            self.coop = Coop(self.agent_id, max_peers=max_peers)
+        elif self.LOCALIZATION == "rdl":
+            # consistent peer fusion: cross-covariance factors, pairwise exchanges (rdl.py)
+            self.rdl = RDL(self.agent_id, self.loc, max_peers=max_peers, imu=self.loc.imu is not None)
+        if self.loc is not None:
             logger.info(f"[{self.agent_id}] Localization {self.LOCALIZATION}: {len(self.anchors)} UWB anchors, "
                         f"range sigma {self.loc.range_sigma} m, {self.UWB_FILTER} filter, "
                         f"prediction {'imu (' + imu['scaling'] + ')' if imu else 'cmd'}")
@@ -313,7 +320,7 @@ class DenddronAgent:
         if self.loc is not None:
             self.sub_uwb = self.onboard.declare_subscriber(f"drone/{self.agent_id}/uwb", self._on_uwb)
             self.pub_loc = self.onboard.declare_publisher(f"drone/{self.agent_id}/loc")   # evaluation only
-        if self.coop is not None:
+        if self.coop is not None or self.rdl is not None:
             # our UWB transmissions: the state our ranging frames carry, and which peers to range
             self.pub_uwb_tx = self.onboard.declare_publisher(f"drone/{self.agent_id}/uwb_tx")
 
@@ -492,6 +499,12 @@ class DenddronAgent:
                     msg["accel_bias"] = [round(b, 6) for b in self.loc.accel_bias()]
                 if self.coop is not None:
                     msg.update(hops=self.coop.hops(t), peer_updates=self.coop.peer_updates)
+                if self.rdl is not None:
+                    r = self.rdl
+                    msg.update(peer_updates=r.joint_updates + r.ci_updates, rdl={
+                        "joint": r.joint_updates, "ci": r.ci_updates, "applied": r.replies_applied,
+                        "scaled": r.replies_scaled, "lost": r.replies_lost, "rejected": r.rejected,
+                        "factors": len(r.factors)})
         if report:
             self.pub_loc.put(json.dumps(msg))
         return x, y
@@ -513,6 +526,9 @@ class DenddronAgent:
         got = [(self.anchors[anchor_ids[int(k)]], float(r)) for k, r in m.get("anchors", []) if int(k) < len(anchor_ids)]
         t = m.get("sim_time")
         with self._loc_lock:
+            if self.rdl is not None:
+                for sender, rep in m.get("replies", []):    # corrections peers computed for us
+                    self.rdl.on_reply(str(sender), rep)
             for aid, (a, r) in zip(ids, got):
                 if self.loc.update_range(a, r, z, t=t, source=aid) and self.coop is not None:
                     self.coop.on_anchor_update(t)
@@ -522,14 +538,20 @@ class DenddronAgent:
                     if payload:
                         self.coop.on_payload(str(pid), payload)
                         self.coop.peer_update(self.loc, str(pid), float(r), z, t, ref_anchor_t=ref)
+            if self.rdl is not None and m.get("peers"):
+                for pid, r, payload in m["peers"]:
+                    if payload:
+                        self.rdl.on_payload(str(pid), payload, t)
+                        self.rdl.peer_update(str(pid), float(r), z, t, self.loc.noise_sigma())
             if self.loc.needs_relock() and len(got) >= 3:
                 if self.loc.relock_from([a for a, _ in got], [r for _, r in got], z):
                     logger.warning(f"[{self.agent_id}] Localization re-locked from {len(got)} anchors "
                                    f"(estimate disagreed with {self.loc.relock} ranges in a row)")
 
     def _send_uwb_tx(self):
-        """Coop: publish the state our UWB frames carry and the peers to range next (2 Hz)."""
-        if self.coop is None or self.destroyed:
+        """Coop/RDL: publish the state our UWB frames carry and the peers to range next (2 Hz); with
+        RDL also the replies to peers we updated."""
+        if (self.coop is None and self.rdl is None) or self.destroyed:
             return
         with self.state_lock:
             z = self.current_pose["z"] if self.current_pose is not None else None
@@ -537,9 +559,14 @@ class DenddronAgent:
             return
         with self._loc_lock:
             t = self._loc_frame_t
-            state = state_payload(self.loc, z, t, self.coop.hops(t), self.coop.anchor_t())
-            peers = self.coop.choose_peers(self.loc.position(), t, self.roster)
-        self.pub_uwb_tx.put(json.dumps({"state": state, "peers": peers}))
+            if self.rdl is not None:
+                peers = self.rdl.choose_peers(self.loc.position(), t, self.roster)
+                tx = {"state": self.rdl.payload(t, z, peers), "peers": peers, "replies": self.rdl.replies(t)}
+            else:
+                state = state_payload(self.loc, z, t, self.coop.hops(t), self.coop.anchor_t())
+                peers = self.coop.choose_peers(self.loc.position(), t, self.roster)
+                tx = {"state": state, "peers": peers}
+        self.pub_uwb_tx.put(json.dumps(tx))
 
     def _pos_sigma(self):
         if self.loc is None:

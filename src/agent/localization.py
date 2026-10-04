@@ -127,6 +127,9 @@ class Localizer:
         self.updates = 0
         self._run = 0
         self.last_update_t: Optional[float] = None
+        # Cross-covariance bookkeeping (rdl.RDL): told the matrix M every own step applies to the error
+        # (x <- M x: F for a prediction, I - K H for an update) and when the estimate is re-initialized.
+        self.listener = None
 
     # --- state ----------------------------------------------------------
     @property
@@ -194,6 +197,8 @@ class Localizer:
         Q = q * (G @ G.T)
         Q[4, 4] = Q[5, 5] = self.wind_walk ** 2 * dt
         self.P = F @ self.P @ F.T + Q
+        if self.listener is not None:
+            self.listener.on_transform(F)
 
     def predict_imu(self, dt: float, dv: Tuple[float, float], dt_imu: Optional[float] = None) -> None:
         """IMU mode: advance dt seconds with the accelerometer's delta-velocity dv measured over
@@ -228,6 +233,8 @@ class Localizer:
         Q[1, 1] += (dvy * dti) ** 2 / 12.0
         Q[4, 4] = Q[5, 5] = self.bias_sigma ** 2 * (1.0 - k * k)
         self.P = F @ self.P @ F.T + Q
+        if self.listener is not None:
+            self.listener.on_transform(F)
 
     # --- measurements ---------------------------------------------------
     def update_range(self, anchor: Vec3, r: float, z: float, sigma: Optional[float] = None,
@@ -277,6 +284,8 @@ class Localizer:
         self.x = self.x + K[:, 0] * y
         IKH = np.eye(6) - K @ H
         self.P = IKH @ self.P @ IKH.T + (K @ K.T) * s * s     # Joseph form: stays symmetric, positive
+        if self.listener is not None:
+            self.listener.on_transform(IKH)                   # a known landmark: exact for cross-covariances
         self.updates += 1
         if t is not None:
             self.last_update_t = t
@@ -356,6 +365,8 @@ class Localizer:
         self.P[2, 2] = self.P[3, 3] = 0.25
         self.P[4, 4] = self.P[5, 5] = self._tail_var()
         self._run = 0
+        if self.listener is not None:
+            self.listener.on_reset()                          # correlations with peers are lost
         return True
 
     def relock_from(self, anchors: Sequence[Vec3], ranges: Sequence[float], z: float) -> bool:

@@ -46,7 +46,7 @@ services:
       ZENOH_ROUTER_IP: tcp/${SIM_BUS_IP:-172.20.0.2}:7447
       SIM_RTF: ${SIM_RTF:-1}
       PERCEPTION: ${PERCEPTION:-radar}                    # radar (hardware record's mmWave radar) | lidar (legacy)
-      LOCALIZATION: ${LOCALIZATION:-coop}                 # coop | anchors | truth (UWB, hardware record)
+      LOCALIZATION: ${LOCALIZATION:-coop}                 # coop | rdl | anchors | truth (UWB, hardware record)
       UWB_JAM: ${UWB_JAM:-}
       UWB_SEED: ${UWB_SEED:-}
       # Sensing degradation (tools/comms/sensing_sweep.py): empty = the hardware record; drones keep assuming it
@@ -128,7 +128,7 @@ services:
       CLOCK_AGGREGATE: ${CLOCK_AGGREGATE:-mean}
       CLOCK_STEP_S: ${CLOCK_STEP_S:-0.05}
       PERCEPTION: ${PERCEPTION:-radar}                    # obstacle avoidance from the radar, or lidar + voxel map (legacy)
-      LOCALIZATION: ${LOCALIZATION:-coop}                 # coop | anchors | truth (UWB, hardware record)
+      LOCALIZATION: ${LOCALIZATION:-coop}                 # coop | rdl | anchors | truth (UWB, hardware record)
       UWB_FILTER: ${UWB_FILTER:-robust}                   # robust (adaptive noise, Huber, safe re-locks, drift exclusion) | basic
       NAV_PREDICT: ${NAV_PREDICT:-imu}                    # imu (flight controller's accelerometer) | cmd (command response model)
       IMU_ERROR_SCALING: ${IMU_ERROR_SCALING:-dilated}    # must match the simulator's

@@ -424,6 +424,17 @@ Drones localize themselves instead of receiving their true x,y, and avoid each o
 
 Absolute position is only observable through the anchors: with every anchor jammed, no chain is fresher than another, nobody uses peers, and each drone dead-reckons with its learned wind while its covariance grows.
 
+**Recursive decentralized localization (`LOCALIZATION=rdl`, `rdl.py`; Luft et al. 2018).** Peers are fused consistently by tracking the cross-covariance between drones that have exchanged ranges, in factored form:
+- **Factors:** each drone keeps a 6×6 factor per peer, and the cross-covariance is the product of the two drones' factors. Its own predictions and anchor updates multiply only its own factors (a `Localizer` listener), so no drone needs the swarm's joint covariance.
+- **A peer range** updates both drones at once on the joint 12-state covariance (delayed state: the peer's state is the one it sent, moved by its velocity over the payload's age). The updating drone sends the peer a reply: the innovation, its variance, and its covariance with the peer's state as sent. The peer applies it exactly to its current state through the product of its own steps since that payload, and resets its factor.
+- **One update per payload:** each payload names the one peer allowed to update it (rotating), so the same uncertainty is never used twice; replies are acknowledged by sequence number.
+- **Lost replies, evicted factors, re-locks:** the pair's correlation is unknown, and its next update uses covariance intersection, which re-establishes the factor.
+- **Every drone uses peers,** anchored or not; peer ranges keep the plain gate.
+
+Payload per exchange: 150 B (state float32, covariance and the factor float16) plus a 26 B reply, which needs 802.15.4z extended frames. The [hardware record](#hardware-record) holds `rdl_payload_bytes` and the airtime, and the simulator's channel model uses them in `rdl` mode.
+
+Limit: with a single anchored drone the formation's rotation about it is unobservable from ranges, and any EKF linearized at a wrong estimate (RDL or `coop`) becomes overconfident. Two or more anchored drones not in line make it observable.
+
 **Environment.** The record's `environment` entry adds wind and gusts that push the drones' true positions (`--wind 5,0 --gust 1.5`, real m/s × `speed_scale`; default calm). Wind made two more things necessary:
 - the wind state in the filter: without it, a 0.5 m/s wind made it 600× overconfident and re-lock 290 times in one run;
 - station keeping: idle drones fly back after drifting 1 m, and a drone latched on its goal re-approaches after drifting 1 m beyond where it latched. Neither triggers in calm air.
@@ -923,6 +934,7 @@ Where each implemented feature lives.
 | | flight-controller IMU: horizontal delta-velocity per sensor frame with accelerometer and tilt biases (Gauss–Markov), noise, scale factor, time-stretch scaling | `GazeboSimulator.cpp` (`configure_imu`, `imu_frame`), `src/common/hardware.py` (`imu_errors`) |
 | | EKF (position, velocity, accelerometer bias; or wind with the command model), IMU prediction, gating, re-lock, multilateration; robust mode: adaptive noise, Huber update, residual-checked re-locks; drift monitor | `src/agent/localization.py` |
 | | cooperative localization: neighbour table, anchor-time chains, peer fusion | `src/agent/coop.py` |
+| | recursive decentralized localization: cross-covariance factors, delayed-state joint updates, replies with acknowledgement, covariance intersection fallback | `src/agent/rdl.py`, `agent.py` (`_on_uwb`, `_send_uwb_tx`); simulator carries replies (`publish_uwb`) |
 | | drone integration, station keeping against wind | `agent.py` (`_loc_predict`, `_on_uwb`, `_send_uwb_tx`, `_reflex_control_loop`) |
 | | evaluation: errors, NEES, separations | `src/metrics/main.py` (`_on_loc`, `_loc_summary`) |
 | **Perception** | mmWave radar (default; lidar off) | `GazeboSimulator.cpp` (`configure_fuze`, `publish_fuze`) |
@@ -996,7 +1008,7 @@ Simulation speed (env): `SIM_RTF` (1), set by `--rtf`.
 
 Ship no-fly zone (env): `NO_FLY_RADIUS_M` (50; 0 = off, stations at 30–45 m; `--no-fly R`, which also moves stations to R+5 … R+45 m).
 
-Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `anchors`, or legacy `truth`; `--localization`), `UWB_FILTER` (`robust`, or the plain `basic`), `NAV_PREDICT` (`imu`, or the command model `cmd`), `IMU_ERROR_SCALING` (`dilated`, or `real`; drones and simulator), `IMU_EXTRA_BIAS_MPS2` (simulator: a constant extra accelerometer bias, real m/s², scaled like the record's), `IMU_SEED`, `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensing degradation (simulator only; empty = the record, which the drones keep assuming): `UWB_EXTRA_SIGMA_M`, `UWB_NLOS_P`, `UWB_NLOS_BIAS_M`, `UWB_DROPOUT_P`, `UWB_MAX_RANGE_M`, `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG`, `RADAR_MISS_P`, `RADAR_CLUTTER`, `RADAR_LATENCY_S` (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)). Sensor and environment parameters are in the [hardware record](#hardware-record).
+Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `rdl`, `anchors`, or legacy `truth`; `--localization`), `UWB_FILTER` (`robust`, or the plain `basic`), `NAV_PREDICT` (`imu`, or the command model `cmd`), `IMU_ERROR_SCALING` (`dilated`, or `real`; drones and simulator), `IMU_EXTRA_BIAS_MPS2` (simulator: a constant extra accelerometer bias, real m/s², scaled like the record's), `IMU_SEED`, `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensing degradation (simulator only; empty = the record, which the drones keep assuming): `UWB_EXTRA_SIGMA_M`, `UWB_NLOS_P`, `UWB_NLOS_BIAS_M`, `UWB_DROPOUT_P`, `UWB_MAX_RANGE_M`, `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG`, `RADAR_MISS_P`, `RADAR_CLUTTER`, `RADAR_LATENCY_S` (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)). Sensor and environment parameters are in the [hardware record](#hardware-record).
 
 Proximity fuze (env): `FUZE` (1; 0 = timed detonation), `FUZE_WINDOW_S` (2), `FUZE_GATE_M` (5), `FUZE_FIRE` (`cpa`), `FUZE_FALLBACK` (`hold`), and for the simulator's sensor `FUZE_RANGE_M` (10, drones too), `FUZE_HZ` (50), `FUZE_NOISE_M` (0.1), `FUZE_LATENCY_S` (0), `FUZE_SEED` (0). See [Proximity fuze](#proximity-fuze).
 
@@ -1026,6 +1038,7 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_deconflict.py` | spatial queue: speed profiles, routes with holds and exits around blasts, earliest-feasible intercepts, manoeuvre re-plan slack; routes around the no-fly zone (legs clear, shorter way, timing) |
 | `test_localization.py` | EKF from anchor ranges: multilateration, tracking a moving drone consistently (NEES), outlier gating, dropouts, re-lock after a corrupted estimate, uncertainty growth, wind learned, outage dead-reckoned with the wind; robust filter: adaptive noise at 3× the record's noise (with and without NLOS), re-lock leaving out a blocked anchor, refused re-lock when three anchors disagree; IMU prediction: consistent and tighter than the command model, through a 60 s outage, unscaled errors as a stress case; drift monitor: flags a persistent bias only, no flags in clean flights, a drifting anchor flagged and left out |
 | `test_coop.py` | cooperative localization: a drone beyond anchor range localized through anchored peers (consistent), drift without peers, no stale "anchored" loop with every anchor jammed, peer selection |
+| `test_rdl.py` | recursive decentralized localization: one exchange equals the centralized joint update (states, covariances, cross-covariance from the factors), replies applied once; a swarm with the live exchange timing (0.5 s old payloads, replies a frame later): far drone consistent through peers, the live `uwb_short` layout with and without 30 % exchange loss, every anchor jammed (relative positions tighter than `coop`, NEES honest) |
 | `test_radar_obstacles.py` | radar contacts give exactly the lidar's obstacle points (50 random layouts vs a port of the simulator's lidar), ship contacts dropped, staleness |
 | `test_fuze.py` | proximity fuze: fires at closest approach (three threat speeds), threat in range before arming not taken for a mate, mates never trigger, hold and timed fallbacks, closest approach beyond the kill radius, contacts off the predicted track ignored, radius mode, arming window, stale track, chain readiness, config |
 | `test_ship_track.py` | radar track: truth vs ship-time view, true closest approach; ship time attributes set at start (needs zenoh installed) |
@@ -1146,28 +1159,53 @@ A drifting anchor (2 cm/s from t = 60 s) is flagged 7–14 s after its drift beg
 
 The `uwb_nlos` maxima, in both modes, are start-up errors: in the first ~20 s, before any threat, a drone converging from its launch prior (σ 5 m) can settle off by several metres under NLOS (live: 6–15 m, claiming σ 0.3–2 m), then recovers. In the unit simulator the IMU halves it (p90 0.6 vs 2.7 m) but both modes have 4–5 m outliers. A first fix by multilateration made it worse (the anchor array is 30 × 10 m seen from 60–100 m). Still open.
 
-### 4. Recursive decentralized localization (RDL)
+### 4. Recursive decentralized localization (RDL) — built, opt-in
 
-**Problem.** Peer fusion today uses each peer's estimate as if it were independent of ours. That stops the 7× overconfidence seen first (by flooring our variance at the peer's), but not overconfidence along chains. With UWB range cut to 80 m, drones localized only through peers were 16 m off (p95) while claiming sub-metre accuracy (NEES 50).
+Built on branch `rdl` (2026-10-04) as `LOCALIZATION=rdl`; see [Localization and perception](#localization-and-perception). `coop` stays the default because RDL is not yet consistent live.
 
-**Method.** RDL (Luft et al., 2018) keeps the cross-covariance between every pair of drones that have exchanged ranges, in factored form: each drone stores its share σᵢⱼ for each peer j. A pairwise range update needs only the two drones involved. It produces a consistent joint update of both states, and updates the two drones' factors, while every other factor stays valid. Propagation multiplies only the drone's own factors by its transition matrix. No drone needs the global covariance, and it tolerates asynchronous, lossy exchanges.
+**What it is** (`src/agent/rdl.py`):
+- per-peer cross-covariance factors (Luft et al. 2018);
+- a joint 12-state update per peer range, on the peer's state as sent (delayed state);
+- a reply in innovation form, which the peer applies exactly through its own steps since;
+- one update per payload (`accept`), acknowledgements, and covariance intersection when a pair's correlation is unknown;
+- the simulator carries the replies, and models the larger payload's airtime.
 
-**Steps:**
-1. **`src/agent/rdl.py`**, pure and unit-tested on the 6-state EKF (position, velocity, and wind or, with the IMU, accelerometer bias):
-   - factor storage per peer, capped at the UWB `max_peers` plus recent partners, oldest dropped (a dropped factor is treated as unknown correlation: covariance intersection for that pair);
-   - the joint 12-state range update;
-   - anchor updates (anchors are uncorrelated landmarks, so only the drone's own factors change).
+**What the unit swarm showed** (`tests/test_rdl.py`; 5 drones, live exchange timing):
+- **Exactness:** one exchange reproduces the centralized joint update exactly.
+- **Async design:** three choices were needed for consistency.
+  - Delayed state: carrying the peer's payload forward with a guessed model made covariances indefinite.
+  - Exact replies.
+  - One updater per payload: four peers updating one drone from the same snapshot made it diverge.
+- **Approximations:** Luft's third-party approximation, applied to the factors and to the payload snapshots, is essential; removing either made NEES run into the thousands.
+- **Calibration:** the peer's unknown acceleration over the payload's age is counted at 3 m/s². At 1 m/s² RDL was overconfident with IMU prediction.
+- **Results** (5 seeds, command model): RDL is consistent, with smaller errors than `coop`:
+  - anchors to 150 m: worst error 0.8 vs 1.8 m;
+  - live-like `uwb_short` layout: 1.0 vs 1.6 m;
+  - every anchor jammed: 4.4 vs 9.1 m, relative error 4.2 vs 11.3 m.
 
-   Tests reuse `test_coop.py`'s swarm:
-   - consistency (NEES ≈ 2) for the far drone;
-   - with every anchor jammed, relative positions stay tight while absolute error grows honestly;
-   - the `uwb_short` geometry;
-   - exchange loss.
-2. **Exchange.** A range update changes both drones, so the initiator sends the responder its new state and factor in a reply. The simulator carries it in the next UWB frame, as `uwb_tx` payloads are carried now, with the same dropout and capacity model. A lost reply is detected by sequence number, and that pair falls back to covariance intersection.
-3. **Integration** behind `LOCALIZATION=rdl`, with `coop` the default until RDL beats it in the sweep (`uwb_short`, `uwb_jam_all`, `uwb_jam_local`, `combined`; NEES, p95 and max error, kills).
-4. **Cost.** State per drone grows with the peer count: 6 × 6 per factor, so about 1.5 kB at 6 peers. The UWB payload grows by one 6 × 6 factor per exchange (~150 B in float16), more than the record's 64 B. The payload may be expanded (DW3000-class radios carry frames up to 1023 B) if that brings a benefit: measure both and record the difference and the airtime.
+  With IMU prediction the errors are similar to `coop` and RDL is mildly overconfident (worst-drone NEES median 3–3.5).
+- **Limit:** with a single anchored drone, the formation's rotation is unobservable and both filters fail.
 
-It builds on the robust update (item 2) and the IMU motion model (item 3). It is the larger job: about the size of the cooperative localization work.
+**Light check** (sensing sweep, 15 drones, 8 threats, IMU prediction, robust filter; one run each; `coop` → `rdl`):
+
+| Condition | Error p95 / max | NEES | Destroyed |
+|---|---|---|---|
+| `baseline` | 0.24 / 1.33 → 0.21 / 1.18 m | 1.7 → 4.5 | 8/8, 8/8 |
+| `uwb_short` | **8.4 / 16.6 → 2.8 / 4.0 m** (a second RDL run: 0.42 / 4.5 m) | 22 → 41 (second run 6.1) | 8/8, 8/8 |
+| `uwb_jam_all` | 1.09 / 3.1 → 0.87 / 6.3 m | 1.8 → 3.2 | 8/8, 8/8 |
+| `uwb_jam_local` | 0.22 / 1.33 → 0.24 / 1.18 m | 1.7 → 5.2 | 8/8, 8/8 |
+| `combined` | 0.88 / 14.4 → 0.59 / 8.8 m | 3.1 → 17 | 6/8 → 8/8 |
+
+RDL fixes the errors where `coop` failed (peer-only drones beyond anchor range). But its covariance is too small everywhere live (NEES 3–41), and the drones use their σ in the no-fly barrier, the fuze gate and the intruder check.
+
+**Payload:** 150 B per exchange plus a 26 B reply, against the record's 64 B. float16 for the covariance and factor changed nothing in simulation. It needs extended frames, and the channel then carries ~860 instead of 1000 exchanges/s (`rdl_payload_bytes`, `rdl_exchange_airtime_s` in the record). Expanding the payload is what makes RDL possible at all; the difference it buys is the table above.
+
+**Open (next steps for RDL):**
+- **Live overconfidence.** Candidates:
+  - an observability-constrained update (the linearization lets peers "observe" directions only anchors can);
+  - a consistency check per pair that falls back to covariance intersection when the pair's innovations run high;
+  - fewer peer updates between well-anchored drones (tried as a hard rule: it made the unit results worse).
+- **Measure at scale:** 50 drones (channel load and CPU) and with repeats, before RDL can become the default.
 
 ### 5. GNSS as comparator and fallback
 
@@ -1210,7 +1248,7 @@ The chain-fire and stack-spacing decisions are deferred until items 1–5 are do
 ## Known limitations
 - **Localization is optimistic.** The IMU prediction (default) measures what the airframe does, but the IMU model is simple: Gauss–Markov biases, white noise and a constant scale factor, horizontal only, and the attitude error enters only as an equivalent tilt bias. Vibration, temperature drift, misalignment and the real coupling between manoeuvres and attitude error are not modelled. With `NAV_PREDICT=cmd`, the motion model is the simulator's exact command response. By default, ultra-wideband (UWB) ranges have no blocked-path or multipath errors, and the radar has no clutter or false alarms. The [sensing sweep](#sensing-and-ship-link-sweep) adds them as impairments: a positive non-line-of-sight bias, missed detections and uniform clutter. These are simple models, not a propagation or radar-scene simulation.
 - **Start-up under NLOS.** In the first ~20 s a drone converging from its launch prior can settle several metres off when 10 % of ranges are blocked (live: 6–15 m, before any threat), then recovers. A first fix by multilateration made it worse.
-- **No consistent fusion between unanchored drones.** Peers are used only along fresh anchor chains. With every anchor jammed, drones dead-reckon independently (their uncertainty grows honestly), and peer ranges keep nobody's estimate tight. Recursive decentralized localization (RDL), which tracks cross-covariances with pairwise exchanges, is the planned fix.
+- **No consistent fusion between unanchored drones by default.** `coop` uses peers only along fresh anchor chains: with every anchor jammed, drones dead-reckon independently (their uncertainty grows honestly) and peer ranges keep nobody's estimate tight. `LOCALIZATION=rdl` fuses peers through cross-covariances and keeps errors much smaller beyond anchor range, but is overconfident live (NEES 3–41), so it is opt-in.
 - **Degraded sensing** (see the [sensing sweep](#sensing-and-ship-link-sweep)):
   - **Peer chains beyond anchor range:** with UWB range cut to 80 m, drones localized only through peers were tens of metres off while claiming sub-metre accuracy (NEES 50).
 - **Station keeping in wind.** Drones latch up to 3 m from their goal, then drift downwind until they re-approach: 2.6–2.9 m misses in a 0.5 m/s wind, with true positions too. Continuous position hold would remove most of it.
