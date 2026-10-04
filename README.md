@@ -404,6 +404,11 @@ Drones localize themselves instead of receiving their true x,y, and avoid each o
 **Localization (`LOCALIZATION=coop`, default, or `anchors`).** The simulator withholds x, y and the horizontal velocity, and gives UWB ranges instead (`drone/{id}/uwb`). Four anchors sit on the ship at the hull corners (±15 × ±5 m, 8 m up). The ranges have the record's characteristics: 10 cm noise, 250 m range, 2 % dropouts, and channel airtime. Each drone runs an EKF (`localization.py`) on [x, y, vx, vy, wind x, wind y]:
 - **prediction** with the velocity it commands, through the airframe's command response (the simulator's filter; on hardware, the identified response), plus the wind it cannot sense, which the anchors make observable;
 - **updates** from 3D anchor ranges with its altitude known, with an innovation gate and re-initialization after 5 rejections in a row;
+- **robust anchor updates** (`UWB_FILTER=robust`, default; `basic` is the plain filter), for an environment worse than the record:
+  - *adaptive noise:* the range noise is estimated from the last 40 anchor innovations (the median, which outliers don't pull), floored at the record's 0.1 m and capped at 2 m;
+  - *Huber update:* an innovation beyond 2.5σ is down-weighted instead of rejected. A blocked path only ever lengthens a range, so a range too long beyond the 3.29σ gate is still rejected, and one too short only beyond 8σ;
+  - *safe re-locks:* a re-lock fix from 3 or more anchors must pass a residual test (χ², 99 %) at the estimated noise. With 4 anchors, leaving one out is tried too, so one blocked anchor cannot pull the fix. Localization is 2D, so 3 anchors leave one range to check;
+  - peer ranges keep the plain gate: a peer's error is its estimate's, not a blocked path;
 - **initialization** from the launch position, or by least squares from three or more anchors.
 
 **Cooperation (`coop`, `coop.py`).** Each ranging exchange carries the responder's state: estimate, covariance, velocity, altitude, and the time of the last anchor fix in its chain. Each drone keeps a neighbour table from those states and ranges its 6 nearest peers (plus a rotating slot for discovery). A drone that ranges the anchors itself never uses peers. Others use a peer only if its chain reached an anchor more recently than theirs did, adding the peer's uncertainty along the line of sight. They also never let their own variance along that line drop below the peer's plus the ranging noise: the peer's error is a persistent bias, not fresh noise. Earlier versions failed in two ways that tests reproduce:
@@ -758,7 +763,7 @@ python3 tools/comms/sensing_sweep.py --drones 30 --threats 15 --parallel 2 --rep
 
 What this points at:
 - **Ship-link loss was the biggest threat to the kill rate.** At 30 % loss, confirmed drones never heard their confirmation and gave up after the old 3 s timeout, and lost orders left threats without bidders. **Fixed** (2026-10-04, see [Engagement protocol](#engagement-protocol)): `ship_loss30`, `ship_outage` and `combined` now destroy 8/8.
-- **The UWB filters trust the record's noise figure.** When real noise is 3× worse, they become overconfident and re-lock repeatedly. Adapting the noise estimate, or a more robust gate, is needed.
+- **The UWB filters trusted the record's noise figure.** When real noise was 3× worse, they became overconfident and re-locked repeatedly. **Fixed** by the robust filter (2026-10-04, `UWB_FILTER=robust`): `uwb_noise` NEES 24.8 → 2.0–2.1, re-locks 86 → 0–2, worst error 18.6 → 9.6–10.2 m; `uwb_nlos` worst error 14.0 → 2.7 m, NEES 2.5 → 1.6.
 - **Peer-only localization beyond anchor range is not safe yet** (`uwb_short`): errors reached tens of metres while the filters claimed sub-metre accuracy. This is the open recursive decentralized localization (RDL) item in [Known limitations](#known-limitations).
 - **The radar is robust** to misses, clutter and 0.1 s latency, but noisier ranging doubles the misses.
 
@@ -906,9 +911,9 @@ Where each implemented feature lives.
 | | sync modes (`none`, `ttg`, `master`, `consensus`): exchange filter, ship-anchored consensus, pluggable aggregators, error bounds | `src/common/timesync.py` |
 | | drone: protocol time, inbound conversion, exchange stamps, relay holding time, clock beacons, clock telemetry and evaluation | `agent.py` (`_proto_now`, `_inbound_job`, `_stamp`, `_on_roster`, `_relay_unheard_peers`, `_send_clock_beacon`, `_on_clock_beacon`, `_clock_report`) |
 | | ship: `sent` stamps, exchange stamps and leader beacon in heartbeats and roster, true sync error | `ship.py` (`_stamped`, `_on_heartbeat`, `run`, `_on_clock_eval`) |
-| **Metrics** | positions, distance, proximity collisions (spatial hash) | `src/metrics/main.py` |
+| **Metrics** | positions, distance, proximity collisions (spatial hash); per-drone log when a localization error crosses 5/10/30/100 m | `src/metrics/main.py` |
 | **Localization** | UWB ranging (anchors, peers with state payloads, noise, range, dropouts, airtime, jamming), x,y withheld; wind | `GazeboSimulator.cpp` (`configure_localization`, `publish_uwb`, `on_uwb_tx`, `configure_environment`) |
-| | EKF (position, velocity, wind), gating, re-lock, multilateration | `src/agent/localization.py` |
+| | EKF (position, velocity, wind), gating, re-lock, multilateration; robust mode: adaptive noise, Huber update, residual-checked re-locks | `src/agent/localization.py` |
 | | cooperative localization: neighbour table, anchor-time chains, peer fusion | `src/agent/coop.py` |
 | | drone integration, station keeping against wind | `agent.py` (`_loc_predict`, `_on_uwb`, `_send_uwb_tx`, `_reflex_control_loop`) |
 | | evaluation: errors, NEES, separations | `src/metrics/main.py` (`_on_loc`, `_loc_summary`) |
@@ -978,7 +983,7 @@ Simulation speed (env): `SIM_RTF` (1), set by `--rtf`.
 
 Ship no-fly zone (env): `NO_FLY_RADIUS_M` (50; 0 = off, stations at 30–45 m; `--no-fly R`, which also moves stations to R+5 … R+45 m).
 
-Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `anchors`, or legacy `truth`; `--localization`), `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensing degradation (simulator only; empty = the record, which the drones keep assuming): `UWB_EXTRA_SIGMA_M`, `UWB_NLOS_P`, `UWB_NLOS_BIAS_M`, `UWB_DROPOUT_P`, `UWB_MAX_RANGE_M`, `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG`, `RADAR_MISS_P`, `RADAR_CLUTTER`, `RADAR_LATENCY_S` (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)). Sensor and environment parameters are in the [hardware record](#hardware-record).
+Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `anchors`, or legacy `truth`; `--localization`), `UWB_FILTER` (`robust`, or the plain `basic`), `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensing degradation (simulator only; empty = the record, which the drones keep assuming): `UWB_EXTRA_SIGMA_M`, `UWB_NLOS_P`, `UWB_NLOS_BIAS_M`, `UWB_DROPOUT_P`, `UWB_MAX_RANGE_M`, `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG`, `RADAR_MISS_P`, `RADAR_CLUTTER`, `RADAR_LATENCY_S` (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)). Sensor and environment parameters are in the [hardware record](#hardware-record).
 
 Proximity fuze (env): `FUZE` (1; 0 = timed detonation), `FUZE_WINDOW_S` (2), `FUZE_GATE_M` (5), `FUZE_FIRE` (`cpa`), `FUZE_FALLBACK` (`hold`), and for the simulator's sensor `FUZE_RANGE_M` (10, drones too), `FUZE_HZ` (50), `FUZE_NOISE_M` (0.1), `FUZE_LATENCY_S` (0), `FUZE_SEED` (0). See [Proximity fuze](#proximity-fuze).
 
@@ -1006,7 +1011,7 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_hardware.py` | hardware record complete, kinematics reproduce the original drones, runtime config wins; drones never read `sim/truth` |
 | `test_localclock.py` | perfect default, drift/offset model, jitter only in exchange stamps, reproducible per-node draw |
 | `test_deconflict.py` | spatial queue: speed profiles, routes with holds and exits around blasts, earliest-feasible intercepts, manoeuvre re-plan slack; routes around the no-fly zone (legs clear, shorter way, timing) |
-| `test_localization.py` | EKF from anchor ranges: multilateration, tracking a moving drone consistently (NEES), outlier gating, dropouts, re-lock after a corrupted estimate, uncertainty growth, wind learned, outage dead-reckoned with the wind |
+| `test_localization.py` | EKF from anchor ranges: multilateration, tracking a moving drone consistently (NEES), outlier gating, dropouts, re-lock after a corrupted estimate, uncertainty growth, wind learned, outage dead-reckoned with the wind; robust filter: adaptive noise at 3× the record's noise (with and without NLOS), re-lock leaving out a blocked anchor, refused re-lock when three anchors disagree |
 | `test_coop.py` | cooperative localization: a drone beyond anchor range localized through anchored peers (consistent), drift without peers, no stale "anchored" loop with every anchor jammed, peer selection |
 | `test_radar_obstacles.py` | radar contacts give exactly the lidar's obstacle points (50 random layouts vs a port of the simulator's lidar), ship contacts dropped, staleness |
 | `test_fuze.py` | proximity fuze: fires at closest approach (three threat speeds), threat in range before arming not taken for a mate, mates never trigger, hold and timed fallbacks, closest approach beyond the kill radius, contacts off the predicted track ignored, radius mode, arming window, stale track, chain readiness, config |
@@ -1069,13 +1074,24 @@ Light check, 30 % loss on every link, 15 drones, 8 threats, one run each:
 
 Also 8/8 for `baseline`, `ship_loss30` and `combined` (sensing sweep, one run each).
 
-### 2. Robust UWB filtering
-With UWB noise 3× the record's, the filter was overconfident (NEES 25), re-locked 86 times, and hit an 18.6 m excursion. The plan:
-- **Adaptive noise:** estimate the range noise from the innovations over a window, with a floor at the record's figure.
-- **Robust gating:** a Huber or Student-t update in place of the hard gate, so outliers are down-weighted rather than accepted or rejected.
-- **Safe re-locks:** require at least 3 anchors with a residual check (localization is 2D, so 3 ranges leave one to check the fix), so a re-lock cannot jump to a bad fix.
+### 2. Robust UWB filtering — done
 
-The `uwb_nlos` 14 m excursion is the same problem.
+Done on branch `robust-uwb` (2026-10-04), the default (`UWB_FILTER=robust`; `basic` is the plain filter); see [Localization and perception](#localization-and-perception). Owner's decision: re-lock from 3 or more anchors with a residual check.
+
+Unit tests (`test_localization.py`, 3 seeds each; plain vs robust): 3× the record's noise NEES 23 → 2.0, re-locks 14 → 0; 3× noise with 10 % NLOS NEES 28 → 2.1, worst error 13.9 → 3.8 m; a re-lock with one blocked anchor of four leaves it out (plain: pulled over 1 m off); three disagreeing anchors refuse a re-lock.
+
+Light check (sensing sweep, 15 drones, 8 threats, one run each; plain filter from the [first results](#sensing-and-ship-link-sweep)):
+
+| Condition | Error p95 / max | NEES | Re-locks | Destroyed |
+|---|---|---|---|---|
+| `baseline` | 0.42 / 1.16 → 0.42 / 1.32 m | 1.5 → 1.4 | 0 → 0 | 8/8 |
+| `uwb_noise` | 2.84 / 18.6 → 1.13–1.17 / 9.6–10.2 m | 24.8 → 2.0–2.1 | 86 → 0–2 | 8/8 |
+| `uwb_nlos` | 0.52 / 14.0 → 0.50 / 2.7 m | 2.5 → 1.6 | 3 → 0 | 8/8 |
+| `uwb_jam_all` | 2.55 / 7.1 → 2.13 / 5.1 m | 1.1 → 1.1 | 0 → 0 | 8/8 |
+| `combined` | 1.27 / 7.3 → 0.91 / 7.2 m | 10.4 → 1.9 | – | 8/8 (with items 1, 1b) |
+| `uwb_short` | 16.3 / 36.1 → 15–16 / 25 m | 50 → 40–63 | 0 | 5/8 → 7/8, 8/8 |
+
+`uwb_short` stays bad: beyond anchor range only peers localize, which is item 4 (RDL). Applying the robust update to peer ranges too made it much worse (NEES 399, one drone 74 m off), so peers keep the plain gate. One `uwb_short` run with two swarms side by side had one drone 123 m off; a run alone did not repeat it. The remaining `uwb_noise` excursions (~10 m) are not yet traced to a drone (the metrics node now logs every drone whose error crosses 5, 10, 30 and 100 m).
 
 ### 3. IMU dead reckoning
 
@@ -1162,7 +1178,6 @@ The chain-fire and stack-spacing decisions are deferred until items 1–5 are do
 - **No consistent fusion between unanchored drones.** Peers are used only along fresh anchor chains. With every anchor jammed, drones dead-reckon independently (their uncertainty grows honestly), and peer ranges keep nobody's estimate tight. Recursive decentralized localization (RDL), which tracks cross-covariances with pairwise exchanges, is the planned fix.
 - **Degraded sensing** (see the [sensing sweep](#sensing-and-ship-link-sweep)):
   - **Peer chains beyond anchor range:** with UWB range cut to 80 m, drones localized only through peers were tens of metres off while claiming sub-metre accuracy (NEES 50).
-  - **Fixed noise figure:** the filters use the record's UWB noise, so a noisier environment makes them overconfident.
 - **Station keeping in wind.** Drones latch up to 3 m from their goal, then drift downwind until they re-approach: 2.6–2.9 m misses in a 0.5 m/s wind, with true positions too. Continuous position hold would remove most of it.
 - **Not yet done:** the planned speed retune (`speed_scale` 0.2–0.4, threats faster) and 1 km threat detection.
 - **Routes around the no-fly zone are timed conservatively:** each detour waypoint is planned from rest, so ETAs over-estimate.

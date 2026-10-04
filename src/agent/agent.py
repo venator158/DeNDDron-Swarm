@@ -66,6 +66,7 @@ class DenddronAgent:
     # coop.py), anchors (ship anchors only) or truth (the simulator's x,y, for comparison runs).
     # Altitude and attitude are always given.
     LOCALIZATION = (os.environ.get("LOCALIZATION") or "coop").strip().lower()
+    UWB_FILTER = (os.environ.get("UWB_FILTER") or "robust").strip().lower()   # robust | basic (localization.py)
     LOC_EVAL_PERIOD_S = 0.5    # sim s between localization reports for evaluation (drone/{id}/loc)
     # Station keeping: drift (wind) beyond this from the hold point, or beyond the distance a goal
     # latched at, flies the drone back.  Never triggers in calm air (a holding drone does not move).
@@ -185,14 +186,14 @@ class DenddronAgent:
         if self.LOCALIZATION != "truth":
             uwb = self.hw.get("uwb", {})
             self.anchors = anchors_from_record(self.hw)
-            self.loc = Localizer(range_sigma=float(uwb.get("range_sigma_m", 0.1)))
+            self.loc = Localizer(range_sigma=float(uwb.get("range_sigma_m", 0.1)), robust=self.UWB_FILTER == "robust")
             # launch position known to a few metres; the anchors refine it within seconds
             self.loc.init_prior(float(self.spawn_pose["x"]), float(self.spawn_pose["y"]))
         self.coop = None
         if self.LOCALIZATION == "coop":
             self.coop = Coop(self.agent_id, max_peers=int(self.hw.get("uwb", {}).get("max_peers", 6)))
             logger.info(f"[{self.agent_id}] Localization {self.LOCALIZATION}: {len(self.anchors)} UWB anchors, "
-                        f"range sigma {self.loc.range_sigma} m")
+                        f"range sigma {self.loc.range_sigma} m, {self.UWB_FILTER} filter")
 
         # --- Path Planner: strategy selection ---
         planner_cfg = dict(global_cfg.get("path_planning", {}))
@@ -473,7 +474,8 @@ class DenddronAgent:
                 msg = {"sim_time": t, "est": [round(x, 3), round(y, 3)],
                        "cov": [round(float(P[0, 0]), 5), round(float(P[0, 1]), 5), round(float(P[1, 1]), 5)],
                        "status": self.loc.status(), "updates": self.loc.updates, "rejected": self.loc.rejected,
-                       "relocks": self.loc.relocks}
+                       "relocks": self.loc.relocks, "noise_sigma": round(self.loc.noise_sigma(), 3),
+                       "downweighted": self.loc.downweighted}
                 if self.coop is not None:
                     msg.update(hops=self.coop.hops(t), peer_updates=self.coop.peer_updates)
         if report:

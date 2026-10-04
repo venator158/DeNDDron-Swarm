@@ -23,10 +23,25 @@ the drift the wind adds to it, which the drone cannot sense directly.
   three or more anchors: subtracting one squared range equation from the others gives linear
   equations in x, y, refined by Gauss-Newton.
 
+Robust mode (robust=True, UWB_FILTER=robust): the environment can be worse than the record says
+(sensing sweep: with 3x the record's noise the plain filter was overconfident, NEES 25, and re-locked
+86 times; NLOS ranges drove a re-lock to a 14 m excursion).
+- Adaptive noise: the range noise is estimated from the last `noise_window` anchor innovations,
+  robustly (median of y^2, minus the part the state uncertainty explains, over the chi-square(1)
+  median 0.455), floored at the record's figure and capped at `sigma_cap`.  Gated-out ranges count
+  too, or a gate that is too tight would never let the estimate grow.
+- Huber update: an innovation beyond `huber_k` sigmas is down-weighted (its noise inflated by
+  |e|/k) instead of rejected.  A blocked path (NLOS) only ever lengthens a range, so a range too long
+  beyond `gate` is still rejected; one too short only beyond `far_gate`.  With a symmetric Huber,
+  moderate NLOS biases (3-8 sigma) pulled the estimate: worst error 1.0 -> 2.8 m in simulation.
+- Safe re-lock: a fix from 3+ anchors must pass a residual (chi-square) test at the estimated noise;
+  with 4+ anchors, leaving one out is tried, so one blocked-path anchor cannot pull the fix.
+
 Peer ranges (LOCALIZATION=coop) are handled in coop.py on top of this.
 """
 
 import math
+from collections import deque
 from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
@@ -35,10 +50,21 @@ Vec3 = Tuple[float, float, float]
 
 
 class Localizer:
+    CHI2_1_MEDIAN = 0.4549         # median of chi-square with 1 dof
+    CHI2_99 = {1: 6.63, 2: 9.21, 3: 11.34, 4: 13.28}   # residual test for a re-lock fix, by dof
+
     def __init__(self, range_sigma: float = 0.1, accel_sigma: float = 0.5, alpha: float = 0.35,
                  gate: float = 3.29, relock: int = 5, init_sigma: float = 5.0, tick_s: float = 0.02,
-                 wind_walk: float = 0.05, wind_sigma0: float = 0.5):
-        self.range_sigma = range_sigma
+                 wind_walk: float = 0.05, wind_sigma0: float = 0.5, robust: bool = False,
+                 huber_k: float = 2.5, far_gate: float = 8.0, noise_window: int = 40, sigma_cap: float = 2.0):
+        self.range_sigma = range_sigma       # the record's figure (the floor in robust mode)
+        self.robust = robust
+        self.huber_k = huber_k
+        self.far_gate2 = far_gate * far_gate
+        self.sigma_cap = sigma_cap
+        self._innov = deque(maxlen=noise_window)   # anchor innovations: (y^2, H P H')
+        self._noise = range_sigma
+        self.downweighted = 0
         self.accel_sigma = accel_sigma       # m/s^2, unmodelled acceleration
         self.wind_walk = wind_walk           # m/s per sqrt(s): how fast the wind drift can change
         self.wind_sigma0 = wind_sigma0       # m/s: prior uncertainty of the wind drift
@@ -79,6 +105,17 @@ class Localizer:
     def pos_cov(self) -> np.ndarray:
         return self.P[:2, :2].copy()
 
+    def noise_sigma(self) -> float:
+        """Range noise (1 sigma) the filter uses: the record's, or in robust mode the estimate."""
+        return self._noise if self.robust else self.range_sigma
+
+    def _learn_noise(self, y2: float, hph: float) -> None:
+        self._innov.append((y2, hph))
+        if len(self._innov) < 12:
+            return
+        r = float(np.median([v - self.CHI2_1_MEDIAN * h for v, h in self._innov])) / self.CHI2_1_MEDIAN
+        self._noise = min(max(math.sqrt(max(r, 0.0)), self.range_sigma), self.sigma_cap)
+
     def sigma_max(self) -> float:
         """Largest 1-sigma axis of the horizontal position error ellipse (m)."""
         return float(math.sqrt(max(np.linalg.eigvalsh(self.P[:2, :2]).max(), 0.0)))
@@ -104,22 +141,40 @@ class Localizer:
     # --- measurements ---------------------------------------------------
     def update_range(self, anchor: Vec3, r: float, z: float, sigma: Optional[float] = None,
                      t: Optional[float] = None) -> bool:
-        """A range to a known point (an anchor).  z: our altitude.  Returns False if gated out."""
+        """A range to a known point.  z: our altitude.  sigma: its noise if not the filter's own
+        (peers: theirs added); only ranges with sigma=None (anchors) train the noise estimate.
+        Returns False if gated out."""
         if self.x is None:
             return False
-        s = self.range_sigma if sigma is None else sigma
+        s = self.noise_sigma() if sigma is None else sigma
         dx, dy, dz = self.x[0] - anchor[0], self.x[1] - anchor[1], z - anchor[2]
         h = math.sqrt(dx * dx + dy * dy + dz * dz)
         if h < 1e-6:
             return False
         H = np.array([[dx / h, dy / h, 0.0, 0.0, 0.0, 0.0]])
-        S = float((H @ self.P @ H.T)[0, 0]) + s * s
+        hph = float((H @ self.P @ H.T)[0, 0])
+        S = hph + s * s
         y = r - h
-        if y * y > self.gate2 * S:
+        # Robust handling is for anchor ranges only.  A peer's error is its estimate's, not a blocked
+        # path: with Huber and the far gate on peers, peer-only drones beyond anchor range were pulled
+        # far off (uwb_short: NEES 50 -> 399); consistent peer fusion is RDL's job.
+        robust = self.robust and sigma is None
+        if robust:
+            self._learn_noise(y * y, hph)
+        # Robust: a blocked path only ever lengthens a range, so a range too long beyond the gate is
+        # rejected as in the plain filter; one too short is only rejected beyond far_gate.
+        gate2 = self.far_gate2 if robust and y < 0 else self.gate2
+        if y * y > gate2 * S:
             self.rejected += 1
             self._run += 1
             return False
         self._run = 0
+        if robust and y * y > self.huber_k ** 2 * S:
+            # Huber: beyond k sigmas the range counts as if its noise were |e|/k times larger
+            w = self.huber_k / math.sqrt(y * y / S)
+            s = s / math.sqrt(w)
+            S = hph + s * s
+            self.downweighted += 1
         K = (self.P @ H.T) / S
         self.x = self.x + K[:, 0] * y
         IKH = np.eye(6) - K @ H
@@ -165,22 +220,49 @@ class Localizer:
             return None
         return (float(p[0]), float(p[1])), np.linalg.inv(HtH)
 
+    def consistent_fix(self, anchors: Sequence[Vec3], ranges: Sequence[float], z: float):
+        """A fix whose residuals fit the noise: all anchors, else (4+) the best leave-one-out.
+        Returns ((x, y), C) or None.  Needs 3+ anchors (2 unknowns: one range left to check)."""
+        s2 = self.noise_sigma() ** 2
+        n = len(anchors)
+        sets = [list(range(n))] + ([[j for j in range(n) if j != i] for i in range(n)] if n >= 4 else [])
+        best = None
+        for idx in sets:
+            if len(idx) < 3:
+                continue
+            A = [anchors[i] for i in idx]
+            r = [ranges[i] for i in idx]
+            fix = self.multilaterate(A, r, z)
+            if fix is None:
+                continue
+            (x, y), _ = fix
+            chi2 = sum((ri - math.dist((x, y, z), a)) ** 2 for a, ri in zip(A, r)) / s2
+            if chi2 <= self.CHI2_99.get(len(idx) - 2, 13.28) and (best is None or chi2 < best[0]):
+                best = (chi2, fix)
+            if best is not None and idx is sets[0]:
+                break                      # all anchors agree: no need to leave one out
+        return None if best is None else best[1]
+
     def init_from_anchors(self, anchors: Sequence[Vec3], ranges: Sequence[float], z: float,
                           guess: Optional[Tuple[float, float]] = None) -> bool:
-        fix = self.multilaterate(anchors, ranges, z, guess)
+        if self.robust:
+            fix = self.consistent_fix(anchors, ranges, z)
+        else:
+            fix = self.multilaterate(anchors, ranges, z, guess)
         if fix is None:
             return False
         (x, y), C = fix
         self.x = np.array([x, y, 0.0, 0.0, 0.0, 0.0])
         self.P = np.zeros((6, 6))
-        self.P[:2, :2] = C * self.range_sigma ** 2 + np.eye(2) * 1e-4
+        self.P[:2, :2] = C * self.noise_sigma() ** 2 + np.eye(2) * 1e-4
         self.P[2, 2] = self.P[3, 3] = 0.25
         self.P[4, 4] = self.P[5, 5] = self.wind_sigma0 ** 2
         self._run = 0
         return True
 
     def relock_from(self, anchors: Sequence[Vec3], ranges: Sequence[float], z: float) -> bool:
-        """Re-initialize from a fresh anchor set after a lock-out (keeps the velocity and wind estimates)."""
+        """Re-initialize from a fresh anchor set after a lock-out (keeps the velocity and wind estimates).
+        Robust mode: only from a fix that passes the residual test (else False: keep the filter)."""
         v = self.x[2:].copy() if self.x is not None else np.zeros(4)
         if not self.init_from_anchors(anchors, ranges, z):
             return False
