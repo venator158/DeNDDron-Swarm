@@ -115,7 +115,8 @@ services:
       CLOCK_SEED: ${CLOCK_SEED:-0}
       CONFIRM_TRACE: ${CONFIRM_TRACE:-0}                  # diagnostics: award/ACK/job message log
       RADIO_PEER_LOG: ${RADIO_PEER_LOG:-0}                # diagnostics: radio peer sessions opening/closing
-      RADIO_LEASE_MS: ${RADIO_LEASE_MS:-2000}             # Zenoh lease: a silent peer's session closes after this
+      RADIO_LEASE_MS: ${RADIO_LEASE_MS:-6000}             # Zenoh lease: a silent peer's session closes after this
+      RADIO_PROTO: ${RADIO_PROTO:-quic,udp}               # QUIC for Zenoh's control messages, UDP for data
       CLOCK_SYNC: ${CLOCK_SYNC:-none}
       CLOCK_BEACON_HZ: ${CLOCK_BEACON_HZ:-0.5}
       CLOCK_GAIN: ${CLOCK_GAIN:-0.5}
@@ -192,7 +193,8 @@ services:
       CLOCK_SYNC: ${CLOCK_SYNC:-none}
       CONFIRM_TRACE: ${CONFIRM_TRACE:-0}
       RADIO_PEER_LOG: ${RADIO_PEER_LOG:-0}
-      RADIO_LEASE_MS: ${RADIO_LEASE_MS:-2000}
+      RADIO_LEASE_MS: ${RADIO_LEASE_MS:-6000}
+      RADIO_PROTO: ${RADIO_PROTO:-quic,udp}
     command: >
       sh -c 'exec python -u ship.py --sim-bus "$${SIM_BUS}"'
     networks:

@@ -290,7 +290,7 @@ The assigned drones take up slots **stacked vertically** through that point (wit
 
 - **Two links per node** (`src/common/links.py`).
   - The *onboard bus* goes through a Zenoh router on `sim_net`. It stands in for a drone's own wiring (sensors, actuators, detonation), and for the ship's radar truth. It is not communications.
-  - The *radio* runs peer-to-peer over UDP on `radio_net` (Zenoh 1.10.1). Peers find each other by multicast scouting on the radio interface and connect directly. Drones also connect to the ship's fixed radio address (`.2` of the radio subnet, port 7450) as a meeting point, and Zenoh gossip introduces the rest. Every drone and the ship run the radio **in a separate OS process** (`src/common/radio_process.py`), so a radio failure cannot freeze flight control or C2. A watchdog pings the radio process every second, and restarts it if it stops answering for 5 s (subscriptions are re-declared). At ~50 peers starting together, a drone's Zenoh session occasionally hung inside a call and the drone never joined.
+  - The *radio* runs peer-to-peer on `radio_net` (Zenoh 1.10.1): data over UDP (best-effort), and Zenoh's control messages (declarations) over a QUIC link next to it, which retransmits them (see [Degraded communications](#degraded-communications)). Peers find each other by multicast scouting on the radio interface and connect directly. Drones also connect to the ship's fixed radio address (`.2` of the radio subnet, port 7450) as a meeting point, and Zenoh gossip introduces the rest. Every drone and the ship run the radio **in a separate OS process** (`src/common/radio_process.py`), so a radio failure cannot freeze flight control or C2. A watchdog pings the radio process every second, and restarts it if it stops answering for 5 s (subscriptions are re-declared). At ~50 peers starting together, a drone's Zenoh session occasionally hung inside a call and the drone never joined.
   - Degrading `radio_net` degrades only the communications. The physics keeps working.
 - **Simulator** (`sim/GazeboSimulator.cpp`).
   - Integrates the drones' motion from `cmd_vel` through a first-order command response, plus wind and gusts the drones cannot sense.
@@ -361,7 +361,7 @@ Every absolute time on the radio (`t_engage`, `t_cpa`, `track.t0`, `time`, `sync
 The allocation is decentralized (`src/agent/auction.py`).
 
 1. The ship publishes an engagement order on `swarm/threats`. It carries the engagement point, the detonation time, and `required` drones. Each order is sent 3 times, 0.15 s apart (`ORDER_COPIES`); drones ignore repeats. Often only one or two drones can reach the intercept in time, and a lost order to them lost the threat, because a re-announcement comes 3 s later.
-2. Each **free** drone (idle, localized, not waiting on another order) bids its ETA to the point. The ETA uses a trapezoidal speed profile at 4 m/s and 1 m/s², times a 1.25 margin. A drone only bids if it can arrive before the detonation time.
+2. Each **free** drone (idle, localized, not waiting on another order) bids its ETA to the point, sending the bid 3 times, 0.2 s apart (receivers keep the latest per drone). The ETA uses a trapezoidal speed profile at 4 m/s and 1 m/s², times a 1.25 margin. A drone only bids if it can arrive before the detonation time.
 3. After a 1 s bid window (sim time), every drone runs the same deterministic assignment:
    - threats are taken highest level first;
    - each threat gets its `required` fastest drones, ties broken by drone ID;
@@ -373,7 +373,7 @@ The allocation is decentralized (`src/agent/auction.py`).
    - An unconfirmed drone **keeps flying** to its slot and asking (every heartbeat) until a confirmation could no longer help: the detonation time has come, or a straight flight at full speed would arrive after it. Then it withdraws and becomes free. Two drones can briefly head for one slot until the ship arbitrates. A drone never detonates without confirmation.
    - Until confirmed, a drone still yields to better awards from its peers. Once confirmed, only the ship can release it.
 6. **Job updates.** While a job is active, the ship sends a job update at 2 Hz to the inbox of each of the job's drones (pending or confirmed). It carries the latest engagement point and detonation time, the expected CPA, the track, and the confirmed drones with their slots. Being listed there also counts as an ACK, which covers a lost ACK.
-   - **Why an inbox, not a topic per job.** Over the UDP radio, a subscriber declaration can be lost, and Zenoh doesn't retry it. A drone used to subscribe to `ship/jobs/{threat}` when it won. Under 30 % loss, about 30 % of those subscriptions heard nothing for the whole engagement, so confirmed drones heard nothing and gave up (`tools/comms/declare_probe.sh`: 12 of 40 late subscriptions silent for 3 s; of the lost ones, about half recovered after 5–19 s and the rest not within 40 s). The inbox is declared once at startup. The radio is peer-to-peer, so per-drone sends cost the same as one shared topic. A drone whose inbox stays silent for 1.5 s while it waits on the ship and still hears the ship's roster re-declares it.
+   - **Why an inbox, not a topic per job.** Over the UDP radio, a subscriber declaration can be lost, and Zenoh doesn't retry it. A drone used to subscribe to `ship/jobs/{threat}` when it won. Under 30 % loss, about 30 % of those subscriptions heard nothing for the whole engagement, so confirmed drones heard nothing and gave up (`tools/comms/declare_probe.sh`: 12 of 40 late subscriptions silent for 3 s; of the lost ones, about half recovered after 5–19 s and the rest not within 40 s). The inbox is declared once at startup. The radio is peer-to-peer, so per-drone sends cost the same as one shared topic. The root cause, lost control messages, was later fixed in the radio itself (a QUIC control plane, see [Degraded communications](#degraded-communications)); the inbox stays because it needs no declaration at the moment of winning.
    - Drones re-aim on every update. Threats can manoeuvre (`--maneuver-p P`: with probability P a threat turns once, re-aiming past the ship), and the update reaches the drones within one publish.
    - After a manoeuvre the ship re-picks the intercept point for the job's drones from where they are, keeping only 1 s of slack (`MANEUVER_REPLAN_SLACK_S`): they need the job update, not a new order. With a new order's 4 s, a late turn (threat ~100 m out, drones already on station ~85 m out) found no point in 1 case in 8 and fell back to the legacy point near the ship, and put 1 in 4 inside 60 m. Drones then flew 25–40 m back towards the ship. With 1 s: none and ~1 in 70 (200 simulated turns). The `maneuver` event logs the point's distance from the ship before and after, and whether the re-plan found one (`replanned`).
    - Measured, every threat manoeuvring (`--maneuver-p 1`, `--rtf 3`), 9 threats in two runs: all destroyed by the fuze, the points stayed within 6 m of their approved distance (62–99 m), and blasts went off 65–98 m from the ship. Before the fix, the same scenario engaged two of three threats at 53 and 60 m instead of 85 m. Misses are 1.9–3.6 m: the drone now moves sideways onto the new track, so its ~2.8 m arrival tolerance ends up across the track, where the fuze cannot make up for it.
@@ -662,7 +662,10 @@ Radio loss is emulated two ways: 100% packet loss on the radio interface (`tc ne
 | Defence in depth: the radio runs in its own OS process (`RadioProcess`), so no radio problem can reach flight control or C2 | onboard probe over TCP: jammed drone's worst onboard gap 25 ms (was 10.4 s) |
 | Full system before the fixes: the ship froze ~10 s when an engaged drone was cut; cut drones missed their slots | runs 3/4: ship clock stopped 10 s; cut drone 31.7 m / 5.0 m off its slot at detonation time, so it aborted |
 | **Full system, UDP radio:** jamming an idle drone and then an engaged one affects only those two. No healthy drone lost its link; the ship's roster tracked the jams exactly (8 → 7 → 6). The jammed engaged drone destroyed its threat on time. | run 6, sampled every second (81 samples): 0 samples with a healthy drone down; detonation at t = 76.29 s (allocated 76.3 s), 2.84 m from the threat |
-| Trade-off: over UDP every message is best-effort, so orders, bids and awards can be lost under packet loss. Recovery relies on re-announcement and conflict repair, measured below. | [Radio degradation sweep](#radio-degradation-sweep) |
+| **Lost control messages over UDP.** Zenoh sends each control message once. When a node first names a key expression to a peer it declares a numeric ID for it, and later messages use the ID. If that declaration is lost, every later message naming the key is undecodable at that peer (its log: `Unknown wire expr`), so a subscription made under loss never hears that peer, and re-declaring the same key, or a wider one built on it, cannot repair it. | `declare_probe.sh`, 2 peers, 30 % loss on the subscriber's side: 11–15 of 40 new subscriptions never heard anything; re-declaring every 0.5 s (with or without a pause) or adding `K/**`, `K$*` forms later: no change; Zenoh trace on the publisher shows `Unknown wire expr` for exactly the dead keys |
+| **Fix: QUIC control plane** (`RADIO_PROTO=quic,udp`, default). Each pair of nodes also opens a QUIC link (TLS, simulation-only certificate in `src/common/radio_tls/`; listen port + 1). Zenoh sends reliable messages, its control messages among them, over QUIC, and best-effort ones over UDP; every publication is marked best-effort, so data stays on UDP and is never retransmitted late. QUIC does not bring back the TCP stall. | `mesh_probe.sh`, 8 peers, 30 % loss everywhere: new subscriptions dead after 3 s 33 % → 0.1 % (5 min: 0.3 %), heartbeat delivery unchanged (0.69: data still best-effort); jamming probe, 9 peers, `quic,udp`, 2 runs: every healthy peer's worst gap 0.05 s. At 50 % loss QUIC helps less (dead 58 % → 45 %). |
+| **Sessions closed by the lease.** With a 2 s lease, keep-alives (every 0.5 s) lost in a row closed sessions, and a reopened session declares everything again under loss. | `mesh_probe.sh`, 8 peers: 30 % loss 9 flaps in 60 s; 50 % loss 41–54 flaps, a third of the sessions down at the end, 25–40 of 56 peer pairs deaf for good. **6 s lease** (`RADIO_LEASE_MS`, now the default): 0 flaps at 30 % and 50 %. |
+| Trade-off: data is best-effort, so orders, bids and awards can be lost under packet loss. Orders and bids are sent 3 times, awards 3 times, and recovery relies on heartbeat answers, re-announcement and conflict repair, measured below. | [Radio degradation sweep](#radio-degradation-sweep) |
 
 ### Radio degradation sweep
 
@@ -798,6 +801,7 @@ Setup: `scaling_sweep.py`. The table was measured with the legacy setup (truth, 
 | 25 | 2 → 1.9× | 3.4 cores | 7.3% | 33% | 42 ms | 54 ms | 44 | 60 | 12/12 destroyed, 16 drones |
 | 50 | 1 → 0.87× | 3.8 cores | 9.4% | 26% | 137 ms | 378 ms | 86 | 123 | 22/25 destroyed, 38 drones |
 | 50, now | 1 → 0.98× | 1.9 cores | 3.9% | 30% | 55 ms | 110 ms | 6 | 108 | 23/25 destroyed, 39 drones |
+| 50, QUIC radio (2026-10-04) | 1 → 0.97× | 2.0 cores | 4.3% | 31% | 50 ms | 171 ms | 4.3 | 106 | 24/24 approved destroyed, 38 drones; all 50 joined within 30 s. T22 (level 3) was not approved: too few free drones could reach it in time |
 
 All sizes: no re-announces, no conflicts, full agreement on assignments, decision latency ~1.4 s. The 16-drone run predates the sim-following protocol clock. "50, now" is after the heartbeat, idle-perception, expended-radio and slot fixes below.
 
@@ -834,6 +838,7 @@ All sizes: no re-announces, no conflicts, full agreement on assignments, decisio
 | `operator_bot.py [reaction_s] [duration_s] [poll_s]` | stand-in operator: approves feasible threats through the dashboard API, most urgent first |
 | `degrade_radio.sh apply "<netem args>" \| clear [container...]` | impairs the radio (UDP only) of every drone and the ship: loss, delay, rate, combinable; `DST_IP=<ip>` impairs only traffic to that address |
 | `declare_probe.sh late_sub\|fresh_pub\|both [netem]` | two radio peers, one side impaired: how many late subscriber declarations are lost (and for how long), and whether the first put on a new publisher is delivered as often as later ones. Env `TRIALS`, `WATCH_S`. |
+| `mesh_probe.sh [netem]` | `PEERS` radio peers (8), every one impaired: session flaps, peers still connected at the end, heartbeat delivery, new subscriptions that heard a peer nothing within `WATCH_S` (3), and startup subscriptions gone deaf. Env `DURATION`, `DEAD_LIST`. |
 | `sensing_sweep.py [--conditions NAME ...] [--custom NAME="K=V ..."] [--list] [--rtf K] [--drones N] [--threats K] [--repeats N]` | the seeded scenario under UWB, radar and ship-link degradation (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)) |
 | `degradation_sweep.py [--rtf K] [--drones N] [--threats K] [--maneuver-p P] [--repeats N] [--profiles ...] [--conditions NAME=NETEM ...] [--env KEY=VALUE ...]` | the seeded scenario under each impairment and QoS profile, with the stand-in operator; writes `results/<sweep>/results.{csv,md}` with mean ± sd per cell (see [Unattended runs and sweeps](#unattended-runs-and-sweeps)) |
 
@@ -874,7 +879,7 @@ Where each implemented feature lives.
 | | threat models (by type) moved along the ship's tracks | `GazeboSimulator.cpp` (`generate_threat_sdf`, `on_threat_track`, `move_threat_markers`) |
 | | quadcopter drone model; model deletion (despawn, destroyed threats) | `GazeboSimulator.cpp` (`generate_drone_sdf`, `delete_model`) |
 | | world: ocean, lighting, frigate (~31 m, sized to the simulator's 16 m ship radius) | `sim/ocean.world` |
-| **Links** | onboard bus (router) and radio (peer-to-peer) session config | `src/common/links.py` |
+| **Links** | onboard bus (router) and radio (peer-to-peer) session config; radio QUIC control plane + UDP data, lease | `src/common/links.py`, `src/common/radio_tls/` |
 | | radio in a separate OS process | `src/common/radio_process.py` |
 | **Threat model** | threat types and levels, CPA/TCPA, engagement point, slots, ETA, TTI | `src/common/threats.py` |
 | **Ship C2** | radar simulation (track generation) | `src/ship/ship.py` (`_maybe_detect`, `Track`) |
@@ -893,7 +898,7 @@ Where each implemented feature lives.
 | | sim-time / wall-time handling | `src/agent/timing.py` |
 | | protocol clock scaled by the real-time factor (`SIM_RTF`); `truth_now` for exchange stamps | `src/common/simclock.py` |
 | | bidding (ETA), engagement, slots, detonation / abort | `agent.py` (`_on_threat_wave`, `_calculate_costs`, `_service_auctions`, `_check_engagement`) |
-| | inbox (ACKs and job updates), re-declaring a silent inbox, keep flying until confirmation can no longer help, release | `agent.py` (`_on_inbox`, `_on_ack`, `_on_job`, `_apply_job`, `_check_inbox`, `_check_engagement`, `_abandon`) |
+| | inbox (ACKs and job updates), keep flying until confirmation can no longer help, release; bids sent 3 times | `agent.py` (`_on_inbox`, `_on_ack`, `_on_job`, `_apply_job`, `_check_engagement`, `_abandon`, `_propose_bid`) |
 | | decentralized all-or-nothing priority assignment, conflict yield | `src/agent/auction.py` |
 | | heartbeat, roster check, link state, peer relay | `agent.py` (`_heartbeat_loop`, `_on_roster`, `_relay_unheard_peers`) |
 | | telemetry (loop, sensors, perception, planner, CPU, radio) | `src/agent/telemetry.py` |
@@ -981,7 +986,7 @@ Clocks (env, all default 0 / `none` = perfect shared clock): drones `CLOCK_DRIFT
 
 Diagnostics (env): `CONFIRM_TRACE` (0; 1 = log every award, ACK, job update and skipped order with its sim time, drones and ship), `RADIO_PEER_LOG` (0; 1 = log the radio's Zenoh id and every peer session that opens or closes).
 
-Radio tuning (env): `RADIO_QOS` (`default`; `tuned` = per-topic priorities, see `QOS_PROFILES` in `links.py`), `RADIO_PROTO` (`udp`), `RADIO_LEASE_MS` (2000), `RADIO_OPEN_TIMEOUT_MS` (1000), `RADIO_SUBNET` (`172.21.0.0/16`), `RADIO_ZENOH_CONFIG` (JSON object of extra Zenoh settings, for experiments).
+Radio tuning (env): `RADIO_QOS` (`default`; `tuned` = per-topic priorities, see `QOS_PROFILES` in `links.py`), `RADIO_PROTO` (`quic,udp`; `udp` = the old UDP-only radio), `RADIO_LEASE_MS` (6000), `RADIO_OPEN_TIMEOUT_MS` (1000), `RADIO_SUBNET` (`172.21.0.0/16`), `RADIO_ZENOH_CONFIG` (JSON object of extra Zenoh settings, for experiments).
 
 Drone IDs: agent replicas are identical containers. Each claims the lowest free `drone_N` via `config/agent_registry.json`, under a file lock.
 
@@ -1042,18 +1047,27 @@ The plan, written 2026-10-04, in build order: each item depends only on those ab
 Done on branch `robust-confirmation` (2026-10-04); see [Engagement protocol](#engagement-protocol). Light check, one run each, 15 drones, 8 threats: `ship_loss30` 8/8 (was 4/8), `ship_outage` 8/8, `combined` 8/8 (was 4/8), `baseline` 8/8; whole radio at 10 % and 30 % loss with 8 drones and 4 threats, 4/4 each with no re-announcement.
 
 **What the diagnosis found** (`CONFIRM_TRACE=1`, `tools/comms/declare_probe.sh`):
-- **Lost subscriber declarations, not lost messages.** The drone subscribed to `ship/jobs/{threat}` when it won. Over UDP, Zenoh sends that declaration once, so at 30 % loss about 30 % of these subscriptions heard nothing for longer than the whole engagement. In the traced runs, two confirmed drones got none of 7 job updates while the others got 58–75 %. Fix: job updates go to the drone's inbox, subscribed at startup, and a silent inbox is re-declared.
+- **Lost subscriber declarations, not lost messages.** The drone subscribed to `ship/jobs/{threat}` when it won. Over UDP, Zenoh sends that declaration once, so at 30 % loss about 30 % of these subscriptions heard nothing for longer than the whole engagement. In the traced runs, two confirmed drones got none of 7 job updates while the others got 58–75 %. Fix: job updates go to the drone's inbox, subscribed at startup. The cause underneath, lost Zenoh control messages, is fixed in item 1b.
 - **Lost orders to the one drone that can make it.** Intercepts are often reachable by only one or two drones, with about 4 s of slack. When the order to that drone was lost, nobody bid, and the re-announcement 3 s later was too late for anyone (best margin −0.8 s). This lost 3 of the 5 threats in one diagnosis run. Fix: each order is sent 3 times.
 - **The fixed 3 s ACK timeout** dropped the remaining drones. Fix: heartbeats carry the award, the ship answers them, and an unconfirmed drone keeps flying until confirmation can no longer help (owner's decision).
 - Batching in Zenoh is not the cause: the first put on a new publisher is delivered as often as later ones (62 % vs 66 % at 30 % loss).
 
-**Found, still open** (whole-radio loss, not the ship link):
-- **Radio sessions flap between drones.** At 30 % loss on every link, 13–33 drone-to-drone Zenoh sessions closed and reopened per run (8 drones), almost never involving the ship. A longer lease (6 s instead of 2 s, `RADIO_LEASE_MS`) did not change it. Each reopened session re-sends its declarations over the lossy link, which can lose them in the same way. In one 15-drone run, a drone's link kept dropping, it never received three orders, and the one threat only it could reach was lost.
-- **Level-2 threats under drone-to-drone loss.** The assignment is all-or-nothing, and each winner must hear the other winner's bid. At 30 % loss on every link with 15 drones and 8 threats, two level-2 threats were lost this way, so 5 of 8 were destroyed. The ship could arbitrate level-2 jobs from awards and heartbeats, as it does conflicts.
-- **Possible fixes:**
-  - re-declare subscriptions periodically, keeping the old ones so a lost re-declaration cannot remove a working route;
-  - try Zenoh's QUIC transport for the radio;
-  - let the ship take the assignment over when the bids don't converge.
+### 1b. Radio robustness (whole-radio loss) — done
+
+Found while measuring item 1, done on branch `radio-robustness` (2026-10-04); see [Degraded communications](#degraded-communications).
+- **Lost control messages:** a QUIC link carries Zenoh's control messages; data stays best-effort over UDP.
+- **Sessions closed by lost keep-alives:** the lease is 6 s instead of 2 s.
+- **Level-2 threats lost to lost bids** (each winner must hear the other's bid): bids are sent 3 times.
+
+Light check, 30 % loss on every link, 15 drones, 8 threats, one run each:
+
+| Radio | Destroyed | Re-announces | Decision latency mean / max | Assignment agreement |
+|---|---|---|---|---|
+| UDP, 2 s lease (item 1 only) | 5/8 | 6 | 1.66 / 2.83 s | 0.72 |
+| QUIC control plane, 6 s lease | 8/8 | 1 | 1.93 / 4.64 s | split auctions (T1: 9 vs 6) |
+| + bids sent 3 times | **8/8** | **0** | **1.49 / 1.88 s** | 104 of 105 drone views agree |
+
+Also 8/8 for `baseline`, `ship_loss30` and `combined` (sensing sweep, one run each).
 
 ### 2. Robust UWB filtering
 With UWB noise 3× the record's, the filter was overconfident (NEES 25), re-locked 86 times, and hit an 18.6 m excursion. The plan:
@@ -1158,7 +1172,8 @@ The chain-fire and stack-spacing decisions are deferred until items 1–5 are do
 - **Chain fire fires spread-out mates early.** Job-mates end up several metres apart along the threat's track, and chain fire sets them all off when the first one's fuze fires, up to 2 s before the threat reaches the last. At 50 drones this cost two three-drone kills in one run (misses of 8.4 and 9.5 m, where each drone's own fuze would have missed by 1–3 m).
 - **Stack spacing vs proximity.** Three-drone stacks are 3 m apart vertically; with 0.5 m altitude latching, stacked mates can be 2.0–2.5 m apart, under the metrics node's 2.5 m proximity threshold.
 - **Late job-mates.** A job-mate that enters fuze range after the mates were recorded (still flying in) is a new track; if it passes within the gate of the predicted threat position it could trigger the fuze. The evaluation labels every trigger; none was false in the runs so far.
-- **Best-effort radio.** The radio runs over UDP, so messages can be lost under packet loss; see [Degraded communications](#degraded-communications).
+- **Best-effort radio.** Data runs over UDP, so messages can be lost under packet loss; Zenoh's control messages go over QUIC and are retransmitted. At 50 % loss QUIC's own recovery slows down and new subscriptions are often still dead after 10 s. See [Degraded communications](#degraded-communications).
+- **Shared radio certificate.** Every node uses the same simulation-only TLS key for the QUIC link; hardware needs a key per node (and see "No security").
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
 - **Clock synchronization.** `ttg` and `master` need the ship's messages; a drone that stops hearing the ship keeps its last estimate (with `master`, its last offset and rate). `consensus` keeps drones agreeing without the ship, but:
   - a path asymmetry (one direction slower than the other) is an error of half of it that no exchange can observe, and without the ship to anchor them drones then drift together by about gain × that per beacon;

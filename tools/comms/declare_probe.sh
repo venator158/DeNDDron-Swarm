@@ -15,7 +15,7 @@ trap cleanup EXIT
 cleanup
 docker network create --subnet $SUBNET $NET >/dev/null
 common=(--network $NET -v "$HERE/declare_probe.py:/app/declare_probe.py:ro" -e RADIO_SUBNET=$SUBNET
-        -e TEST=$PTEST -e TRIALS="${TRIALS:-40}" -e WATCH_S="${WATCH_S:-3}" --entrypoint python "$IMAGE")
+        -e TEST=$PTEST -e RUST_LOG="${RUST_LOG:-error}" -e TRIALS="${TRIALS:-40}" -e WATCH_S="${WATCH_S:-3}" -e REFRESH_S="${REFRESH_S:-}" -e REFRESH_MODE="${REFRESH_MODE:-}" --entrypoint python "$IMAGE")
 docker run -d --name dprobe_pub --ip $PUB_IP -e ROLE=pub -e RADIO_LISTEN_PORT=7450 "${common[@]}" -u /app/declare_probe.py >/dev/null
 docker run -d --name dprobe_sub -e ROLE=sub -e RADIO_CONNECT=udp/$PUB_IP:7450 "${common[@]}" -u /app/declare_probe.py >/dev/null
 sleep 5   # sessions up (no impairment yet)
@@ -32,4 +32,5 @@ case $TEST in
   both)      impair dprobe_sub; impair dprobe_pub ;;
 esac
 docker wait dprobe_sub >/dev/null
+[[ -n "${KEEP_LOGS:-}" ]] && { docker logs dprobe_pub > "$KEEP_LOGS.pub" 2>&1; docker logs dprobe_sub > "$KEEP_LOGS.sub" 2>&1; }
 docker logs dprobe_sub 2>&1 | grep '^{'
