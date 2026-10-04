@@ -130,6 +130,7 @@ class Localizer:
         # Cross-covariance bookkeeping (rdl.RDL): told the matrix M every own step applies to the error
         # (x <- M x: F for a prediction, I - K H for an update) and when the estimate is re-initialized.
         self.listener = None
+        self.anchor_seen: Dict[str, float] = {}   # anchor source -> time of its last accepted range
 
     # --- state ----------------------------------------------------------
     @property
@@ -289,7 +290,23 @@ class Localizer:
         self.updates += 1
         if t is not None:
             self.last_update_t = t
+            if source is not None:
+                self.anchor_seen[source] = t
         return True
+
+    def update_position(self, z: Tuple[float, float], R: np.ndarray) -> None:
+        """A direct 2D position measurement z with covariance R (GNSS fallback)."""
+        if self.x is None:
+            return
+        H = np.zeros((2, 6))
+        H[0, 0] = H[1, 1] = 1.0
+        S = H @ self.P @ H.T + R
+        K = self.P @ H.T @ np.linalg.inv(S)
+        self.x = self.x + K @ (np.asarray(z, float) - self.x[:2])
+        IKH = np.eye(6) - K @ H
+        self.P = IKH @ self.P @ IKH.T + K @ R @ K.T
+        if self.listener is not None:
+            self.listener.on_transform(IKH)
 
     def needs_relock(self) -> bool:
         return self._run >= self.relock

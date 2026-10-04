@@ -214,6 +214,8 @@ class Ship:
 
         self.drones = {}                 # id -> {"hb": heartbeat, "seen": wall, "telemetry": {...}}
         self.expended = set()
+        self.ship_gnss = None            # the ship's own GNSS fix and heading (sim/ship_gnss), sent in the roster
+        self.gnss_spoofed = {}           # drone -> sim time it first reported a GNSS spoof
         self.events = deque(maxlen=200)
         self.rx_counts = defaultdict(int)
         self.rx_bytes = defaultdict(int)
@@ -242,6 +244,7 @@ class Ship:
             self.onboard.declare_subscriber("sim/damage", self._on_damage),
             self.onboard.declare_subscriber("sim/clock_eval", self._on_clock_eval),
             self.onboard.declare_subscriber("swarm/metrics/summary", self._on_metrics),
+            self.onboard.declare_subscriber("sim/ship_gnss", self._on_ship_gnss),
             self.radio.declare_subscriber("swarm/heartbeat/*", self._on_heartbeat),
             self.radio.declare_subscriber("swarm/heartbeat_relay/*", self._on_relayed_heartbeat),
             self.radio.declare_subscriber("swarm/telemetry/*", self._on_telemetry),
@@ -313,6 +316,9 @@ class Ship:
                 self.expended.add(hb["agent_id"])
             else:
                 self._answer_heartbeat(hb["agent_id"], hb)
+            if hb.get("gnss") == "spoofed" and hb["agent_id"] not in self.gnss_spoofed:
+                self.gnss_spoofed[hb["agent_id"]] = self.truth_time
+                self.event("gnss_spoofed", drone=hb["agent_id"])
 
     def _answer_heartbeat(self, agent, hb):
         """Reconcile a drone's view of its job with ours from its heartbeat (2 Hz).  Caller holds the lock.
@@ -342,6 +348,12 @@ class Ship:
             if (agent, "engaged", wave) not in tr.award_events:
                 tr.award_events.add((agent, "engaged", wave))
                 self.event("award", threat=tr.threat_id, drone=agent, cost=hb.get("cost"), order=wave, via="heartbeat")
+
+    def _on_ship_gnss(self, sample):
+        g = self._parse(sample)
+        with self.lock:
+            self.ship_gnss = {"t": g["sim_time"], "fix": bool(g.get("fix")), "enu": g.get("enu"),
+                              "heading": g.get("heading")}
 
     def _on_relayed_heartbeat(self, sample):
         """A peer forwarded the heartbeat of a drone we could not hear directly."""
@@ -874,6 +886,8 @@ class Ship:
                     members = self.members()
                     relayed = [d for d in members if self.drones[d].get("relayed")]
                     roster = {"time": now, "count": len(members), "members": members, "relayed": relayed}
+                    if self.ship_gnss is not None:
+                        roster["gnss"] = self.ship_gnss          # drones take their GNSS fixes relative to ours
                     if self.sync_mode in ("master", "consensus"):
                         # Two-way exchange: echo each drone's latest t1 with our receive stamp t2 and
                         # this send stamp t3 (one broadcast for all drones, no extra messages).  With
@@ -954,6 +968,7 @@ class Ship:
             "missed_slots": sum(len(t["missed"]) for t in engaged),
             "agreement_mean": round(sum(agree) / len(agree), 3) if agree else None,
             "drones_expended": s["roster"]["expended"],
+            "gnss_spoof_reports": len(self.gnss_spoofed),
             "radio_rx_at_ship": s["radio_rx_at_ship"],
             # Detonation timing against truth (_evaluate_detonation): geometric error (primary),
             # error against the ordered t_engage, and miss distance.

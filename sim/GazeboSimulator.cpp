@@ -125,6 +125,7 @@ void GazeboSimulator::init() {
     configure_localization();
     configure_environment();
     configure_imu();
+    configure_gnss();
     if (_loc_mode == "coop" || _loc_mode == "rdl") {
         auto sub_opt_uwb = zenoh::Session::SubscriberOptions::create_default();
         _sub_uwb_tx.emplace(_session->declare_subscriber(
@@ -1082,6 +1083,118 @@ json GazeboSimulator::imu_frame(const std::string& agent_id, double sim_time) {
     return {{"dt", dt}, {"dv", {dv[0], dv[1]}}};
 }
 
+void GazeboSimulator::configure_gnss() {
+    if (_loc_mode == "truth" || env_double("GNSS", 1.0) == 0.0) return;
+    double s = 0.1;
+    try {
+        s = _hw.at("simulation").at("speed_scale").get<double>();
+        const json& g = _hw.at("gnss");
+        const json& sg = _hw.at("ship_gnss");
+        _gnss_common_sigma = g.at("common_sigma_m").get<double>();
+        _gnss_common_tau = g.at("common_tau_s").get<double>() / s;      // the time stretch (hardware.gnss_errors)
+        _gnss_rx_sigma = g.at("receiver_sigma_m").get<double>();
+        _gnss_rx_tau = g.at("receiver_tau_s").get<double>() / s;
+        _gnss_white = g.at("white_sigma_m").get<double>();
+        _gnss_period = 1.0 / std::max(0.1, g.value("rate_hz", 5.0));
+        _ship_heading_sigma = sg.value("heading_sigma_deg", 0.0) * M_PI / 180.0;
+        _ship_heading = sg.value("heading_deg", 0.0) * M_PI / 180.0;
+        _geo_origin = ignition::math::Vector3d(sg.at("geo_origin_enu_m").at(0).get<double>(),
+                                               sg.at("geo_origin_enu_m").at(1).get<double>(), 0.0);
+        _gnss_on = true;
+    } catch (const std::exception& e) {
+        std::cerr << "[GazeboSimulator] GNSS parameters missing from the hardware record: " << e.what() << std::endl;
+        return;
+    }
+    _gnss_rng.seed(static_cast<unsigned>(env_double("GNSS_SEED", 13.0)));
+    std::normal_distribution<double> unit(0.0, 1.0);
+    for (double& c : _gnss_common) c = _gnss_common_sigma * unit(_gnss_rng);
+    _ship_heading_err = _ship_heading_sigma * unit(_gnss_rng);
+    auto parse = [](const char* env, bool spoof) {
+        std::vector<GnssWindow> out;
+        if (env == nullptr) return out;
+        std::stringstream ss(env);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            std::vector<double> f;
+            std::stringstream is(item);
+            std::string tok;
+            while (std::getline(is, tok, ':')) f.push_back(std::atof(tok.c_str()));
+            GnssWindow w;
+            size_t area = 0;
+            if (spoof && f.size() >= 3) {          // t0:dir_deg:rate[:step[:x:y:r]]
+                w.t0 = f[0]; w.dir = f[1] * M_PI / 180.0; w.rate = f[2];
+                if (f.size() >= 4) w.step = f[3];
+                area = 4;
+            } else if (!spoof && f.size() >= 2) {  // t0:t1[:x:y:r]
+                w.t0 = f[0]; w.t1 = f[1];
+                area = 2;
+            } else {
+                continue;
+            }
+            if (f.size() >= area + 3) { w.local = true; w.x = f[area]; w.y = f[area + 1]; w.r = f[area + 2]; }
+            out.push_back(w);
+        }
+        return out;
+    };
+    _gnss_jam = parse(std::getenv("GNSS_JAM"), false);
+    _gnss_spoof = parse(std::getenv("GNSS_SPOOF"), true);
+    std::cout << "[GazeboSimulator] GNSS: common " << _gnss_common_sigma << " m (tau " << _gnss_common_tau
+              << " s), receiver " << _gnss_rx_sigma << " m (tau " << _gnss_rx_tau << " s), white " << _gnss_white
+              << " m, every " << _gnss_period << " s; ship at (" << _geo_origin.X() << ", " << _geo_origin.Y()
+              << "), heading " << _ship_heading * 180.0 / M_PI << " deg; " << _gnss_jam.size() << " jam, "
+              << _gnss_spoof.size() << " spoof window(s)" << std::endl;
+}
+
+void GazeboSimulator::publish_gnss(double sim_time, const std::vector<std::string>& agents) {
+    std::map<std::string, ignition::math::Vector3d> pos;
+    {
+        std::lock_guard<std::mutex> lock(_state_mtx);
+        for (const auto& id : agents) {
+            auto it = _drone_states.find(id);
+            if (it != _drone_states.end()) pos[id] = it->second.position;
+        }
+    }
+    pos["ship"] = ignition::math::Vector3d(0, 0, 0);
+    std::normal_distribution<double> unit(0.0, 1.0);
+    auto gm = [&](double& v, double sigma, double tau) {
+        const double k = std::exp(-_gnss_period / std::max(tau, 1e-3));
+        v = v * k + sigma * std::sqrt(std::max(0.0, 1.0 - k * k)) * unit(_gnss_rng);
+    };
+    for (double& c : _gnss_common) gm(c, _gnss_common_sigma, _gnss_common_tau);
+    auto in_area = [](const GnssWindow& w, const ignition::math::Vector3d& p) {
+        return !w.local || std::hypot(p.X() - w.x, p.Y() - w.y) <= w.r;
+    };
+    const double ch = std::cos(_ship_heading), sh = std::sin(_ship_heading);
+    for (const auto& [id, p] : pos) {
+        auto rx = _gnss_rx.find(id);
+        if (rx == _gnss_rx.end())
+            rx = _gnss_rx.emplace(id, std::array<double, 2>{_gnss_rx_sigma * unit(_gnss_rng), _gnss_rx_sigma * unit(_gnss_rng)}).first;
+        for (double& v : rx->second) gm(v, _gnss_rx_sigma, _gnss_rx_tau);
+        bool fix = true;
+        for (const auto& w : _gnss_jam)
+            if (sim_time >= w.t0 && sim_time < w.t1 && in_area(w, p)) fix = false;
+        // the world frame: the ship's geographic position plus its heading
+        double e = _geo_origin.X() + ch * p.X() - sh * p.Y();
+        double n = _geo_origin.Y() + sh * p.X() + ch * p.Y();
+        e += _gnss_common[0] + rx->second[0] + _gnss_white * unit(_gnss_rng);
+        n += _gnss_common[1] + rx->second[1] + _gnss_white * unit(_gnss_rng);
+        for (const auto& w : _gnss_spoof) {
+            if (sim_time < w.t0 || !in_area(w, p)) continue;
+            const double off = w.step + w.rate * (sim_time - w.t0);
+            e += off * std::cos(w.dir);
+            n += off * std::sin(w.dir);
+        }
+        json msg = {{"sim_time", sim_time}, {"fix", fix}, {"sats", fix ? 18 : 0}};
+        if (fix) msg["enu"] = {round_mm(e), round_mm(n)};
+        if (id == "ship") {
+            msg["heading"] = _ship_heading + _ship_heading_err;
+            put("sim/ship_gnss", msg.dump());
+        } else {
+            put("drone/" + id + "/gnss", msg.dump());
+        }
+    }
+}
+
 void GazeboSimulator::on_uwb_tx(const zenoh::Sample& sample) {
     try {
         const std::string agent_id = key_agent(std::string(sample.get_keyexpr().as_string_view()));
@@ -1327,6 +1440,10 @@ void GazeboSimulator::step() {
         if (due_anchors) _last_uwb_anchor_time = current_sim_time;
         if (due_peers) _last_uwb_peer_time = current_sim_time;
         if (due_anchors || due_peers) publish_uwb(current_sim_time, active_agents, due_anchors, due_peers);
+        if (_gnss_on && current_sim_time - _last_gnss_time >= _gnss_period - 1e-3) {
+            _last_gnss_time = current_sim_time;
+            publish_gnss(current_sim_time, active_agents);
+        }
     }
 
     if (current_sim_time - _last_clock_pub_time >= 0.1 && _pub_clock) {

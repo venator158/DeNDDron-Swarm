@@ -106,6 +106,31 @@
     "simulated": false,
     "_note": "heading taken as perfect; the attitude (tilt) error is modelled under ahrs"
   },
+  "gnss": {
+    "class": "multi-band multi-constellation GNSS receiver (u-blox F9-class), standalone: no RTK (the ship is a moving base)",
+    "common_sigma_m": 1.5,
+    "common_tau_s": 600.0,
+    "_common": "atmosphere, orbit and clock errors, shared by receivers within a few km: cancels when the drone's fix is taken relative to the ship's",
+    "receiver_sigma_m": 0.7,
+    "receiver_tau_s": 60.0,
+    "_receiver": "multipath and tracking errors, per receiver (Gauss-Markov)",
+    "white_sigma_m": 0.2,
+    "rate_hz": 5.0,
+    "min_sats": 6,
+    "simulated": true,
+    "_note": "horizontal, per axis, 1 sigma. Positions are not speed-scaled; correlation times follow the simulation's time stretch (/ speed_scale), as the IMU's do. Relative to the ship: ~1.0 m per axis (receiver parts of both, white noise) plus the ship heading error x range."
+  },
+  "ship_gnss": {
+    "class": "the ship's GNSS receiver (same class) and dual-antenna GNSS heading over the hull's length",
+    "heading_sigma_deg": 0.1,
+    "geo_origin_enu_m": [
+      1500.0,
+      -800.0
+    ],
+    "heading_deg": 25.0,
+    "simulated": true,
+    "_note": "the ship broadcasts its fix and heading (ship/gnss); drones convert their fixes to the ship frame. geo_origin_enu_m and heading_deg place the (static) simulated ship in the world, so the conversion is exercised."
+  },
   "c2_radio": {
     "class": "peer-to-peer data radio (Zenoh over UDP in the simulation)",
     "simulated": true,

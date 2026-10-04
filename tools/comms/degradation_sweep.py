@@ -71,6 +71,7 @@ COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "drones", "threats", "
            "det_reasons", "chain_fires", "chain_delay_s_mean", "chain_delay_s_max", "fuze_false_triggers",
            "fuze_no_detection", "collisions", "close_calls", "min_separation_m", "min_ship_range_m",
            "loc_err_mean_m", "loc_err_p95_m", "loc_err_max_m", "loc_nees_mean", "loc_within95", "loc_relocks",
+           "gnss_spoof_reports",
            "hb_rx_per_s_at_ship", "env", "wall_s"]
 # Resource columns, sampled during the run (Sampler); see scaling_sweep.py.
 RESOURCE_COLUMNS = ["rtf_measured", "startup_s", "host_cpu_pct", "drone_cpu_pct", "drone_mem_mb", "gazebo_cpu_pct",

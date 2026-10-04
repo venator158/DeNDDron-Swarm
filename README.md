@@ -326,6 +326,8 @@ One drone, from sensors to detonation (`src/agent/agent.py` unless noted):
 | Topic | Link | Direction | Payload |
 |---|---|---|---|
 | `drone/{id}/sensors` | onboard | sim → drone, metrics | `{sim_time, pose{z, yaw, ...}, imu{dt, dv[x, y]}}` at 50 Hz: altitude and attitude, and the IMU's horizontal delta-velocity since the last frame (legacy `truth`: the full pose; legacy `lidar`: plus `lidar{angle_step, ranges[], hits[]}` every 0.1 s) |
+| `drone/{id}/gnss` | onboard | sim → drone | `{sim_time, fix, sats, enu?[E, N]}` at 5 Hz: the drone's GNSS fix in the world frame (impairments `GNSS_JAM`, `GNSS_SPOOF`) |
+| `sim/ship_gnss` | onboard | sim → ship | `{sim_time, fix, sats, enu?, heading}` at 5 Hz: the ship's own fix and heading |
 | `drone/{id}/radar` | onboard | sim → drone | `{sim_time, objects[[dx, dy, dz], ...]}` from the hardware record's mmWave radar (30 m, 20 Hz, range/angle noise): every threat, other drone and the ship's hull, relative and unlabelled; feeds obstacle avoidance and the fuze |
 | `drone/{id}/fuze` | onboard | sim → drone | legacy `PERCEPTION=lidar` only: the same contact format at `FUZE_HZ` (50) within `FUZE_RANGE_M` (10) |
 | `drone/{id}/uwb` | onboard | sim → drone | `{sim_time, anchors[[k, range]], peers[[id, range, state]]}`: UWB ranges to the ship's anchors (and requested peers, with each peer's state); not with `truth` |
@@ -342,12 +344,12 @@ One drone, from sensors to detonation (`src/agent/agent.py` unless noted):
 | `ship/zones` | radio | ship → drones | `{zones[{threat_id, point, radius, t_engage}]}` at 1 Hz: every job's reserved blast |
 | `sim/threat_tracks` | onboard | ship → sim | `{threat_id, type, level, status, t0, p0, v}` for Gazebo markers, in **truth** (the only track message not in ship time) |
 | `sim/clock_eval` | onboard | drone → ship | `{agent_id, mode, truth, ship_est, offset, bound, hops?, ship?}` at 1 Hz, only with a sync mode or an imperfect clock; evaluation only (true sync error) |
-| `swarm/heartbeat/{id}` | radio | drone → ship | `{time, state, link, pose, threat_id, t_engage, confirmed, wave_id?, cost?, hold_s?, t1?}` at 2 Hz (drones do not subscribe); `wave_id`, `cost`, `hold_s` (the award) only while unconfirmed; `t1` (local send stamp) only with `CLOCK_SYNC=master` or `consensus` |
+| `swarm/heartbeat/{id}` | radio | drone → ship | `{time, state, link, pose, pos_sigma, loc_flags, gnss, threat_id, t_engage, confirmed, wave_id?, cost?, hold_s?, t1?}` at 2 Hz (drones do not subscribe); `wave_id`, `cost`, `hold_s` (the award) only while unconfirmed; `t1` (local send stamp) only with `CLOCK_SYNC=master` or `consensus` |
 | `swarm/heartbeat_help/{id}` | radio | drone → drones | the same heartbeat, only while the ship does not hear this drone directly |
 | `swarm/heartbeat_relay/{id}` | radio | drone → ship | a peer's help heartbeat, forwarded by drones in the roster; with `master` or `consensus`, plus `relay_resid` (how long the relay held it) |
 | `swarm/telemetry/{id}` | radio | drone → ship | instrumentation, 1 Hz |
 | `swarm/clock/{id}` | radio | drone → drones | `{agent_id, tau, alpha, o, anchor, echo?}` at `CLOCK_BEACON_HZ` (0.5), only with `CLOCK_SYNC=consensus` |
-| `ship/roster` | radio | ship → drones | `{time, count, members[], relayed[], sync?{drone: [t1, t2, t3]}, beacon?}` at 1 Hz (`sync` with `master` or `consensus`, `beacon` with `consensus`): drones the ship hears, and which of them only through relays |
+| `ship/roster` | radio | ship → drones | `{time, count, members[], relayed[], gnss?{t, fix, enu, heading}, sync?{drone: [t1, t2, t3]}, beacon?}` at 1 Hz (`sync` with `master` or `consensus`, `beacon` with `consensus`): drones the ship hears, and which of them only through relays |
 | `swarm/threats` | radio | ship → drones | engagement order `{wave_id, threats[{threat_id, type, level, required, location, t_engage}]}` |
 | `swarm/bids` | radio | drone → all | `{agent_id, wave_id, costs{threat_id: ETA s}}` |
 | `swarm/awards` | radio | drone → all, ship | `{threat_id, agent_id, wave_id, cost, status: engaged\|withdrawn\|missed\|released\|no_detection, slot, t_engage}` |
@@ -432,6 +434,12 @@ Absolute position is only observable through the anchors: with every anchor jamm
 - **Every drone uses peers,** anchored or not; peer ranges keep the plain gate.
 
 Payload per exchange: 150 B (state float32, covariance and the factor float16) plus a 26 B reply, which needs 802.15.4z extended frames. The [hardware record](#hardware-record) holds `rdl_payload_bytes` and the airtime, and the simulator's channel model uses them in `rdl` mode.
+
+**GNSS (`gnss.py`, `GNSS=1` default).** A multi-band receiver without RTK (the real ship is a moving base, so its corrections wouldn't apply). Each drone takes its fix relative to the ship's: the ship broadcasts its own fix and heading in the roster, and the drone converts with R(−heading)·(own fix − ship's). The receivers' common-mode error cancels, which leaves ~1 m per axis plus the heading error times range. Owner's decisions:
+- **Comparator, while the drone's own anchor fixes are fresh (within 1 s):** GNSS is never fused. The mean NIS of the last 10 fixes against the UWB estimate is checked against the 99.9 % bound; GNSS that disagrees with good UWB is a spoof (or a fault).
+- **On a spoof:** the drone latches `spoofed`, reports it in its heartbeat (the ship logs a `gnss_spoofed` event), and ignores GNSS from then on.
+- **Fallback, when the drone's own anchors are stale** (peer chains don't count, because beyond anchor range they were tens of metres off while claiming sub-metre accuracy): GNSS is fused once a second with its noise doubled. Its error is a slow bias, so the position variance is floored at that bias's variance afterwards. `GNSS_FALLBACK=off` keeps it comparator-only.
+- **The IMU check:** a shadow copy of the filter follows it while anchored, then predicts on the IMU alone. In fallback each fix is checked against this shadow, and 3 fixes in a row beyond the 99.9 % gate are a spoof: a spoofer can move the fix but not the measured acceleration.
 
 Limit: with a single anchored drone the formation's rotation about it is unobservable from ranges, and any EKF linearized at a wrong estimate (RDL or `coop`) becomes overconfident. Two or more anchored drones not in line make it observable.
 
@@ -749,6 +757,11 @@ python3 tools/comms/sensing_sweep.py --drones 30 --threats 15 --parallel 2 --rep
 | `radar_miss` | radar misses 30 % of contacts per scan: `RADAR_MISS_P=0.3` |
 | `radar_clutter` | 2 false contacts per scan, uniform within range: `RADAR_CLUTTER=2` |
 | `radar_latency` | radar scans 0.1 s late: `RADAR_LATENCY_S=0.1` |
+| `gnss_fallback_uwb_short` | UWB range 80 m with GNSS on (compare `uwb_short` with `--env GNSS=0`) |
+| `gnss_jam` | GNSS jammed everywhere from t = 60 s: `GNSS_JAM=60:100000` |
+| `gnss_spoof_ramp` | GNSS spoofed within 60 m of (85, 0) from t = 60 s, ramping at 0.1 m/s: `GNSS_SPOOF=60:45:0.1:0:85:0:60` (a spoofer covering the ship too would cancel in the difference) |
+| `gnss_spoof_step` | the same area, a 20 m step: `GNSS_SPOOF=60:45:0:20:85:0:60` |
+| `gnss_spoof_uwb_jam` | all UWB jammed for t = 60–120 s, and the 0.1 m/s ramp spoof: the worst case |
 | `combined` | UWB noise + NLOS, radar noise + clutter, 30 % loss on the ship link |
 
 **How the ship link is impaired.** The tool shapes the ship's own UDP traffic, and the drones' UDP traffic addressed to the ship (`degrade_radio.sh` with `DST_IP`). Drone-to-drone links and the dashboard are untouched, so a timed outage is applied and lifted by watching the dashboard's sim time; it is logged in `impairments.log`. Netem loss is not scaled by `--rtf`.
@@ -935,6 +948,7 @@ Where each implemented feature lives.
 | | EKF (position, velocity, accelerometer bias; or wind with the command model), IMU prediction, gating, re-lock, multilateration; robust mode: adaptive noise, Huber update, residual-checked re-locks; drift monitor | `src/agent/localization.py` |
 | | cooperative localization: neighbour table, anchor-time chains, peer fusion | `src/agent/coop.py` |
 | | recursive decentralized localization: cross-covariance factors, delayed-state joint updates, replies with acknowledgement, covariance intersection fallback | `src/agent/rdl.py`, `agent.py` (`_on_uwb`, `_send_uwb_tx`); simulator carries replies (`publish_uwb`) |
+| | GNSS: ship-relative fixes, comparator (windowed NIS), spoof latch and report, fallback with inflated noise and a variance floor, IMU-only reference | `src/agent/gnss.py`, `agent.py` (`_on_gnss`, `_on_roster`); simulator: `configure_gnss`, `publish_gnss`; ship: `_on_ship_gnss`, roster `gnss`, `gnss_spoofed` events |
 | | drone integration, station keeping against wind | `agent.py` (`_loc_predict`, `_on_uwb`, `_send_uwb_tx`, `_reflex_control_loop`) |
 | | evaluation: errors, NEES, separations | `src/metrics/main.py` (`_on_loc`, `_loc_summary`) |
 | **Perception** | mmWave radar (default; lidar off) | `GazeboSimulator.cpp` (`configure_fuze`, `publish_fuze`) |
@@ -980,6 +994,7 @@ Where each implemented feature lives.
 - warhead (kill radius);
 - UWB radio and the ship's UWB anchors;
 - mmWave radar;
+- GNSS (receiver class: common-mode, receiver and white errors) and the ship's GNSS fix and heading (`ship_gnss`, which also places the simulated ship in the world);
 - the flight controller's IMU (BMI088-class, the one a cheap drone already has) and its attitude estimate (`ahrs`: tilt error), barometer and compass;
 - the C2 radio.
 
@@ -1008,7 +1023,7 @@ Simulation speed (env): `SIM_RTF` (1), set by `--rtf`.
 
 Ship no-fly zone (env): `NO_FLY_RADIUS_M` (50; 0 = off, stations at 30–45 m; `--no-fly R`, which also moves stations to R+5 … R+45 m).
 
-Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `rdl`, `anchors`, or legacy `truth`; `--localization`), `UWB_FILTER` (`robust`, or the plain `basic`), `NAV_PREDICT` (`imu`, or the command model `cmd`), `IMU_ERROR_SCALING` (`dilated`, or `real`; drones and simulator), `IMU_EXTRA_BIAS_MPS2` (simulator: a constant extra accelerometer bias, real m/s², scaled like the record's), `IMU_SEED`, `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensing degradation (simulator only; empty = the record, which the drones keep assuming): `UWB_EXTRA_SIGMA_M`, `UWB_NLOS_P`, `UWB_NLOS_BIAS_M`, `UWB_DROPOUT_P`, `UWB_MAX_RANGE_M`, `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG`, `RADAR_MISS_P`, `RADAR_CLUTTER`, `RADAR_LATENCY_S` (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)). Sensor and environment parameters are in the [hardware record](#hardware-record).
+Localization and perception (env): `PERCEPTION` (`radar`, or legacy `lidar`; `--perception`), `LOCALIZATION` (`coop`, `rdl`, `anchors`, or legacy `truth`; `--localization`), `UWB_FILTER` (`robust`, or the plain `basic`), `NAV_PREDICT` (`imu`, or the command model `cmd`), `IMU_ERROR_SCALING` (`dilated`, or `real`; drones and simulator), `IMU_EXTRA_BIAS_MPS2` (simulator: a constant extra accelerometer bias, real m/s², scaled like the record's), `IMU_SEED`, `GNSS` (1; 0 = off), `GNSS_FALLBACK` (`on`/`off`), `GNSS_JAM` (`t0:t1[:x:y:r]`), `GNSS_SPOOF` (`t0:dir_deg:rate_mps[:step_m[:x:y:r]]`), `GNSS_SEED`, `UWB_JAM` (`what:t0:t1[:x:y:r]`, what = `anchors`|`peers`|`all`; a jammer at (x, y) affects drones within r m), `UWB_SEED`, `WIND_MPS` (`x,y` real m/s, `--wind`), `GUST_SIGMA_MPS` (`--gust`). Sensing degradation (simulator only; empty = the record, which the drones keep assuming): `UWB_EXTRA_SIGMA_M`, `UWB_NLOS_P`, `UWB_NLOS_BIAS_M`, `UWB_DROPOUT_P`, `UWB_MAX_RANGE_M`, `RADAR_RANGE_SIGMA_M`, `RADAR_AZ_SIGMA_DEG`, `RADAR_EL_SIGMA_DEG`, `RADAR_MISS_P`, `RADAR_CLUTTER`, `RADAR_LATENCY_S` (see [Sensing and ship-link sweep](#sensing-and-ship-link-sweep)). Sensor and environment parameters are in the [hardware record](#hardware-record).
 
 Proximity fuze (env): `FUZE` (1; 0 = timed detonation), `FUZE_WINDOW_S` (2), `FUZE_GATE_M` (5), `FUZE_FIRE` (`cpa`), `FUZE_FALLBACK` (`hold`), and for the simulator's sensor `FUZE_RANGE_M` (10, drones too), `FUZE_HZ` (50), `FUZE_NOISE_M` (0.1), `FUZE_LATENCY_S` (0), `FUZE_SEED` (0). See [Proximity fuze](#proximity-fuze).
 
@@ -1039,6 +1054,7 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_localization.py` | EKF from anchor ranges: multilateration, tracking a moving drone consistently (NEES), outlier gating, dropouts, re-lock after a corrupted estimate, uncertainty growth, wind learned, outage dead-reckoned with the wind; robust filter: adaptive noise at 3× the record's noise (with and without NLOS), re-lock leaving out a blocked anchor, refused re-lock when three anchors disagree; IMU prediction: consistent and tighter than the command model, through a 60 s outage, unscaled errors as a stress case; drift monitor: flags a persistent bias only, no flags in clean flights, a drifting anchor flagged and left out |
 | `test_coop.py` | cooperative localization: a drone beyond anchor range localized through anchored peers (consistent), drift without peers, no stale "anchored" loop with every anchor jammed, peer selection |
 | `test_rdl.py` | recursive decentralized localization: one exchange equals the centralized joint update (states, covariances, cross-covariance from the factors), replies applied once; a swarm with the live exchange timing (0.5 s old payloads, replies a frame later): far drone consistent through peers, the live `uwb_short` layout with and without 30 % exchange loss, every anchor jammed (relative positions tighter than `coop`, NEES honest) |
+| `test_gnss.py` | GNSS: the relative fix cancels the common error and rotates by the ship's heading; no false spoof with good UWB (300 s); step and ramp spoofs caught while anchored (GNSS never fused); fallback through a 120 s UWB outage; a spoof during the outage caught by the IMU check; a confidently wrong estimate without anchors corrected |
 | `test_radar_obstacles.py` | radar contacts give exactly the lidar's obstacle points (50 random layouts vs a port of the simulator's lidar), ship contacts dropped, staleness |
 | `test_fuze.py` | proximity fuze: fires at closest approach (three threat speeds), threat in range before arming not taken for a mate, mates never trigger, hold and timed fallbacks, closest approach beyond the kill radius, contacts off the predicted track ignored, radius mode, arming window, stale track, chain readiness, config |
 | `test_ship_track.py` | radar track: truth vs ship-time view, true closest approach; ship time attributes set at start (needs zenoh installed) |
@@ -1207,32 +1223,61 @@ RDL fixes the errors where `coop` failed (peer-only drones beyond anchor range).
   - fewer peer updates between well-anchored drones (tried as a hard rule: it made the unit results worse).
 - **Measure at scale:** 50 drones (channel load and CPU) and with repeats, before RDL can become the default.
 
-### 5. GNSS as comparator and fallback
+### 5. GNSS as comparator and fallback — done
 
-GNSS is not used today: position comes from the ship's UWB anchors, which also work where GNSS is jammed or spoofed. Where it is available, it can check UWB and, when UWB fails, stand in for it.
+Done on branch `gnss` (2026-10-04), on by default (`GNSS=1`, `GNSS_FALLBACK=on`); see [Localization and perception](#localization-and-perception).
 
-**Steps:**
-1. **Hardware record.** Add a `gnss` class: a multi-band, multi-constellation receiver with typical 1.5–3 m horizontal σ standalone, 5–10 Hz, and fix quality and satellite count. No RTK: the ship is a moving base in the real world, so its corrections don't apply. Add a ship `gnss` and heading entry, since positions are needed relative to the ship.
-2. **Simulator.**
-   - Publish `drone/{id}/gnss` with the record's noise and a slowly varying bias (Gauss–Markov, like real receiver errors).
-   - Impairment knobs as for UWB: `GNSS_JAM` (outage windows, local or global) and `GNSS_SPOOF` (an offset that ramps in slowly, the hard case to detect). Like UWB noise, these are not speed-scaled.
-3. **Drone.**
-   - **Comparator (on by default):** check GNSS against the UWB estimate with a windowed normalized-innovation test. While UWB is good, GNSS is not fused into the position estimate, so a spoofer cannot pull the drone. Disagreement is flagged in telemetry and heartbeats.
-   - **On a detected spoof:** the drone reports it to the ship, then ignores GNSS and relies on UWB alone.
-   - The ship-relative conversion uses the ship's own GNSS position and heading.
-4. **Sweep conditions:**
-   - `gnss_fallback_uwb_short`: UWB to 80 m with GNSS on, the case where peer chains failed;
-   - `gnss_jam`;
-   - `gnss_spoof_ramp`;
-   - `gnss_spoof` with `uwb_jam_all`, the worst case.
+**Owner's decisions:**
+- GNSS is a comparator for UWB, never fused while UWB is available;
+- on a detected spoof: report to the ship, then ignore GNSS;
+- no RTK;
+- GNSS stands in when UWB fails, with inflated noise, the IMU check and the comparator still active.
 
-**Decided (2026-10-04):** GNSS is a comparator for UWB, never fused while UWB is available; it is on by default and ignored once a spoof is detected (after reporting to the ship); no RTK.
+**Built:**
+- **Record:** `gnss` (a multi-band receiver class: common-mode, receiver and white errors) and `ship_gnss` (fix, heading, and the simulated ship's place in the world).
+- **Simulator:** fixes for every drone and the ship, `GNSS_JAM` and `GNSS_SPOOF` (ramp and step, by area).
+- **Ship:** forwards its fix and heading in the roster and logs `gnss_spoofed` reports.
+- **Drone** (`gnss.py`):
+  - ship-relative fixes;
+  - windowed-NIS comparator;
+  - spoof latch;
+  - the IMU-only reference;
+  - fallback with a variance floor.
 
-**Fallback (decided 2026-10-04):** when UWB fails (no anchor chain, and RDL's uncertainty shows the estimate is no longer good), GNSS stands in, fused with an inflated noise; the IMU check (item 3) and the comparator stay active so a spoof or a jump still rejects it. This needs RDL first, so the drone knows how uncertain its UWB estimate really is, and the IMU, so it can tell a spoof from drift.
+**Implementation choices:**
+- **UWB available** means fixes from three distinct anchors of the drone's own within 1 s. With one anchor in the last second, five drones at the edge of an 80 m anchor range disagreed with GNSS and falsely reported spoofs (their UWB estimate was the one off).
+- **Peer chains don't count as UWB**, so GNSS can correct them.
+- **The comparator's bound is the single-sample 99.9 % one:** the relative fix's error is a slow bias, so 10 fixes are nearly one sample.
+
+**Unit tests** (`test_gnss.py`, 8 seeds):
+- no false spoof in 300 s with good UWB;
+- a 10 m step spoof caught in 0.2 s;
+- ramps caught once the offset reaches ~4 m (0.1 m/s after 29–51 s, 0.03 m/s after 105–178 s), never fused;
+- a 120 s UWB outage: worst error 2.3 m with GNSS, 6.7 m without;
+- a 0.05 m/s ramp during the outage caught after 82–100 s (worst error 2.8–5.7 m);
+- a confidently wrong estimate without anchors brought back under 2.3 m.
+
+**Light check** (sensing sweep, 15 drones, 8 threats, one run each):
+
+| Condition | Error p95 / max | NEES | Spoof reports | Destroyed |
+|---|---|---|---|---|
+| `uwb_short`, GNSS off | 6.6 / 9.5 m (earlier runs up to 74 / 193 m) | 13 (up to 496) | – | 8/8 (6/8) |
+| `gnss_fallback_uwb_short` | **2.0 / 3.6 m** | **1.7** | 0 | 8/8 |
+| `gnss_jam` | 0.24 / 1.23 m | 1.7 | 0 | 8/8 |
+| `gnss_spoof_ramp` (0.1 m/s near 6 drones) | 0.27 / 1.03 m | 1.9 | 6 | 8/8 |
+| `gnss_spoof_step` (20 m) | 0.27 / 1.14 m | 1.9 | 5 | 8/8 |
+| `gnss_spoof_uwb_jam` (worst case) | 2.71 / 3.45 m | 2.3 | 5 | 8/8 |
+
+GNSS fixes `uwb_short`, which neither `coop` nor RDL did: errors bounded and an honest covariance. Spoofs are caught and change nothing, and a jam is harmless.
+
+**Open:**
+- A spoof covering both the ship and the drones cancels in the difference and is not detectable this way; the ship would need its own check (IMU or gyrocompass against its GNSS).
+- Slow ramps during a long UWB outage pull the estimate by up to the IMU reference's drift before they are caught.
+- RDL with GNSS has not been measured. The fallback should help there too, since its covariance floor keeps an RDL drone honest without anchors.
 
 ### 6. Already-open items
 
-The chain-fire and stack-spacing decisions are deferred until items 1–5 are done (2026-10-04).
+The chain-fire and stack-spacing decisions were deferred until items 1–5 are done (2026-10-04); items 1–5 are now done, so they are next.
 
 - **Chain fire for spread-out mates** (**decision**): fire only if the mate's own radar sees the threat inside the kill radius, otherwise wait for its own fuze.
 - **Three-drone stack spacing** (**decision**): spacing about 4 m, or a lower proximity threshold.
@@ -1260,6 +1305,7 @@ The chain-fire and stack-spacing decisions are deferred until items 1–5 are do
 - **Chain fire fires spread-out mates early.** Job-mates end up several metres apart along the threat's track, and chain fire sets them all off when the first one's fuze fires, up to 2 s before the threat reaches the last. At 50 drones this cost two three-drone kills in one run (misses of 8.4 and 9.5 m, where each drone's own fuze would have missed by 1–3 m).
 - **Stack spacing vs proximity.** Three-drone stacks are 3 m apart vertically; with 0.5 m altitude latching, stacked mates can be 2.0–2.5 m apart, under the metrics node's 2.5 m proximity threshold.
 - **Late job-mates.** A job-mate that enters fuze range after the mates were recorded (still flying in) is a new track; if it passes within the gate of the predicted threat position it could trigger the fuze. The evaluation labels every trigger; none was false in the runs so far.
+- **GNSS spoofing that covers the ship too** cancels in the drone-minus-ship fix and isn't detected; GNSS jamming only removes the comparator and the fallback.
 - **Best-effort radio.** Data runs over UDP, so messages can be lost under packet loss; Zenoh's control messages go over QUIC and are retransmitted. At 50 % loss QUIC's own recovery slows down and new subscriptions are often still dead after 10 s. See [Degraded communications](#degraded-communications).
 - **Shared radio certificate.** Every node uses the same simulation-only TLS key for the QUIC link; hardware needs a key per node (and see "No security").
 - **The ship is a single point of failure, by design.** It is the only threat sensor and the only source of engagement orders.
