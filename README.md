@@ -614,8 +614,13 @@ Measured (8 drones, 4 level-1 threats, `--rtf 3`; skewed = ±500 ppm drift and �
   |---|---|---|---|
   | 8 | 2.3 → 5.3 | 851 → 1117 | 9.1% → 9.1% |
   | 16 | 2.2 → 8.5 | 923 → 1141 | 9.2% → 9.3% |
+  | 50 (1×, 3 runs each, 2026-10-04) | 5.2 → 23.8 | 1071 → 1334 | 9.9% → 12.1% |
 
-  Each drone sends 0.5 beacons/s (about 130–260 B/s with the echo) and receives 0.5 × (N − 1). At 50 drones that is about 24.5 more messages per second per drone, about 5× today's load. This is the O(N²) pattern that made heartbeats ship-only. Lower `CLOCK_BEACON_HZ` trades it against convergence and holdover.
+  Each drone sends 0.5 beacons/s (about 130–260 B/s with the echo) and receives 0.5 × (N − 1), so the predicted increment at 50 drones is 24.5 messages/s. **Measured at 50 drones: 18.6** (23.8 against a 5.2 baseline), below the prediction only because drones expend through the run, so the average live swarm is smaller than 50 — about 4.6× the traffic without consensus. This is the O(N²) pattern that made heartbeats ship-only, and it is now confirmed rather than extrapolated. Lower `CLOCK_BEACON_HZ` trades it against convergence and holdover.
+
+  What the cost does **not** touch at 50 drones: sim speed (0.97× either way), decision latency (1,337 vs 1,336 ms), miss distance, separation, and the ship's own received load (107 msgs/s either way — beacons go drone-to-drone, never to the ship). It is a peer-bandwidth cost, not a C2 or throughput cost. What it does touch: host CPU +1.2 cores (526 → 648%), control-loop p99 32 → 38 ms and overruns 1.3 → 4.3.
+
+  **One caveat.** In 1 of 3 runs with `consensus` a level-3 threat survived on two hits because a drone missed its slot (`fuze_no_detection` 0, sync error 3.7 ms, so not a clock failure). `missed_slots` went 0 → 0.33 and overruns 1.3 → 4.3, so beacon-processing CPU plausibly made one drone late. One event in three runs is a mechanism, not a finding; it needs more repeats before `consensus` can be said to cost a kill.
 
 - Both `ttg` and `master` remove the clock error from detonation timing. What remains is the 20 ms sensor-frame step: decisions run on frames.
 - `ttg` is off by the one-way delay of each message, a few ms at this radio load. Every job update re-anchors, so drift never accumulates while a job is live.
@@ -709,7 +714,8 @@ Setup: `degradation_sweep.py --rtf 3 --repeats 3`. Each run uses 8 drones and th
 | 30% loss | 4 | 4 (default) / 4.3 (tuned) | 1080 ms | 0 | 0.78–0.82 |
 | 200 ± 50 ms delay | 4 | 4 | 1440 ms | 0 | 0.96–1.00 |
 | 64 kbit/s | 4 | 4 | 1360 ms | 0 | 1.00 |
-| **24 kbit/s** | **2.7–3** | 2.7–3 | **17,500–19,200 ms** | 5–6 | 0.71 |
+| **24 kbit/s** (2026-10-04) | **1** | 1 | 3,160 ms (the one threat assigned) | 6 | 1.00 |
+| 24 kbit/s (earlier, before the current sensing/clock payloads) | 2.7–3 | 2.7–3 | 17,500–19,200 ms | 5–6 | 0.71 |
 
 The loss rows are from the run with the award fixes below. The other rows come from the full sweep, which ran before the last of those fixes; that fix affects only conflicts between drones, which only the loss rows showed. All rows predate ship confirmation (see [Engagement protocol](#engagement-protocol)), which adds about 0.35 s to decision latency.
 
@@ -718,12 +724,13 @@ The loss rows are from the run with the award fixes below. The other rows come f
   - before re-announcing, the ship also counts drones whose heartbeats say they are engaged;
   - a drone that has already heard a better award for a threat does not take it when its own auction closes.
 - **Remaining case, now fixed.** Once in 6 runs at 30% loss, two drones engaged the same threat. The worse drone never heard the better one's bid or any of its 3 award copies, although the ship heard both. That suggests the direct link between those two drones was down, which conflict repair between drones cannot fix. Ship confirmation fixes it: in 6 more runs at 30% loss, the ship settled 5 such conflicts and every run used exactly 4 drones.
-- **Bandwidth.** 64 kbit/s is fine. At 24 kbit/s, routine traffic alone overfills the link:
-  - each drone sends heartbeats (to every peer and the ship) and telemetry, and those outgoing bytes are more than 24 kbit/s;
-  - the backlog builds in the kernel's first-in-first-out queue, not in Zenoh's, so Zenoh priorities (`tuned`) cannot move orders ahead;
-  - decisions take ~18 s, threats are re-announced, and one threat leaks because it could not be approved in time.
+- **Bandwidth.** 64 kbit/s is fine (4/4 destroyed, decision latency 1,555 ms). At 24 kbit/s the link is overfilled by routine traffic alone, and **this has got worse, not better**: 1 of 4 destroyed on 2026-10-04 against 2.7–3 before.
+  - Measured at the ship with 8 drones and no impairment, background traffic alone is **36.4 kbit/s** (`swarm/heartbeat` 2,045 B/s + `swarm/telemetry` 2,510 B/s) — half again over the shaper, before a single order is sent. The ship must also push roster, zones, job updates and ACKs out through the same throttled interface.
+  - The backlog builds in the kernel's first-in-first-out queue, not in Zenoh's, so Zenoh priorities (`tuned`) cannot move orders ahead.
+  - The result is 3 of 4 threats never fully assigned and 6 re-announcements. (The 3,160 ms latency figure covers only the single threat that did assign, so it is not comparable with the earlier 17–19 s averaged over more.)
+  - **Why it regressed:** per-drone telemetry now carries localization and clock fields, and the QUIC control plane adds handshake and acknowledgement traffic. Both are charged against the same 24 kbit/s budget. Consensus beacons, off in this run, would add more.
 
-  The fix is less background traffic, not QoS.
+  The fix is less background traffic, not QoS: specify the radio above 64 kbit/s, or make telemetry throttle itself under congestion.
 - **`tuned` vs `default`.** No meaningful difference in any condition, so `default` stays the default.
 - **Impairment method.** `degrade_radio.sh` impairs only UDP. The earlier version impaired all traffic on the radio interface, including the dashboard's TCP connection (Docker forwards `:8080` to the ship's radio address). At 64 kbit/s one dashboard request then took 1.2 s instead of 1 ms, which is why the earlier tuned 64 kbit/s run failed.
 
@@ -838,8 +845,23 @@ Setup: `scaling_sweep.py`. The table was measured with the legacy setup (truth, 
 | 50 | 1 → 0.87× | 3.8 cores | 9.4% | 26% | 137 ms | 378 ms | 86 | 123 | 22/25 destroyed, 38 drones |
 | 50, now | 1 → 0.98× | 1.9 cores | 3.9% | 30% | 55 ms | 110 ms | 6 | 108 | 23/25 destroyed, 39 drones |
 | 50, QUIC radio (2026-10-04) | 1 → 0.97× | 2.0 cores | 4.3% | 31% | 50 ms | 171 ms | 4.3 | 106 | 24/24 approved destroyed, 38 drones; all 50 joined within 30 s. T22 (level 3) was not approved: too few free drones could reach it in time |
+| 50, repeated ×3 (2026-10-04, 24-core host) | 1 → 0.97× | 5.3 cores | 9.9% | – | 32 ms | 65 ms | 5.2 | 106 | 24/24 in **every** run; miss 2.69 ± 0.01 m, 0 friendly fire, 0 collisions, 0 re-announces, 1.3 overruns |
+| 75, ×4 (2026-10-06, 24-core host) | 1 → 0.95× | 8.2 cores | 11.2% | 229% | 38 ms | 108 ms | 6.6 | 149 | 36.25 ± 0.43 of 37 approved; 3 of 4 runs lost one threat. 0 friendly fire, 0 collisions, 0 re-announces, 0 missed slots |
 
-All sizes: no re-announces, no conflicts, full agreement on assignments, decision latency ~1.4 s. The 16-drone run predates the sim-following protocol clock. "50, now" is after the heartbeat, idle-perception, expended-radio and slot fixes below.
+All sizes: no re-announces, no conflicts, full agreement on assignments, decision latency ~1.4 s. The 16-drone run predates the sim-following protocol clock. "50, now" is after the heartbeat, idle-perception, expended-radio and slot fixes below. The repeated row is three runs of the same seeded scenario: the outcome is **deterministic** — 24/24 destroyed, 38 drones expended and 1 threat left unapproved in every run, with a standard deviation of 0.01 m on mean miss distance. Its higher CPU figures are a different host (24 cores, i7-13700HX), not a regression; CPU and loop timing are not comparable across hosts, outcomes are.
+
+**Drone density on the approach, not CPU, is what limits swarm size (2026-10-06).** Across four runs at 75 drones the protocol is faultless — re-announcements, missed slots, over-assignment and `fuze_no_detection` are all exactly zero, agreement is 1.00, and there is no friendly fire or collision. CPU scales linearly (5.3 → 8.2 cores for 1.5× the swarm) and the simulator still reaches 0.95×. What degrades is spacing:
+
+| | 50 drones (×3) | 75 drones (×4) |
+|---|---|---|
+| Close calls (< 5 m) | 9.3 ± 0.9 | **48.8 ± 4.0** |
+| Minimum separation | 4.01 ± 0.04 m | **3.34 ± 0.08 m** |
+| Worst miss of any drone | 7.08 ± 0.31 m | **8.07 ± 0.11 m** |
+| Threats lost | 0 of 24 | 0.75 of 37 |
+
+The chain is: more drones → more mutual avoidance on the approach → worse terminal placement → the worst-placed drone lands on the **8 m kill radius**. At 75 that boundary is where the outcome is decided: runs whose worst miss was 8.05, 8.25 and 8.04 m each lost a threat, and the run at 7.96 m destroyed all 37. At 50 drones the worst miss was 7.08 m, comfortably inside, which is why seven runs there were identical. The 12 m blast keep-out still holds — what erodes is routine transit separation, not blast safety. The fix is geometric (wider slot spacing, staggered approach corridors, intercepts spread further apart), not more compute.
+
+**The swarm exhausts its drones before the threat script.** In all 7 runs at this size, 25 threats consume 38 of 50 drones and exactly one threat is detected but never approved: the ship's feasibility check correctly refuses a threat it cannot resource. Swarm size therefore has to be specified against the expected threat count, not against the number of drones that fit on the host.
 
 - **Radio traffic grew with the square of the swarm** while every drone heard every heartbeat: messages per drone doubled when the swarm doubled, about 4,300/s swarm-wide at 50 drones. Heartbeats now go to the ship only. At 50 drones that cut the messages each drone receives from 86 to 4.4 per second. It also cut host CPU from 3.8 to 3.1 cores, worst loop time from 137 to 86 ms and oldest sensor frame from 378 to 172 ms, and 23 of 25 threats were destroyed (was 22).
 - **Profile (py-spy, 50 drones).** An active drone used 4.7–5.7% of a core in its main process and ~1.5% in its radio process. An expended drone still used 1.6%, because its radio kept running. Of the main process's work, 75–80% was lidar perception: ray tracing every 10 Hz scan into the voxel map, whether the drone was idle or engaged. The control loop was 12–16%; the auction, heartbeats and telemetry barely registered.
@@ -861,7 +883,7 @@ All sizes: no re-announces, no conflicts, full agreement on assignments, decisio
   - **Where the next saving is:** fewer idle wake-ups (a slower control loop or radio process while idle). Algorithmic work has nothing left worth optimizing.
 
   How it was measured: `utime + stime` of every thread in `/proc/*/task/*/stat` inside each container, read twice 30 s apart (`docker exec`); py-spy from an image built `FROM denddron-swarm-agent` with `pip install py-spy`, run with `--pid=container:<id> --cap-add SYS_PTRACE` in blocking mode. In `--nonblocking` mode py-spy cannot tell blocked threads from busy ones and reports every waiting thread as busy. Host `perf` needs `kernel.perf_event_paranoid` ≤ 2, so Gazebo and the native Zenoh threads were not profiled below the thread level.
-- **The two remaining misses are geometry, not load.** In every 50-drone run the same drones miss the same threats by the same distances: drone_40 on T7 by 8.3–8.7 m, drone_48 on T22 by 10.4–11 m. That was true before and after the CPU fixes, so it isn't CPU starvation, as first assumed. It's probably an optimistic ETA bid or crowding on the way; it still needs investigating.
+- **The two long-standing misses are fixed (2026-10-04).** They used to reproduce identically in every 50-drone run: drone_40 on T7 by 8.3–8.7 m, drone_48 on T22 by 10.4–11 m, before and after the CPU fixes, so not CPU starvation. Across 7 runs at 50 drones (1 + 3 baseline, 3 with `consensus`) no such miss occurs: every approved threat is destroyed and the worst miss of any drone is 6.75–7.50 m. **Why:** they were an artefact of timed detonation. A drone latches on arrival ~2.8 m short of the engagement point, on the side it came from, so firing at the ordered instant missed by that offset plus any ETA error. The proximity fuze fires at measured closest approach instead, which removes the offset entirely — the same change that halved mean miss distance at 8 drones (2.84 → 1.17 m).
 
 ### Tools (`tools/comms/`)
 
