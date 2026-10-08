@@ -74,7 +74,8 @@ COLUMNS = ["profile", "condition", "netem", "rep", "rtf", "drones", "threats", "
            "gnss_spoof_reports",
            "hb_rx_per_s_at_ship", "env", "wall_s"]
 # Resource columns, sampled during the run (Sampler); see scaling_sweep.py.
-RESOURCE_COLUMNS = ["rtf_measured", "startup_s", "host_cpu_pct", "drone_cpu_pct", "drone_mem_mb", "gazebo_cpu_pct",
+RESOURCE_COLUMNS = ["rtf_measured", "startup_s", "host_cpu_pct", "drone_cpu_pct", "drone_mem_mb",
+                    "drone_mem_mb_max", "swarm_mem_gb_max", "gazebo_cpu_pct",
                     "sim_bus_cpu_pct", "ship_cpu_pct", "loop_p99_ms_max", "overruns", "sensor_age_max_ms",
                     "drone_rx_msgs_per_s", "drone_tx_bytes_per_s", "ship_rx_msgs_per_s"]
 AGGREGATE = ["destroyed", "kill_ratio", "award_latency_ms_mean", "reannounces", "over_assigned", "missed_slots",
@@ -176,7 +177,13 @@ class Sampler(threading.Thread):
             "wall": wall, "sim": state["sim_time"],
             "host_cpu": sum(c for _, c, _ in containers.values()),
             "drone_cpu": [c for d, c, _ in agents if d in live],
-            "drone_mem": [m for _, _, m in agents],
+            # Live drones only, like drone_cpu: an expended drone has closed its radio and
+            # gone idle, so averaging it in understates what an active drone needs (at 75
+            # drones, 62 of 75 were expended by the end, and the mean read 85 MB against
+            # ~130 MB actually resident).
+            "drone_mem": [m for d, _, m in agents if d in live],
+            # Every agent container, expended included: the total is what has to fit in RAM.
+            "swarm_mem": sum(m for _, _, m in agents),
             **{k: containers.get(inst.prefix + k, (None, None))[1] for k in ("gazebo_simulator", "sim_bus", "ship")},
             "loop_p99": [t.get("loop_p99_ms") for t in tel if t.get("loop_p99_ms") is not None],
             "overruns": sum(t.get("overruns") or 0 for t in tel),
@@ -197,6 +204,8 @@ class Sampler(threading.Thread):
             "host_cpu_pct": mean([x["host_cpu"] for x in s]),
             "drone_cpu_pct": mean(flat("drone_cpu")),
             "drone_mem_mb": mean(flat("drone_mem")),
+            "drone_mem_mb_max": round(max(flat("drone_mem"), default=0), 1) or None,
+            "swarm_mem_gb_max": round(max((x["swarm_mem"] for x in s), default=0) / 1024, 2) or None,
             "gazebo_cpu_pct": mean([x["gazebo_simulator"] for x in s if x["gazebo_simulator"] is not None]),
             "sim_bus_cpu_pct": mean([x["sim_bus"] for x in s if x["sim_bus"] is not None]),
             "ship_cpu_pct": mean([x["ship"] for x in s if x["ship"] is not None]),
