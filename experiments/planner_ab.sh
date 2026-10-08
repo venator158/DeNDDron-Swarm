@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# CLAIM: ORCA's greedy projection dead-ends at zero velocity in crowds; APF with
-#        goal-proximity repulsion fade does not.
+# QUESTION: does ORCA's greedy projection dead-end at zero velocity in crowds, where
+#           APF with goal-proximity repulsion fade does not?
+# RESULT (2026-10-08): no dead-end at 50 drones; ORCA's worst miss is lower but it
+#           packs drones 3.6x tighter. See README, Spatial queue.
 #
 # Why: this is asserted in the README with no measurement behind it.  The failure is
 # predicted to appear in dense swarms, so it is run at two sizes.

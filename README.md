@@ -540,7 +540,7 @@ Timed detonation depends on every drone's clock and on the drone sitting exactly
 - **Job-mates.** Objects already in range are recorded as known: the spatial queue keeps non-job drones more than 12 m away, so these are job-mates (or the ship). The record is taken at the first scan at which the job's track puts the threat within range + 2 m of the drone itself, or at arming if that is earlier. At the simulation's threat speeds (2.5–4.5 m/s), the threat is already 5–9 m away when the window opens, inside the 10 m range, and would otherwise be taken for a job-mate. A first version timed the record on the threat's distance to the engagement point; after a manoeuvre a drone had stopped 3 m short of the new point on the threat's side, took the threat for a mate, and held.
 - **Arming.** The fuze fires only during `t_engage ± FUZE_WINDOW_S` (2 s), in the drone's synchronized time.
 - **Trigger.** A *new* track that lies within `FUZE_GATE_M` (5 m) of the threat position predicted from the job's track (job updates, so a manoeuvre updates it) fires the fuze:
-  - `FUZE_FIRE=cpa` (default): at its closest approach, if that is within the kill radius (8 m). The closest approach is when the track starts moving away, its velocity fitted to its positions over the last 0.3 s. Range alone grows only quadratically there; a range threshold fired 0.2–0.3 s late.
+  - `FUZE_FIRE=cpa` (default): at its closest approach, if that is within the kill radius (8 m). The closest approach is when the track starts moving away, its velocity fitted to its positions over the last 0.3 s. Range alone grows only quadratically there; a range threshold fired 0.2–0.3 s late. (That was a range-threshold design. The implemented `FUZE_FIRE=radius`, which fires on entering the kill radius, measured far worse: 7.44 m mean miss against 1.21 m for `cpa`; see [Scaling](#scaling).)
   - `FUZE_FIRE=radius`: as soon as it is within the kill radius.
   - Closing speed (Doppler) is not used to tell threats from drones: at the simulation's scaled speeds they overlap.
 - **Fallback** when the window closes with no detection (`FUZE_FALLBACK`): `hold` (default) does not detonate; the drone reports `no_detection`, holds position and becomes free. `timed` detonates at the window's close. If no scans arrive at all (sensor off), the same fallback applies half a second after the window.
@@ -1298,6 +1298,8 @@ Built on branch `rdl` (2026-10-04) as `LOCALIZATION=rdl`; see [Localization and 
 
 RDL fixes the errors where `coop` failed (peer-only drones beyond anchor range). But its covariance is too small everywhere live (NEES 3–41), and the drones use their σ in the no-fly barrier, the fuze gate and the intruder check.
 
+**Repeated with GNSS on and off (2026-10-08, `experiments/rdl_vs_coop.sh`, `uwb_short`, 3 repeats per arm):** with `GNSS=0`, RDL destroys 8/8 in every run against 7.33 for `coop` and 6 for anchors-only, at a p95 error of 0.78 m against 9.2 m and 91.5 m. Its live overconfidence persists (NEES 15). With GNSS on, all three destroy 8/8. Full table in [Sensing and ship-link sweep](#sensing-and-ship-link-sweep).
+
 **Payload:** 150 B per exchange plus a 26 B reply, against the record's 64 B. float16 for the covariance and factor changed nothing in simulation. It needs extended frames, and the channel then carries ~860 instead of 1000 exchanges/s (`rdl_payload_bytes`, `rdl_exchange_airtime_s` in the record). Expanding the payload is what makes RDL possible at all; the difference it buys is the table above.
 
 **Open (next steps for RDL):**
@@ -1305,7 +1307,7 @@ RDL fixes the errors where `coop` failed (peer-only drones beyond anchor range).
   - an observability-constrained update (the linearization lets peers "observe" directions only anchors can);
   - a consistency check per pair that falls back to covariance intersection when the pair's innovations run high;
   - fewer peer updates between well-anchored drones (tried as a hard rule: it made the unit results worse).
-- **Measure at scale:** 50 drones (channel load and CPU) and with repeats, before RDL can become the default.
+- **Measure at scale:** 50 drones (channel load and CPU), before RDL can become the default. Repeats at 15 drones are done (above).
 
 ### 5. GNSS as comparator and fallback — done
 
