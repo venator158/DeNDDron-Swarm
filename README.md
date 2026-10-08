@@ -826,6 +826,20 @@ What this points at:
 - **Ship-link loss was the biggest threat to the kill rate.** At 30 % loss, confirmed drones never heard their confirmation and gave up after the old 3 s timeout, and lost orders left threats without bidders. **Fixed** (2026-10-04, see [Engagement protocol](#engagement-protocol)): `ship_loss30`, `ship_outage` and `combined` now destroy 8/8.
 - **The UWB filters trusted the record's noise figure.** When real noise was 3× worse, they became overconfident and re-locked repeatedly. **Fixed** by the robust filter (2026-10-04, `UWB_FILTER=robust`): `uwb_noise` NEES 24.8 → 2.0–2.1, re-locks 86 → 0–2, worst error 18.6 → 9.6–10.2 m; `uwb_nlos` worst error 14.0 → 2.7 m, NEES 2.5 → 1.6.
 - **Peer-only localization beyond anchor range is not safe yet** (`uwb_short`): errors reached tens of metres while the filters claimed sub-metre accuracy. This is the open recursive decentralized localization (RDL) item in [Known limitations](#known-limitations).
+- **RDL vs coop vs anchors-only, measured live (2026-10-08, `experiments/rdl_vs_coop.sh`, `uwb_short`, 15 drones, 8 threats, 3 repeats per arm).** GNSS fallback (on by default) steps in when the anchors are out of range, so it masks the difference; with `GNSS=0` the comparison tests peer fusion alone:
+
+  | | anchors, GNSS off | coop, GNSS off | **rdl, GNSS off** | anchors, GNSS on | coop, GNSS on | rdl, GNSS on |
+  |---|---|---|---|---|---|---|
+  | Destroyed (of 8) | **6** every run | 7.33 (6, 8, 8) | **8** every run | 8 | 8 | 8 |
+  | Position error p95 | 91.5 m | 9.2 m | **0.78 m** | 2.14 m | 2.22 m | 0.89 m |
+  | Position error max | up to 464 m | up to 64 m | **3.1 m** | 2.7 m | 3.1 m | 2.4 m |
+  | NEES (2.0 = honest) | 20 | 51 | 15 | 2.0 | 2.0 | 1.14 |
+  | Within the 95 % ellipse | 79 % | 78 % | 59 % | 94 % | 93 % | 98 % |
+
+  - **Without GNSS, peer fusion decides kills:** anchors-only loses 2 of 8 every run (drones beyond anchor range drift by tens to hundreds of metres), coop loses some, RDL none.
+  - **RDL is ~12× more accurate than coop** in that condition (p95 0.78 m vs 9.2 m). Coop's overconfidence reproduces (NEES 51).
+  - **RDL is accurate but not yet consistent live:** NEES 15 against an honest 2.0, and only 59 % of errors inside its 95 % ellipse, although the unit tests show it consistent. The gap between the tests and the live system is open.
+  - **With GNSS available** all three destroy 8/8; RDL is still the most accurate and honest (NEES 1.14). So RDL's extra radio cost (802.15.4z extended frames) is justified where GNSS can be denied, which is the case UWB is there for.
 - **The radar is robust** to misses, clutter and 0.1 s latency, but noisier ranging doubles the misses.
 
 ### Spatial queue

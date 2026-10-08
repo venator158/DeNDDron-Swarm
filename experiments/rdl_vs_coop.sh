@@ -16,15 +16,19 @@ CLAIM="consistent peer fusion (rdl) vs variance-floored peer fusion (coop)"
 check_images
 need_arp 15
 CONDITIONS="${CONDITIONS:-uwb_short}"
+# GNSS fallback (on by default since 2026-10-04) steps in when the anchors are out of
+# range, so with it on, coop is never left on peers alone and the failure RDL was built
+# for does not occur.  GNSS=0 isolates peer fusion; GNSS=1 is the as-deployed default.
+GNSS="${GNSS:-0}"
 
 for mode in coop rdl anchors; do
-  run_sweep "results/rdl_vs_coop/$mode" \
+  run_sweep "results/rdl_vs_coop/gnss${GNSS}_$mode" \
     python3 tools/comms/sensing_sweep.py \
       --rtf 3 --drones 15 --threats 8 --seed "$SEED" \
       --conditions $CONDITIONS \
       --repeats "$REPEATS" --parallel "$PARALLEL" \
-      --env "LOCALIZATION=$mode" \
-      --out "results/rdl_vs_coop/$mode"
+      --env "LOCALIZATION=$mode" "GNSS=$GNSS" \
+      --out "results/rdl_vs_coop/gnss${GNSS}_$mode"
 done
 
 # anchors = the floor (no peer fusion at all): if coop and rdl do not beat it
