@@ -906,7 +906,20 @@ The chain is: more drones → more mutual avoidance on the approach → worse te
   - **Where the next saving is:** fewer idle wake-ups (a slower control loop or radio process while idle). Algorithmic work has nothing left worth optimizing.
 
   How it was measured: `utime + stime` of every thread in `/proc/*/task/*/stat` inside each container, read twice 30 s apart (`docker exec`); py-spy from an image built `FROM denddron-swarm-agent` with `pip install py-spy`, run with `--pid=container:<id> --cap-add SYS_PTRACE` in blocking mode. In `--nonblocking` mode py-spy cannot tell blocked threads from busy ones and reports every waiting thread as busy. Host `perf` needs `kernel.perf_event_paranoid` ≤ 2, so Gazebo and the native Zenoh threads were not profiled below the thread level.
-- **The two long-standing misses are fixed (2026-10-04).** They used to reproduce identically in every 50-drone run: drone_40 on T7 by 8.3–8.7 m, drone_48 on T22 by 10.4–11 m, before and after the CPU fixes, so not CPU starvation. Across 7 runs at 50 drones (1 + 3 baseline, 3 with `consensus`) no such miss occurs: every approved threat is destroyed and the worst miss of any drone is 6.75–7.50 m. **Why:** they were an artefact of timed detonation. A drone latches on arrival ~2.8 m short of the engagement point, on the side it came from, so firing at the ordered instant missed by that offset plus any ETA error. The proximity fuze fires at measured closest approach instead, which removes the offset entirely — the same change that halved mean miss distance at 8 drones (2.84 → 1.17 m).
+- **The two long-standing misses are fixed (2026-10-04).** They used to reproduce identically in every 50-drone run: drone_40 on T7 by 8.3–8.7 m, drone_48 on T22 by 10.4–11 m, before and after the CPU fixes, so not CPU starvation. Across 7 runs at 50 drones (1 + 3 baseline, 3 with `consensus`) no such miss occurs: every approved threat is destroyed and the worst miss of any drone is 6.75–7.50 m. **Not the fuze.** An earlier version of this note credited the proximity fuze. A controlled run (2026-10-08, `experiments/fuze_ab.sh`, 3 repeats) disproves it: with the fuze **off** (timed detonation), 50 drones still destroy 24/24 with a worst miss of 6.83 m. The misses were removed by some other change since (the architecture defaults, the 4 m stack spacing, or the no-fly zone are candidates); which one is not yet measured.
+
+- **Proximity fuze vs timed detonation, controlled (2026-10-08, `experiments/fuze_ab.sh`, 3 repeats per arm, seed 42).**
+
+  | | 8 drones, fuze | 8 drones, timed | 50 drones, fuze | 50 drones, timed |
+  |---|---|---|---|---|
+  | Destroyed | 4/4 | 4/4 | 24/24 | 24/24 |
+  | Miss mean | **1.16 ± 0.02 m** | 2.83 ± 0.03 m | **2.66 ± 0.05 m** | 3.25 ± 0.01 m |
+  | Miss max | 2.59 m | 2.90 m | 6.70 m | 6.83 m |
+  | Timing error vs ideal | +0.07 s | −0.93 s | −0.21 s | −0.53 s |
+
+  The fuze cuts mean miss by 59 % at 8 drones but only 18 % at 50: crowding on the approach eats the gain (see the density note above). In these scenarios it buys **margin, not kills** — timed detonation also destroyed everything. That margin is what matters near the 8 m kill radius, where the 75-drone runs lost threats.
+
+  **Firing rule** (8 drones, fuze on): `cpa` misses by 1.21 m, `radius` by **7.44 m**. `radius` fires the moment the threat enters the kill radius, ~2.9 s early, so it lands at the edge of the 8 m radius and only just kills. The gap is ~6.2 m, far more than the 0.2–0.3 s / ~0.8 m figure in `fuze.py`'s docstring, which describes a different (range-threshold) design.
 
 ### Tools (`tools/comms/`)
 
