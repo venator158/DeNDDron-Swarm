@@ -476,6 +476,18 @@ Measured, 8 drones, 4 level-1 threats, `--rtf 3` (wind 5 m/s with 1.5 m/s gusts,
 | anchors, radar | wind + jammer | 4/4 | 2.92 / 4.60 m | 1.55 / **7.4 / 11.3 m** | 2.3 | 90 % |
 | coop, radar | wind + jammer | 4/4 | 2.76 / 3.55 m | **0.16 / 0.36 / 0.76 m** | 2.5 | 90 % |
 
+**Where the miss distance actually goes (2026-10-08, `experiments/legacy_split.sh`).** Changing one legacy setting at a time from the current defaults (8 drones, 4 threats, seed 42, `--rtf 3`, 3 repeats per arm; miss sd ≤ 0.04 m):
+
+| Arm | Miss mean / max | Closest approach to ship | Intercept range |
+|---|---|---|---|
+| current (coop, radar, 50 m zone) | 1.19 / 2.52 m | 58.7 m | 104.9 m |
+| localization = truth | 1.20 / 2.57 m | 58.7 m | 104.6 m |
+| perception = lidar | 1.25 / 2.60 m | 58.7 m | 104.4 m |
+| **no-fly zone off** | **0.38 / 0.49 m** | **31.4 m** | **91.5 m** |
+| full legacy | 0.34 / 0.49 m | 31.4 m | 91.5 m |
+
+Every arm destroyed 4/4. The ~0.8 m gap between legacy and current is the **no-fly zone**, not localization or perception: estimating position from UWB and sensing with radar cost nothing measurable, while the zone moves intercepts ~13 m further out and keeps every drone at least 58.7 m from the ship instead of 31.4 m. That is also why the calm-air rows of the table above, measured before the zone was the default, miss by only ~0.3 m. The mechanism is not yet measured; localization is ruled out (with the zone off, position error is lower, and perfect position does not help), so the engagement geometry further out is the likely cause.
+
 Perception alone, truth localization (`scaling_sweep.py`, sampled over the run):
 
 | | 8 drones lidar | 8 drones radar | 50 drones lidar | 50 drones radar |
