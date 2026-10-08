@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# CLAIM: tracking cross-covariances (RDL, Luft et al. 2018) keeps peer-only
-#        localization consistent where coop becomes overconfident.
+# QUESTION: does tracking cross-covariances (RDL, Luft et al. 2018) keep peer-only
+#           localization accurate and consistent where coop becomes overconfident?
+# RESULT (2026-10-08, GNSS=0): far more accurate (p95 0.78 vs 9.2 m) and 8/8 vs 7.33,
+#           but still overconfident live (NEES 15). See README, Sensing sweep.
 #
 # Why: rdl.py is unit-tested but has never run live.  uwb_short is the condition it
 # was built for: with 80 m UWB range the anchors are out of reach, and coop reached

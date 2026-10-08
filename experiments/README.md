@@ -11,14 +11,15 @@ bash experiments/fuze_ab.sh               # 3 repeats per arm, seed 42
 REPEATS=5 bash experiments/fuze_ab.sh     # more repeats where a cell varies
 ```
 
-| Script | Claim it tests | Runtime |
-|---|---|---|
-| `fuze_ab.sh` | the proximity fuze halves miss distance, and makes clock sync mandatory | ~35 min |
-| `rdl_vs_coop.sh` | RDL stays consistent where `coop` becomes overconfident (`uwb_short`) | ~40 min |
-| `planner_ab.sh` | ORCA dead-ends in crowds; APF does not | ~35 min |
-| `clock_sync.sh` | `none`/`ttg`/`master`/`consensus` under skewed clocks | ~25 min |
-| `radio_degradation.sh` | kill rate under loss and delay; where the bandwidth cliff is | ~40 min |
-| `scaling.sh` | density, not computation, limits swarm size | ~60 min |
+| Script | Question it tests | Result so far | Runtime |
+|---|---|---|---|
+| `legacy_split.sh` | which legacy setting causes the old-vs-new difference? | 8 Oct: the no-fly zone (miss 1.19 → 0.38 m); localization and perception change nothing | ~20 min |
+| `fuze_ab.sh` | does the proximity fuze cut miss distance? | 8 Oct: −59 % at 8 drones, −18 % at 50; kills unchanged; `radius` 7.44 m vs `cpa` 1.21 m | ~35 min |
+| `rdl_vs_coop.sh` | does RDL beat `coop` beyond anchor range (`uwb_short`)? | 8 Oct, GNSS off: 8/8 vs 7.33 vs 6 (anchors); p95 0.78 vs 9.2 m; still overconfident (NEES 15) | ~40 min |
+| `planner_ab.sh` | does ORCA dead-end in crowds where APF does not? | 8 Oct: no dead-end at 50; ORCA worst miss 5.85 vs 6.96 m, but 3.6× the close calls | ~35 min |
+| `clock_sync.sh` | which sync mode under skewed clocks? | not yet run as a script (single runs 4 Oct: `none` 2/4, others 4/4) | ~25 min |
+| `radio_degradation.sh` | kill rate under loss and delay; where is the bandwidth cliff? | not yet run as a script (single runs 4 Oct: 24 kbit/s 1/4) | ~40 min |
+| `scaling.sh` | what limits swarm size? | not yet run as a script (4–6 Oct: density, not CPU; 100 drones exceeds 15 GB) | ~60 min |
 
 Times assume `REPEATS=3` and one cell at a time.
 
