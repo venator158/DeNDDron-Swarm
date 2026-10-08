@@ -82,7 +82,7 @@ bash scripts/run_swarm.sh 8 --threats 4 --rtf 3 --localization truth --perceptio
 | `--threats K` | 0 (radar off) | threats the ship's radar generates; drones get no static goals |
 | `--threat-interval S` | 30 | mean sim seconds between detections |
 | `--first-threat S` | 20 | sim seconds before the first detection |
-| `--algorithm apf\|orca` | `apf` | path planner (APF with goal-proximity repulsion fade; ORCA dead-ends in crowds, see [Spatial queue](#spatial-queue)) |
+| `--algorithm apf\|orca` | `apf` | path planner (APF with goal-proximity repulsion fade; ORCA packs drones tighter, see [Spatial queue](#spatial-queue)) |
 | `--seed S` | 42 | spawn layout and threat scenario |
 | `--maneuver-p P` | 0 | probability that a threat turns once mid-flight (`THREAT_MANEUVER_P`) |
 | `--localization coop\|anchors\|truth` | `coop` | how drones know x, y: UWB anchors + peers, anchors only, or the simulator's truth (legacy) (see [Localization and perception](#localization-and-perception)) |
@@ -852,7 +852,19 @@ Results, 50 drones, 25 threats, real time, APF planner:
 With 8 drones: 4/4 destroyed at 92 m. Manoeuvring missiles (each turns once, points shift 7–27 m): 3/3 destroyed; before, the largest shift was a miss.
 
 What it took, from traced flights:
-- **Planner.** ORCA's greedy solver dead-ends at zero velocity when boxed in (e.g. by a drone parked on the route), so APF is now the default. APF's repulsion fades out over the last 10 m to the goal; otherwise neighbours near a goal push the drone away forever.
+- **Planner.** ORCA's greedy solver dead-ended at zero velocity when boxed in (e.g. by a drone parked on the route) in the earlier lidar setup with horizontal slots, so APF became the default. APF's repulsion fades out over the last 10 m to the goal; otherwise neighbours near a goal push the drone away forever.
+
+  **Re-measured on the current architecture (2026-10-08, `experiments/planner_ab.sh`, seed 42):** the dead-end no longer reproduces.
+
+  | | 8 drones APF | 8 drones ORCA | 50 drones APF (3 runs) | 50 drones ORCA (2 runs) |
+  |---|---|---|---|---|
+  | Destroyed | 4/4 | 4/4 | 24/24 | 24/24 |
+  | Missed slots | 0 | 0 | 0 | 0 |
+  | Miss mean / max | 1.21 / 2.56 m | 1.19 / 2.51 m | 2.67 / 6.96 m | 2.54 / **5.85 m** |
+  | Close calls (< 5 m) | 0 | 0 | 8.3 | **30.0** |
+  | Minimum separation | – | – | 3.99 m | **3.49 m** |
+
+  ORCA places drones slightly better (worst miss 1.1 m lower) but packs them much tighter (3.6× the close calls). A third 50-drone ORCA run failed at startup (roster stalled at 43/50 before any tasking), unrelated to the planner. Whether ORCA's better worst-case miss recovers the threats lost at 75 drones, or its tighter packing cancels the gain, is not yet measured.
 - **Vertical slots.** Drones in a horizontal ring pushed each other 6–10 m off their slots.
 - **Speed-aware planning.** Routes that assumed a standing start put hold points inside the stopping distance of a cruising drone.
 
