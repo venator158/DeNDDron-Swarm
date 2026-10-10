@@ -20,6 +20,7 @@ REPEATS=5 bash experiments/fuze_ab.sh     # more repeats where a cell varies
 | `clock_sync.sh` | which sync mode under skewed clocks? | 10 Oct, 3 runs: `none` 3/4 every run (fuze never detects); ttg, master, consensus 4/4 every run; consensus bound covers 99%, master 82–92% | ~25 min |
 | `radio_degradation.sh` | kill rate under loss and delay; where is the bandwidth cliff? | 10 Oct, 3 runs: loss up to 30% and 200 ms delay 4/4; 64 and 48 kbit/s 4/4; cliff below: 32 kbit/s 2/4, 24 kbit/s 1/4, identical in every run | ~40 min |
 | `scaling.sh` | what limits swarm size? | not yet run as a script (4–6 Oct: density, not CPU; 100 drones exceeds 15 GB) | ~60 min |
+| `scale_stress.sh` | do the radio and clock findings hold at 50 drones? | 10 Oct, 3 runs: no impairment 23–24/24; 256 and 128 kbit/s collapse to 2–5/25 (cliff far above the 8-drone one); skewed `none` 8–9/25, `consensus` 24/24 every run | ~75 min |
 
 Times assume `REPEATS=3` and one cell at a time.
 

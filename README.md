@@ -628,6 +628,15 @@ Measured (8 drones, 4 level-1 threats, `--rtf 3`; skewed = ±500 ppm drift and �
 
   This makes the clock requirement harder, not softer, and it arrived in the same change that halved miss distance. **A sync mode is now effectively mandatory whenever clocks are not perfect:** `ttg`, `master` and `consensus` all restored 4/4 in every run. They differ in what the drone knows about its own error: consensus's bound covered the true error 98.5–99.8% of the time, master's 82–92%, and ttg gives no bound. A drone knows its own error bound, so widening the arming window when the bound is large, or declining the job, would make the failure graceful again; neither is implemented.
 
+- **At 50 drones the cost of no sync grows to two thirds of the threats** (`experiments/scale_stress.sh`, 2026-10-10; 50 drones, ~25 threats, real time, same skew, 3 runs each, results in `results/scale_stress/skewed_*`):
+
+  | 50 drones, skewed | Destroyed per run | `fuze_no_detection` per run | Sync error (mean) | Drone rx msgs/s |
+  |---|---|---|---|---|
+  | `none` | **9/24, 8/25, 9/25** | 15, 18, 20 | 1.54 s | ~5 |
+  | `consensus` | **24/24, 24/24, 24/24** | 0 | 38 ms (bound covers 95–97%) | ~24 |
+
+  With 8 drones `none` lost 1 threat in 4; with 50 it loses about 2 in 3. Each drone draws its own clock error, and a bigger swarm assigns more threats to drones whose error exceeds the fuze's ±2 s arming window. Consensus restores every kill, at about 5× the messages per drone (the O(N²) beacon cost below).
+
 - All three modes remove the clock error from detonation timing. What remains is the 20 ms sensor-frame step: decisions run on frames.
 - `consensus` reached ~4 ms within 10 s of the first reports and 1.4 ms within 20 s (steps onto the ship's estimate, then slews). With the ship's radio jammed (100% loss) for 90 s of sim time, drones kept agreeing with each other within 1–4 ms and with ship time within 0.5–2.8 ms on average; the bound grew from ~8 to ~13 ms and covered every report; on restoration they re-anchored within 10 s. The evaluation stream (`sim/clock_eval`, onboard) kept measuring through the jam.
 - **Radio cost of `consensus`** (`scaling_sweep.py`, `--rtf 3`, sampled over the run; all threats destroyed, no friendly fire):
@@ -759,7 +768,18 @@ The 2026-10-10 rows are `experiments/radio_degradation.sh`: 3 runs per condition
   - The result at 24 kbit/s is 3 of 4 threats never fully assigned and 7 re-announcements (32 kbit/s: 2 and 4). (The latency figures cover only the threats that did assign, so they are not comparable with the earlier 17–19 s averaged over more.)
   - **Why it regressed:** per-drone telemetry now carries localization and clock fields, and the QUIC control plane adds handshake and acknowledgement traffic. Both are charged against the same 24 kbit/s budget. Consensus beacons, off in this run, would add more.
 
-  The fix is less background traffic, not QoS: specify the radio above 64 kbit/s, or make telemetry throttle itself under congestion.
+- **At 50 drones the cliff moves far above 256 kbit/s** (`experiments/scale_stress.sh`, 2026-10-10; 50 drones, ~25 threats, real time so netem applies as written, 3 runs each, results in `results/scale_stress/radio`):
+
+  | 50 drones | Destroyed per run | Never fully assigned | Re-announces |
+  |---|---|---|---|
+  | no impairment | 23/24, 24/24, 24/24 | 0 | 0 |
+  | 256 kbit/s | **3/25, 3/25, 5/25** | 20–22 | 40–44 |
+  | 128 kbit/s | **2/25, 3/25, 4/25** | 21–23 | 42–46 |
+  | 64 kbit/s | **0/15, 6/22, 4/17** | 13–16 | 26–32 |
+
+  Each drone's own application traffic is small (1.1–1.9 kB/s, 9–15 kbit/s, from telemetry `tx_bytes_per_s`), so the swarm should fit in 256 kbit/s per radio if every message went out once. **Likely mechanism, not yet measured on the wire:** the radio is peer-to-peer with direct links, so a publication is sent once per connected subscriber, and the bytes on each radio grow with the number of peers. At 8 drones that is ~7 copies, consistent with a cliff near 40 kbit/s; at 50 it is ~49. Measuring per-interface bytes (`/sys/class/net/*/statistics/tx_bytes`) inside a drone would confirm or refute it.
+
+  The fix is less background traffic, not QoS: specify the radio with the swarm size in mind, make telemetry throttle itself under congestion, or send routine traffic once (multicast or via a router) rather than once per peer.
 - **`tuned` vs `default`.** No meaningful difference in any condition, so `default` stays the default.
 - **Impairment method.** `degrade_radio.sh` impairs only UDP. The earlier version impaired all traffic on the radio interface, including the dashboard's TCP connection (Docker forwards `:8080` to the ship's radio address). At 64 kbit/s one dashboard request then took 1.2 s instead of 1 ms, which is why the earlier tuned 64 kbit/s run failed.
 
