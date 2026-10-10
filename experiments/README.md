@@ -17,8 +17,8 @@ REPEATS=5 bash experiments/fuze_ab.sh     # more repeats where a cell varies
 | `fuze_ab.sh` | does the proximity fuze cut miss distance? | 8 Oct: −59 % at 8 drones, −18 % at 50; kills unchanged; `radius` 7.44 m vs `cpa` 1.21 m | ~35 min |
 | `rdl_vs_coop.sh` | does RDL beat `coop` beyond anchor range (`uwb_short`)? | 8 Oct, GNSS off: 8/8 vs 7.33 vs 6 (anchors); p95 0.78 vs 9.2 m; still overconfident (NEES 15) | ~40 min |
 | `planner_ab.sh` | does ORCA dead-end in crowds where APF does not? | 8 Oct: no dead-end at 50; ORCA worst miss 5.85 vs 6.96 m, but 3.6× the close calls | ~35 min |
-| `clock_sync.sh` | which sync mode under skewed clocks? | not yet run as a script (single runs 4 Oct: `none` 2/4, others 4/4) | ~25 min |
-| `radio_degradation.sh` | kill rate under loss and delay; where is the bandwidth cliff? | not yet run as a script (single runs 4 Oct: 24 kbit/s 1/4) | ~40 min |
+| `clock_sync.sh` | which sync mode under skewed clocks? | 10 Oct, 3 runs: `none` 3/4 every run (fuze never detects); ttg, master, consensus 4/4 every run; consensus bound covers 99%, master 82–92% | ~25 min |
+| `radio_degradation.sh` | kill rate under loss and delay; where is the bandwidth cliff? | 10 Oct, 3 runs: loss up to 30% and 200 ms delay 4/4; 64 and 48 kbit/s 4/4; cliff below: 32 kbit/s 2/4, 24 kbit/s 1/4, identical in every run | ~40 min |
 | `scaling.sh` | what limits swarm size? | not yet run as a script (4–6 Oct: density, not CPU; 100 drones exceeds 15 GB) | ~60 min |
 
 Times assume `REPEATS=3` and one cell at a time.
