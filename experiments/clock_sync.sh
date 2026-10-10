@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# CLAIM: with the proximity fuze on, an unsynchronized skewed clock does not fire late
-#        -- it does not fire at all.  A sync mode is mandatory, and consensus is the
-#        only one whose self-reported error bound is honest.
-#
-# Why: the fuze arms for +-2 s in SYNCHRONIZED time.  A drone 3 s out opens its window
-# at the wrong moment and never declares a contact (fuze_no_detection).
+# QUESTION: with the proximity fuze on, what does an unsynchronized skewed clock cost,
+#           and which sync mode fixes it?
+# RESULT (2026-10-10, 3 runs, 8 drones): `none` 3/4 in every run (the fuze arms for
+#           +-2 s in SYNCHRONIZED time, so a drone 3 s out never detects); ttg, master
+#           and consensus 4/4 in every run.  Only consensus's error bound is honest
+#           (covers 98.5-99.8% vs master 82-92%; ttg has none).
 # Read: destroyed, fuze_no_detection, sync_err_s_mean/max, sync_bound_coverage,
 #       drone_rx_msgs_per_s (the O(N^2) beacon cost of consensus).
 #
