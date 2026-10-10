@@ -612,18 +612,21 @@ Measured (8 drones, 4 level-1 threats, `--rtf 3`; skewed = ±500 ppm drift and �
 |---|---|---|---|---|---|
 | perfect, `none` | 4/4 | 18 ms | 2.83 m, 2.86 m | – | – |
 | skewed, `none` | 4/4 | 1.96 s | 4.23 m, 7.74 m | = clock error (0.2–3 s) | – |
-| **skewed, `none`, fuze on** (2026-10-04) | **2/4** | – | 0.84 m, 1.31 m | 1.50 s, 3.07 s | – |
-| **skewed, `consensus`, fuze on** (2026-10-04) | **4/4** | 0.18 s | 1.17 m, 2.47 m | **44 ms**, 3.01 s | **99.6%** |
-| **skewed, `master`, fuze on** (2026-10-04) | **4/4** | – | 1.14 m, 2.46 m | **29 ms** | **72.6%** |
+| **skewed, `none`, fuze on** (2026-10-10, 3 runs) | **3/4, 3/4, 3/4** | – | 1.40 m, 2.51 m | 1.50 s, 3.07 s | – |
+| **skewed, `ttg`, fuze on** (2026-10-10, 3 runs) | **4/4 ×3** | ≤ 0.18 s | 1.21 m, 2.63 m | **48 ms** | no bound |
+| **skewed, `master`, fuze on** (2026-10-10, 3 runs) | **4/4 ×3** | ≤ 0.15 s | 1.24 m, 2.77 m | **35 ms** | **82–92%** |
+| **skewed, `consensus`, fuze on** (2026-10-10, 3 runs) | **4/4 ×3** | ≤ 0.14 s | 1.21 m, 2.58 m | **50 ms** | **98.5–99.8%** |
 | skewed, `ttg` | 4/4 | 25 ms | 2.82 m, 2.84 m | 2.7–3.2 ms, ≤ 18 ms | no bound |
 | skewed, `master` | 4/4 | 17 ms | 2.82 m, 2.85 m | 0.5–1.4 ms, ≤ 4.8 ms | 82% |
 | perfect, `master` | 4/4 | 22 ms | 2.82 m | 0.6–1.3 ms, ≤ 2.9 ms | 83% |
 | skewed, `consensus` | 4/4 | 24 ms | 2.82 m, 2.85 m | 0.6–2.7 ms, ≤ 5.0 ms | 99.8% |
 | skewed, `consensus`, ship radio jammed for 90 s | 2/4 (the jam blocked the operator and the ship's orders) | 18 ms | 2.82 m, 2.83 m | during the jam 0.5–2.8 ms, ≤ 5.9 ms | 99.7% (100% during the jam) |
 
-- **With the proximity fuze on (the default), an unsynchronized skewed clock no longer just fires late — it does not fire at all.** The 2026-10-04 rows re-ran the same scenario with the fuze active: `skewed, none` destroyed only **2 of 4**, with `fuze_no_detection = 2`. The fuze arms for a window of ±2 s around the expected intercept, in *synchronized* time, so a drone whose clock is 3 s out opens that window at the wrong moment, never declares a contact, and the `hold` fallback leaves its charge unspent. Under timed detonation a clock error of δ produced a detonation δ late — degraded but graceful; with the fuze, an error larger than the window half-width produces nothing. (Its misses look *better*, 0.84 m, only because the two drones that fired were the two whose clocks were close enough to detect at all.)
+- **With the proximity fuze on (the default), an unsynchronized skewed clock no longer just fires late — it does not fire at all.** The 2026-10-10 rows are `experiments/clock_sync.sh` (3 runs per mode, results in `results/clock_sync/skewed_*`): `skewed, none` destroyed **3 of 4 in every run**, each time with `fuze_no_detection = 1`. (A single run on 2026-10-04 gave 2/4; the repeats put the cost at one threat per run.) The fuze arms for a window of ±2 s around the expected intercept, in *synchronized* time, so a drone whose clock is 3 s out opens that window at the wrong moment, never declares a contact, and the `hold` fallback leaves its charge unspent. Under timed detonation a clock error of δ produced a detonation δ late — degraded but graceful; with the fuze, an error larger than the window half-width produces nothing.
 
-  This makes the clock requirement harder, not softer, and it arrived in the same change that halved miss distance. **A sync mode is now effectively mandatory whenever clocks are not perfect:** `consensus` and `master` both restored 4/4. A drone knows its own error bound, so widening the arming window when the bound is large, or declining the job, would make the failure graceful again; neither is implemented.
+  The synced rows' maximum sync error (about 3 s, once 20 s in ttg) is the start-up transient before sync converges; it did not cost a kill.
+
+  This makes the clock requirement harder, not softer, and it arrived in the same change that halved miss distance. **A sync mode is now effectively mandatory whenever clocks are not perfect:** `ttg`, `master` and `consensus` all restored 4/4 in every run. They differ in what the drone knows about its own error: consensus's bound covered the true error 98.5–99.8% of the time, master's 82–92%, and ttg gives no bound. A drone knows its own error bound, so widening the arming window when the bound is large, or declining the job, would make the failure graceful again; neither is implemented.
 
 - All three modes remove the clock error from detonation timing. What remains is the 20 ms sensor-frame step: decisions run on frames.
 - `consensus` reached ~4 ms within 10 s of the first reports and 1.4 ms within 20 s (steps onto the ship's estimate, then slews). With the ship's radio jammed (100% loss) for 90 s of sim time, drones kept agreeing with each other within 1–4 ms and with ship time within 0.5–2.8 ms on average; the bound grew from ~8 to ~13 ms and covered every report; on restoration they re-anchored within 10 s. The evaluation stream (`sim/clock_eval`, onboard) kept measuring through the jam.
@@ -728,29 +731,32 @@ Setup: `degradation_sweep.py --rtf 3 --repeats 3`. Each run uses 8 drones and th
 
 | Condition | Destroyed (of 4) | Drones used | Decision latency | Re-announces | Agreement |
 |---|---|---|---|---|---|
-| **none** (2026-10-04) | **4** | 4 | **1,360 ms** | 0 | **1.00** |
-| **30% loss** (2026-10-04) | **4** | 4 | **1,548 ms** | 0 | **1.00** |
-| **200 ± 50 ms delay** (2026-10-04) | **4** | 4 | **1,756 ms** | 0 | **1.00** |
-| **64 kbit/s** (2026-10-04) | **4** | 4 | **1,555 ms** | 0 | **1.00** |
+| **none** (2026-10-10) | **4, 4, 4** | 4 | **1,351 ms** | 0 | **1.00** |
+| **10% loss** (2026-10-10) | **4, 4, 4** | 4 | **1,351 ms** | 0 | **1.00** |
+| **30% loss** (2026-10-10) | **4, 4, 4** | 4 | **1,451 ms** | 0 | **0.98** |
+| **200 ± 50 ms delay** (2026-10-10) | **4, 4, 4** | 4 | **1,803 ms** | 0 | **1.00** |
+| **64 kbit/s** (2026-10-10) | **4, 4, 4** | 4 | **1,543 ms** | 0 | **1.00** |
+| **48 kbit/s** (2026-10-10) | **4, 4, 4** | 4 | **1,741 ms** | 0 | **1.00** |
+| **32 kbit/s** (2026-10-10) | **2, 2, 2** | 2 | 2,291 ms (the threats assigned) | 4 | 1.00 |
+| **24 kbit/s** (2026-10-10) | **1, 1, 1** | 1 | 3,973 ms (the one threat assigned) | 7 | 1.00 |
 | none (earlier) | 4 | 4 | 1030 ms | 0 | 1.00 |
-| 10% loss (earlier, not re-run) | 4 | 4 | 1050 ms | 0 | 0.87–0.97 |
+| 10% loss (earlier) | 4 | 4 | 1050 ms | 0 | 0.87–0.97 |
 | 30% loss (earlier) | 4 | 4 (default) / 4.3 (tuned) | 1080 ms | 0 | 0.78–0.82 |
 | 200 ± 50 ms delay (earlier) | 4 | 4 | 1440 ms | 0 | 0.96–1.00 |
 | 64 kbit/s (earlier) | 4 | 4 | 1360 ms | 0 | 1.00 |
-| **24 kbit/s** (2026-10-04) | **1** | 1 | 3,160 ms (the one threat assigned) | 6 | 1.00 |
 | 24 kbit/s (earlier, before the current sensing/clock payloads) | 2.7–3 | 2.7–3 | 17,500–19,200 ms | 5–6 | 0.71 |
 
-The 2026-10-04 rows are single runs on the current code (rebuilt images, proximity fuze and cooperative UWB active); the "earlier" rows are kept for comparison and predate ship confirmation, which adds about 0.35 s to decision latency. **Two things changed for the better:** agreement at 30% loss went from 0.78–0.82 to **1.00**, and no condition now wastes a drone (4 used in every cell, against 4.3 for `tuned` at 30% loss before). The QUIC control plane is the likely reason — under 30% loss a third of subscriptions used to die outright (`mesh_probe.sh`: 32.3% → 0.22% with QUIC), and a drone whose subscription is dead cannot bid at all. Latency is higher across the board because these runs include ship confirmation.
+The 2026-10-10 rows are `experiments/radio_degradation.sh`: 3 runs per condition on the current code (proximity fuze and cooperative UWB active), and the three runs agreed exactly on kills in every cell. Results are in `results/radio_degradation/all`. The "earlier" rows are kept for comparison and predate ship confirmation, which adds about 0.35 s to decision latency. **Two things changed for the better:** agreement at 30% loss went from 0.78–0.82 to **1.00**, and no condition now wastes a drone (4 used in every cell, against 4.3 for `tuned` at 30% loss before). The QUIC control plane is the likely reason — under 30% loss a third of subscriptions used to die outright (`mesh_probe.sh`: 32.3% → 0.22% with QUIC), and a drone whose subscription is dead cannot bid at all. Latency is higher across the board because these runs include ship confirmation.
 
 - **Wasted drones.** Before these fixes, one run per cell spent up to 7 drones on 4 threats at 30% loss, with 3 re-announces. Three fixes brought it to 4, with no re-announces:
   - drones send each award 3 times;
   - before re-announcing, the ship also counts drones whose heartbeats say they are engaged;
   - a drone that has already heard a better award for a threat does not take it when its own auction closes.
 - **Remaining case, now fixed.** Once in 6 runs at 30% loss, two drones engaged the same threat. The worse drone never heard the better one's bid or any of its 3 award copies, although the ship heard both. That suggests the direct link between those two drones was down, which conflict repair between drones cannot fix. Ship confirmation fixes it: in 6 more runs at 30% loss, the ship settled 5 such conflicts and every run used exactly 4 drones.
-- **Bandwidth.** 64 kbit/s is fine (4/4 destroyed, decision latency 1,555 ms). At 24 kbit/s the link is overfilled by routine traffic alone, and **this has got worse, not better**: 1 of 4 destroyed on 2026-10-04 against 2.7–3 before.
+- **Bandwidth has a cliff between 48 and 32 kbit/s.** 64 and 48 kbit/s are fine (4/4 in every run; decision latency 1,543 and 1,741 ms). 32 kbit/s destroys 2 of 4 in every run, 24 kbit/s 1 of 4 in every run. The cliff sits just below the 36.4 kbit/s of background traffic measured below: once routine traffic alone fills the link, orders queue behind it. 24 kbit/s **has got worse, not better**: 1 of 4 against 2.7–3 before.
   - Measured at the ship with 8 drones and no impairment, background traffic alone is **36.4 kbit/s** (`swarm/heartbeat` 2,045 B/s + `swarm/telemetry` 2,510 B/s) — half again over the shaper, before a single order is sent. The ship must also push roster, zones, job updates and ACKs out through the same throttled interface.
   - The backlog builds in the kernel's first-in-first-out queue, not in Zenoh's, so Zenoh priorities (`tuned`) cannot move orders ahead.
-  - The result is 3 of 4 threats never fully assigned and 6 re-announcements. (The 3,160 ms latency figure covers only the single threat that did assign, so it is not comparable with the earlier 17–19 s averaged over more.)
+  - The result at 24 kbit/s is 3 of 4 threats never fully assigned and 7 re-announcements (32 kbit/s: 2 and 4). (The latency figures cover only the threats that did assign, so they are not comparable with the earlier 17–19 s averaged over more.)
   - **Why it regressed:** per-drone telemetry now carries localization and clock fields, and the QUIC control plane adds handshake and acknowledgement traffic. Both are charged against the same 24 kbit/s budget. Consensus beacons, off in this run, would add more.
 
   The fix is less background traffic, not QoS: specify the radio above 64 kbit/s, or make telemetry throttle itself under congestion.
