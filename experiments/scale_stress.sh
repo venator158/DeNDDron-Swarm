@@ -6,6 +6,8 @@
 #           256 kbit/s 3-5/25, 128 kbit/s 2-4/25, 64 kbit/s 0-6: the cliff is far above
 #           256 kbit/s (8 drones: ~40).  Skewed + none 8-9/25 (8 drones: 3/4);
 #           consensus 24/24 every run at ~5x the messages per drone.
+#           Why the cliff moves: tools/comms/fanout_probe.py measured the ship's radio
+#           sending 31 kbit/s at 8 drones and 364 kbit/s at 50 (routine traffic only).
 #
 # Why: at 8 drones the cliff sits between 48 and 32 kbit/s, just below the 36.4 kbit/s
 # of routine traffic, and skewed clocks without sync lose 1 of 4 threats in every run

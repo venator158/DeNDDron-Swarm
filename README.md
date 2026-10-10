@@ -762,7 +762,7 @@ The 2026-10-10 rows are `experiments/radio_degradation.sh`: 3 runs per condition
   - before re-announcing, the ship also counts drones whose heartbeats say they are engaged;
   - a drone that has already heard a better award for a threat does not take it when its own auction closes.
 - **Remaining case, now fixed.** Once in 6 runs at 30% loss, two drones engaged the same threat. The worse drone never heard the better one's bid or any of its 3 award copies, although the ship heard both. That suggests the direct link between those two drones was down, which conflict repair between drones cannot fix. Ship confirmation fixes it: in 6 more runs at 30% loss, the ship settled 5 such conflicts and every run used exactly 4 drones.
-- **Bandwidth has a cliff between 48 and 32 kbit/s.** 64 and 48 kbit/s are fine (4/4 in every run; decision latency 1,543 and 1,741 ms). 32 kbit/s destroys 2 of 4 in every run, 24 kbit/s 1 of 4 in every run. The cliff sits just below the 36.4 kbit/s of background traffic measured below: once routine traffic alone fills the link, orders queue behind it. 24 kbit/s **has got worse, not better**: 1 of 4 against 2.7–3 before.
+- **Bandwidth has a cliff between 48 and 32 kbit/s.** 64 and 48 kbit/s are fine (4/4 in every run; decision latency 1,543 and 1,741 ms). 32 kbit/s destroys 2 of 4 in every run, 24 kbit/s 1 of 4 in every run. The cliff sits at the ship's own routine outgoing traffic, 31 kbit/s with 8 drones (measured with `fanout_probe.py`, below): once routine traffic alone fills the ship's link, orders queue behind it. 24 kbit/s **has got worse, not better**: 1 of 4 against 2.7–3 before.
   - Measured at the ship with 8 drones and no impairment, background traffic alone is **36.4 kbit/s** (`swarm/heartbeat` 2,045 B/s + `swarm/telemetry` 2,510 B/s) — half again over the shaper, before a single order is sent. The ship must also push roster, zones, job updates and ACKs out through the same throttled interface.
   - The backlog builds in the kernel's first-in-first-out queue, not in Zenoh's, so Zenoh priorities (`tuned`) cannot move orders ahead.
   - The result at 24 kbit/s is 3 of 4 threats never fully assigned and 7 re-announcements (32 kbit/s: 2 and 4). (The latency figures cover only the threats that did assign, so they are not comparable with the earlier 17–19 s averaged over more.)
@@ -777,7 +777,14 @@ The 2026-10-10 rows are `experiments/radio_degradation.sh`: 3 runs per condition
   | 128 kbit/s | **2/25, 3/25, 4/25** | 21–23 | 42–46 |
   | 64 kbit/s | **0/15, 6/22, 4/17** | 13–16 | 26–32 |
 
-  Each drone's own application traffic is small (1.1–1.9 kB/s, 9–15 kbit/s, from telemetry `tx_bytes_per_s`), so the swarm should fit in 256 kbit/s per radio if every message went out once. **Likely mechanism, not yet measured on the wire:** the radio is peer-to-peer with direct links, so a publication is sent once per connected subscriber, and the bytes on each radio grow with the number of peers. At 8 drones that is ~7 copies, consistent with a cliff near 40 kbit/s; at 50 it is ~49. Measuring per-interface bytes (`/sys/class/net/*/statistics/tx_bytes`) inside a drone would confirm or refute it.
+  **Why: the ship's radio is the bottleneck, and its load grows with the swarm** (measured with `tools/comms/fanout_probe.py`, 2026-10-10: swarm up with no threats, routine traffic only, radio-interface byte counters over 60 s, results in `results/fanout`):
+
+  | Swarm | Drone software publishes | Drone radio sends (mean) | Ship radio sends | Ship radio receives |
+  |---|---|---|---|---|
+  | 8 drones | 0.92 kB/s | 22.5 kbit/s (3.1× the payload) | **31 kbit/s** | 78 kbit/s |
+  | 50 drones | 0.92 kB/s | 95.7 kbit/s (13× the payload) | **364 kbit/s** | 466 kbit/s |
+
+  Each drone publishes the same amount at either size, but what goes out on its radio grows with the number of peers (Zenoh framing and one copy per interested peer), 3× at 8 drones and 13× at 50. It is not one copy per peer (that would be ~49×). The ship carries the most: its outgoing traffic, 31 kbit/s at 8 drones, sits exactly at the measured cliff between 48 and 32 kbit/s, and at 50 drones it needs 364 kbit/s, more than the 256 kbit/s cell allowed. Netem shapes what each radio sends, so the ship's queue is where orders wait.
 
   The fix is less background traffic, not QoS: specify the radio with the swarm size in mind, make telemetry throttle itself under congestion, or send routine traffic once (multicast or via a router) rather than once per peer.
 - **`tuned` vs `default`.** No meaningful difference in any condition, so `default` stays the default.
@@ -980,6 +987,7 @@ The chain is: more drones → more mutual avoidance on the approach → worse te
 | `radio_probe.sh [routing] [netem\|disconnect]` | 4 radio-only peers; cuts one; reports per healthy peer the seconds it heard nobody, the worst gap and the worst process stall |
 | `onboard_probe.sh [routing] [netem\|disconnect]` | drone-like processes with both links; cuts one radio; reports the worst onboard gaps of the cut drone and a healthy one. Set `RADIO_PROCESS=1` to use the separate radio process. |
 | `cut_radio.sh <container> <network> <subnet> [netem\|disconnect] [duration]` | cuts one container's radio (used by the others) |
+| `fanout_probe.py [--sizes 8 50]` | starts the swarm with routine traffic only and reads each radio interface's byte counters: bytes on the wire vs bytes the drones publish, and the ship's load, per swarm size |
 | `chaos.py <compose log> [disconnect\|netem]` | during a live run: cuts an idle drone, then the first drone that engages, then restores the idle one |
 | `operator_bot.py [reaction_s] [duration_s] [poll_s]` | stand-in operator: approves feasible threats through the dashboard API, most urgent first |
 | `degrade_radio.sh apply "<netem args>" \| clear [container...]` | impairs the radio (UDP only) of every drone and the ship: loss, delay, rate, combinable; `DST_IP=<ip>` impairs only traffic to that address |
