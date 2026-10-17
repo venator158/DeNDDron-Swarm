@@ -855,6 +855,45 @@ python3 tools/comms/sensing_sweep.py --drones 30 --threats 15 --parallel 2 --rep
 | `radar_latency` | 8/8 | 2.51 / 5.21 m | 0.41 / 1.45 m | 1.5 | – |
 | `combined` | **4/8** | 3.28 / 5.29 m | 1.27 / 7.3 m | 10.4 | the ship-link losses as in `ship_loss30`, plus overconfidence from the UWB noise |
 
+**Repeated** (2026-10-17, `experiments/sensing.sh`: every condition 3 runs with the shipped configuration, GNSS on; then the UWB conditions 3 runs with `GNSS=0`, so the fallback cannot cover for UWB; 15 drones, 8 threats, `--rtf 3`, seed 42; results in `results/sensing/{defaults,gnss0}`):
+
+| Condition | Destroyed per run | Miss mean / max | Position error p95 (max over runs) | NEES | Notes |
+|---|---|---|---|---|---|
+| baseline | 8, 8, 8 | 2.14 / 4.73 m | 0.25–0.27 m (1.3 m) | 1.8–1.9 | – |
+| `uwb_noise` | 8, 8, 8 | 2.12 / 4.80 m | 0.89–0.95 m (11.1 m) | 2.8–3.0 | robust filter holds: NEES ~3, was 24.8 |
+| `uwb_nlos` | 8, 8, 8 | 2.08 / 4.62 m | 0.31–0.43 m (12.0 m) | 2.0–3.6 | |
+| `uwb_dropout` | 8, 8, 8 | 2.08 / 5.12 m | 0.64–0.66 m (4.4 m) | 1.5 | |
+| `uwb_short` (GNSS on) | 8, 8, 8 | 2.29 / 6.37 m | 1.7–2.9 m (3.4 m) | 1.7–2.6 | GNSS covers beyond anchor range; with `GNSS=0` see the RDL table below |
+| `uwb_jam_local` | 8, 8, 8 | 2.12 / 4.95 m | 0.22–0.26 m (2.3 m) | 1.7–1.9 | |
+| `uwb_jam_all` | 8, 8, 8 | 2.09 / 4.74 m | 1.4–2.0 m (2.9 m) | 1.6–2.0 | |
+| `ship_loss30` | **8, 8, 8** | 2.15 / 4.56 m | 0.24–0.28 m | 1.8 | was 4/8 before the confirmation fix |
+| `ship_outage` | 8, 8, 8 | 2.08 / 4.67 m | 0.27 m | 1.8–2.0 | |
+| **`radar_noise`** | **7, 7, 7** | **5.18 / 8.40 m** | 0.25–0.29 m | 1.8 | **the one condition that costs a kill**: worst miss beyond the 8 m kill radius, 2–3 fuze false triggers per run |
+| `radar_miss` | 8, 8, 8 | 2.17 / 4.71 m | 0.26–0.28 m | 1.8–2.0 | |
+| `radar_clutter` | 8, 8, 8 | 2.16 / 4.63 m | 0.25–0.31 m | 1.7–2.1 | |
+| `radar_latency` | 8, 8, 8 | 2.16 / 4.43 m | 0.23–0.28 m | 1.7–2.0 | |
+| `gnss_fallback_uwb_short` | 8, 8, 8 | 2.12 / 4.35 m | 1.1–2.3 m (3.2 m) | 1.3–2.1 | same environment as `uwb_short` above |
+| `gnss_jam` | 8, 8, 8 | 2.13 / 4.68 m | 0.25–0.26 m | 1.8–1.9 | |
+| `gnss_spoof_ramp` | 8, 8, 8 | 2.12 / 4.80 m | 0.25–0.31 m | 1.9 | spoofing reported 5 times in every run |
+| `gnss_spoof_step` | 8, 8, 8 | 2.14 / 4.67 m | 0.25–0.30 m | 1.8–1.9 | spoofing reported 5 times in every run |
+| `gnss_spoof_uwb_jam` | 8, 8, 8 | 2.12 / 4.87 m | 2.2–2.7 m (6.2 m) | 2.1–2.5 | |
+| `combined` | **8, 8, 8** | 3.09 / 6.04 m | 0.66–0.79 m (11.1 m) | 2.9–3.0 | was 4/8; 2 fuze false triggers per run (the radar noise) |
+
+With `GNSS=0` (UWB alone):
+
+| Condition | Destroyed per run | Position error p95 (max over runs) | NEES | Within 95 % ellipse |
+|---|---|---|---|---|
+| baseline | 8, 8, 8 | 0.24–0.26 m (1.3 m) | 1.7–2.0 | 95–98 % |
+| `uwb_noise` | 8, 8, 8 | 0.89–1.14 m (**16.1 m**) | 2.8–3.2 | 87–89 % |
+| `uwb_nlos` | 8, 8, 8 | 0.28–0.34 m (**22.3 m**, one run) | 1.9–2.5 | 93–95 % |
+| `uwb_dropout` | 8, 8, 8 | 0.34–0.37 m (2.2 m) | 1.7–1.9 | 95–97 % |
+| `uwb_jam_local` | 8, 8, 8 | 0.22–0.27 m (1.3 m) | 1.6–1.9 | 96–97 % |
+| `uwb_jam_all` | 8, 8, 8 | 1.1–1.5 m (5.4 m) | 1.8–2.0 | 95–97 % |
+
+- **Of 25 condition settings, only radar noise costs a kill, in every run.** The single 2026-10-03 run showed 8/8 there with doubled misses; three runs show the misses reach past the kill radius once per run.
+- **The ship-link and filter fixes hold up**: `ship_loss30` and `combined` 8/8 in every run (were 4/8), `uwb_noise` NEES ~3 (was 24.8).
+- **UWB alone handles everything except short range.** With GNSS off every UWB condition above is 8/8; brief outliers (16 m, 22 m) cost nothing. Beyond anchor range peers are the only reference, and there `coop` loses threats while RDL does not (table below).
+
 What this points at:
 - **Ship-link loss was the biggest threat to the kill rate.** At 30 % loss, confirmed drones never heard their confirmation and gave up after the old 3 s timeout, and lost orders left threats without bidders. **Fixed** (2026-10-04, see [Engagement protocol](#engagement-protocol)): `ship_loss30`, `ship_outage` and `combined` now destroy 8/8.
 - **The UWB filters trusted the record's noise figure.** When real noise was 3× worse, they became overconfident and re-locked repeatedly. **Fixed** by the robust filter (2026-10-04, `UWB_FILTER=robust`): `uwb_noise` NEES 24.8 → 2.0–2.1, re-locks 86 → 0–2, worst error 18.6 → 9.6–10.2 m; `uwb_nlos` worst error 14.0 → 2.7 m, NEES 2.5 → 1.6.
