@@ -21,6 +21,7 @@ REPEATS=5 bash experiments/fuze_ab.sh     # more repeats where a cell varies
 | `radio_degradation.sh` | kill rate under loss and delay; where is the bandwidth cliff? | 10 Oct, 3 runs: loss up to 30% and 200 ms delay 4/4; 64 and 48 kbit/s 4/4; cliff below: 32 kbit/s 2/4, 24 kbit/s 1/4, identical in every run | ~40 min |
 | `scaling.sh` | what limits swarm size? | not yet run as a script (4–6 Oct: density, not CPU; 100 drones exceeds 15 GB) | ~60 min |
 | `scale_stress.sh` | do the radio and clock findings hold at 50 drones? | 10 Oct, 3 runs: no impairment 23–24/24; 256 and 128 kbit/s collapse to 2–5/25 (cliff far above the 8-drone one); skewed `none` 8–9/25, `consensus` 24/24 every run. Cause of the radio cliff measured with `tools/comms/fanout_probe.py`: ship radio sends 31 kbit/s at 8 drones, 364 at 50 | ~75 min (+5 min probe) |
+| `sensing.sh` | do the sensing and ship-link results hold when repeated? | 17 Oct, 3 runs: 18 of 19 conditions 8/8 every run (GNSS on); UWB conditions 8/8 with GNSS off; only `radar_noise` costs a kill (7/8 every run, worst miss 8.4 m) | ~85 min (PARALLEL=2) |
 
 Times assume `REPEATS=3` and one cell at a time.
 
