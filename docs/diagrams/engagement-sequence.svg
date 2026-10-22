@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="836" class="dg" viewBox="0 0 1040 836" role="img" aria-label="Sequence diagram of one engagement: detection, operator approval, intercept choice, order, bids, deterministic assignment, award, ship arbitration, ACK and job updates, flight, fuze, detonation in the simulator and kill assessment. Decision latency is about 1.4 seconds.">
+<style>
+:root{--surface:#FFFFFF;--group:#E6ECEF;--ink:#14212B;--ink-2:#3B4B58;--muted:#5D6D79;--line:#C6D0D6;
+--accent:#0A6A8A;--accent-soft:rgba(10,106,138,0.09);--hot:#B3431B;--hot-soft:rgba(179,67,27,0.10);--f-sans:"IBM Plex Sans","Helvetica Neue",Helvetica,Arial,sans-serif;--f-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){:root{--surface:#15202A;--group:#18242E;--ink:#E2E9EE;--ink-2:#A7B6C1;--muted:#8696A2;--line:#2C3B47;
+--accent:#52B5D5;--accent-soft:rgba(82,181,213,0.13);--hot:#EE8A5E;--hot-soft:rgba(238,138,94,0.14);}}
+svg.dg{font-family:var(--f-sans)}
+.dg .bg{fill:var(--surface)}
+
+.dg text { fill: var(--ink); font-size: 12px; }
+.dg .h { font-weight: 600; font-size: 12.5px; }
+.dg .s { fill: var(--muted); font-size: 10.5px; }
+.dg .m { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.dg .mi { font-family: var(--f-mono); font-size: 11px; fill: var(--ink); }
+.dg .lbl { font-size: 10.5px; fill: var(--ink-2); }
+.dg .lbl-r { fill: var(--accent); }
+.dg .lbl-h { fill: var(--hot); }
+.dg .band-t { font-family: var(--f-mono); font-size: 10.5px; letter-spacing: 0.05em; fill: var(--muted); }
+.dg .halo { paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.dg .bx { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.2; }
+.dg .bx-r { stroke: var(--accent); stroke-width: 1.5; }
+.dg .bx-h { stroke: var(--hot); stroke-width: 1.5; }
+.dg .bx-fill-r { fill: var(--accent-soft); }
+.dg .bx-fill-h { fill: var(--hot-soft); }
+.dg .grp { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ctr { fill: none; stroke: var(--line); stroke-width: 1.4; stroke-dasharray: 5 4; }
+.dg .band-r { fill: var(--accent-soft); stroke: none; }
+.dg .note { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ln { stroke: var(--ink-2); stroke-width: 1.3; fill: none; }
+.dg .ln-thin { stroke-width: 1; opacity: 0.75; }
+.dg .ln-r { stroke: var(--accent); stroke-dasharray: 6 4; }
+.dg .ln-rs { stroke: var(--accent); }
+.dg .ln-h { stroke: var(--hot); }
+.dg .ln-d { stroke-dasharray: 2 3; }
+.dg .ln-dash { stroke-dasharray: 5 4; }
+.dg .ln-bold { stroke-width: 2.2; }
+.dg .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+.dg .grid { stroke: var(--line); stroke-width: 1; }
+.dg .mk { fill: var(--ink-2); }
+.dg .mk-r { fill: var(--accent); }
+.dg .mk-h { fill: var(--hot); }
+.dg .dot-r { fill: var(--accent); }
+.dg .dot-h { fill: var(--hot); }
+.dg .dot-i { fill: var(--ink); }
+.dg .zone { fill: var(--hot-soft); stroke: var(--hot); stroke-width: 1.3; stroke-dasharray: 5 4; }
+.dg .ring { fill: none; stroke: var(--accent-soft); }
+.dg .faint { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 3 4; }
+.dg .hull { fill: var(--ink-2); }
+
+</style>
+<rect class="bg" x="0" y="0" width="1040" height="836" rx="8"/>
+        <defs>
+          <marker id="f4a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="f4r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk-r" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <!-- headers -->
+        <rect class="bx" x="15" y="16" width="150" height="40" rx="6"/><text class="h" x="90" y="41" text-anchor="middle">Operator</text>
+        <rect class="bx bx-r" x="225" y="16" width="150" height="40" rx="6"/><text class="h" x="300" y="41" text-anchor="middle">Ship · radar + C2</text>
+        <rect class="bx" x="445" y="16" width="150" height="40" rx="6"/><text class="h" x="520" y="41" text-anchor="middle">Free drones</text>
+        <rect class="bx" x="645" y="16" width="150" height="40" rx="6"/><text class="h" x="720" y="41" text-anchor="middle">Engaged drones</text>
+        <rect class="bx" x="855" y="16" width="150" height="40" rx="6"/><text class="h" x="930" y="41" text-anchor="middle">Simulator</text>
+        <line class="life" x1="90" y1="56" x2="90" y2="826"/>
+        <line class="life" x1="300" y1="56" x2="300" y2="826"/>
+        <line class="life" x1="520" y1="56" x2="520" y2="826"/>
+        <line class="life" x1="720" y1="56" x2="720" y2="826"/>
+        <line class="life" x1="930" y1="56" x2="930" y2="826"/>
+
+        <rect class="note" x="200" y="76" width="200" height="36" rx="4"/>
+        <text class="s" x="300" y="91" text-anchor="middle" style="fill:var(--ink)">radar track → CPA, TCPA</text>
+        <text class="s" x="300" y="105" text-anchor="middle">push on the TCPA min-heap</text>
+
+        <line class="ln ln-d" x1="298" y1="136" x2="92" y2="136" marker-end="url(#f4a)"/>
+        <text class="lbl halo" x="195" y="129" text-anchor="middle">queue row + feasibility</text>
+        <line class="ln ln-d" x1="92" y1="170" x2="298" y2="170" marker-end="url(#f4a)"/>
+        <text class="lbl halo" x="195" y="163" text-anchor="middle">Approve</text>
+
+        <rect class="note" x="200" y="186" width="200" height="36" rx="4"/>
+        <text class="s" x="300" y="201" text-anchor="middle" style="fill:var(--ink)">choose_intercept()</text>
+        <text class="s" x="300" y="215" text-anchor="middle">earliest feasible point on track</text>
+
+        <line class="ln ln-r" x1="302" y1="248" x2="518" y2="248" marker-end="url(#f4r)"/>
+        <text class="lbl lbl-r halo" x="410" y="241" text-anchor="middle">order ×3: point, t_engage, L</text>
+
+        <path class="ln ln-r" d="M520 266 H572 V292 H523" marker-end="url(#f4r)"/>
+        <text class="lbl lbl-r halo" x="512" y="284" text-anchor="end">bids (ETA) ×3 to all</text>
+
+        <rect class="note" x="420" y="306" width="200" height="36" rx="4"/>
+        <text class="s" x="520" y="321" text-anchor="middle" style="fill:var(--ink)">bid window 1 s → assign()</text>
+        <text class="s" x="520" y="335" text-anchor="middle">all-or-nothing, highest level first</text>
+
+        <line class="ln ln-r" x1="718" y1="368" x2="302" y2="368" marker-end="url(#f4r)"/>
+        <text class="lbl lbl-r halo" x="510" y="361" text-anchor="middle">award (tentative), start flying</text>
+
+        <rect class="note" x="200" y="384" width="200" height="36" rx="4"/>
+        <text class="s" x="300" y="399" text-anchor="middle" style="fill:var(--ink)">arbitrate within 0.3 s</text>
+        <text class="s" x="300" y="413" text-anchor="middle">best bids · slots by drone ID</text>
+
+        <line class="ln ln-r" x1="302" y1="446" x2="718" y2="446" marker-end="url(#f4r)"/>
+        <text class="lbl lbl-r halo" x="510" y="439" text-anchor="middle">ACK + slot to inbox · NACK to the rest</text>
+        <line class="ln ln-r" x1="302" y1="478" x2="718" y2="478" marker-end="url(#f4r)"/>
+        <text class="lbl lbl-r halo" x="510" y="471" text-anchor="middle">job updates 2 Hz · zones 1 Hz</text>
+        <line class="ln" x1="302" y1="510" x2="928" y2="510" marker-end="url(#f4a)"/>
+        <text class="lbl halo" x="615" y="503" text-anchor="middle">threat_tracks (markers, truth)</text>
+
+        <line class="ln" x1="722" y1="546" x2="928" y2="546" marker-end="url(#f4a)"/>
+        <text class="lbl halo" x="825" y="539" text-anchor="middle">cmd_vel 50 Hz</text>
+        <line class="ln" x1="928" y1="578" x2="722" y2="578" marker-end="url(#f4a)"/>
+        <text class="lbl halo" x="825" y="571" text-anchor="middle">pose · radar 20 Hz · UWB 2 Hz</text>
+
+        <rect class="note" x="620" y="596" width="200" height="36" rx="4"/>
+        <text class="s" x="720" y="611" text-anchor="middle" style="fill:var(--ink)">fuze armed t_engage ± 2 s</text>
+        <text class="s" x="720" y="625" text-anchor="middle">fires at closest approach</text>
+
+        <line class="ln" x1="722" y1="656" x2="928" y2="656" marker-end="url(#f4a)"/>
+        <text class="lbl halo" x="825" y="649" text-anchor="middle">detonate request</text>
+
+        <rect class="note bx-fill-h" x="830" y="672" width="200" height="36" rx="4"/>
+        <text class="s" x="930" y="687" text-anchor="middle" style="fill:var(--ink)">blast at the true position</text>
+        <text class="s" x="930" y="701" text-anchor="middle">friendly fire within 8 m</text>
+
+        <line class="ln" x1="928" y1="734" x2="302" y2="734" marker-end="url(#f4a)"/>
+        <text class="lbl halo" x="615" y="727" text-anchor="middle">sim/detonation · sim/damage</text>
+
+        <rect class="note" x="200" y="750" width="200" height="36" rx="4"/>
+        <text class="s" x="300" y="765" text-anchor="middle" style="fill:var(--ink)">hit if within 8 m of the threat</text>
+        <text class="s" x="300" y="779" text-anchor="middle">destroyed after L hits</text>
+
+        <line class="ln ln-d" x1="298" y1="810" x2="92" y2="810" marker-end="url(#f4a)"/>
+        <text class="lbl halo" x="195" y="803" text-anchor="middle">event log · map</text>
+
+        <path class="ln" d="M183 170 H175 V446 H183"/>
+        <text class="lbl" x="166" y="308" text-anchor="middle" transform="rotate(-90 166 308)">decision latency ≈ 1.4 s</text>
+      </svg>

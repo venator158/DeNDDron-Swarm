@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="330" class="dg" viewBox="0 0 1040 330" role="img" aria-label="APF vectors: attraction toward the goal, repulsion away from radar obstacle points and the no-fly boundary, their sum as the command; the command then passes through six safety stages before cmd_vel.">
+<style>
+:root{--surface:#FFFFFF;--group:#E6ECEF;--ink:#14212B;--ink-2:#3B4B58;--muted:#5D6D79;--line:#C6D0D6;
+--accent:#0A6A8A;--accent-soft:rgba(10,106,138,0.09);--hot:#B3431B;--hot-soft:rgba(179,67,27,0.10);--f-sans:"IBM Plex Sans","Helvetica Neue",Helvetica,Arial,sans-serif;--f-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){:root{--surface:#15202A;--group:#18242E;--ink:#E2E9EE;--ink-2:#A7B6C1;--muted:#8696A2;--line:#2C3B47;
+--accent:#52B5D5;--accent-soft:rgba(82,181,213,0.13);--hot:#EE8A5E;--hot-soft:rgba(238,138,94,0.14);}}
+svg.dg{font-family:var(--f-sans)}
+.dg .bg{fill:var(--surface)}
+
+.dg text { fill: var(--ink); font-size: 12px; }
+.dg .h { font-weight: 600; font-size: 12.5px; }
+.dg .s { fill: var(--muted); font-size: 10.5px; }
+.dg .m { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.dg .mi { font-family: var(--f-mono); font-size: 11px; fill: var(--ink); }
+.dg .lbl { font-size: 10.5px; fill: var(--ink-2); }
+.dg .lbl-r { fill: var(--accent); }
+.dg .lbl-h { fill: var(--hot); }
+.dg .band-t { font-family: var(--f-mono); font-size: 10.5px; letter-spacing: 0.05em; fill: var(--muted); }
+.dg .halo { paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.dg .bx { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.2; }
+.dg .bx-r { stroke: var(--accent); stroke-width: 1.5; }
+.dg .bx-h { stroke: var(--hot); stroke-width: 1.5; }
+.dg .bx-fill-r { fill: var(--accent-soft); }
+.dg .bx-fill-h { fill: var(--hot-soft); }
+.dg .grp { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ctr { fill: none; stroke: var(--line); stroke-width: 1.4; stroke-dasharray: 5 4; }
+.dg .band-r { fill: var(--accent-soft); stroke: none; }
+.dg .note { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ln { stroke: var(--ink-2); stroke-width: 1.3; fill: none; }
+.dg .ln-thin { stroke-width: 1; opacity: 0.75; }
+.dg .ln-r { stroke: var(--accent); stroke-dasharray: 6 4; }
+.dg .ln-rs { stroke: var(--accent); }
+.dg .ln-h { stroke: var(--hot); }
+.dg .ln-d { stroke-dasharray: 2 3; }
+.dg .ln-dash { stroke-dasharray: 5 4; }
+.dg .ln-bold { stroke-width: 2.2; }
+.dg .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+.dg .grid { stroke: var(--line); stroke-width: 1; }
+.dg .mk { fill: var(--ink-2); }
+.dg .mk-r { fill: var(--accent); }
+.dg .mk-h { fill: var(--hot); }
+.dg .dot-r { fill: var(--accent); }
+.dg .dot-h { fill: var(--hot); }
+.dg .dot-i { fill: var(--ink); }
+.dg .zone { fill: var(--hot-soft); stroke: var(--hot); stroke-width: 1.3; stroke-dasharray: 5 4; }
+.dg .ring { fill: none; stroke: var(--accent-soft); }
+.dg .faint { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 3 4; }
+.dg .hull { fill: var(--ink-2); }
+
+</style>
+<rect class="bg" x="0" y="0" width="1040" height="330" rx="8"/>
+          <defs>
+            <marker id="f9a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="f9r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk-r" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="f9h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk-h" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <text class="band-t" x="20" y="22">FORCES ON ONE DRONE (TOP VIEW)</text>
+          <circle class="faint" cx="480" cy="120" r="60"/>
+          <circle class="dot-i" cx="480" cy="120" r="4"/>
+          <circle cx="480" cy="120" r="10" fill="none" stroke-width="1.2" style="stroke:var(--ink)"/>
+          <text class="lbl" x="480" y="100" text-anchor="middle" style="fill:var(--ink)">goal (slot)</text>
+          <text class="s" x="480" y="198" text-anchor="middle">repulsion fades inside 10 m</text>
+          <circle class="zone" cx="270" cy="250" r="22"/>
+          <text class="s" x="300" y="254">radar contact → 3 m circle</text>
+          <g class="ln ln-thin">
+            <line x1="140" y1="220" x2="249.3" y2="257.5" stroke-dasharray="2 3"/>
+            <line x1="140" y1="220" x2="248.1" y2="251.9" stroke-dasharray="2 3"/>
+            <line x1="140" y1="220" x2="248.3" y2="246.2" stroke-dasharray="2 3"/>
+            <line x1="140" y1="220" x2="250.1" y2="240.7" stroke-dasharray="2 3"/>
+          </g>
+          <circle class="dot-h" cx="249.3" cy="257.5" r="2.6"/>
+          <circle class="dot-h" cx="248.1" cy="251.9" r="2.6"/>
+          <circle class="dot-h" cx="248.3" cy="246.2" r="2.6"/>
+          <circle class="dot-h" cx="250.1" cy="240.7" r="2.6"/>
+          <path class="ln ln-h ln-dash" d="M20 318 Q 200 280 380 318"/>
+          <text class="lbl lbl-h" x="200" y="290" text-anchor="middle">no-fly boundary, widened by 2σ</text>
+          <line class="ln ln-bold" x1="140" y1="220" x2="253" y2="187" marker-end="url(#f9a)"/>
+          <text class="lbl" x="262" y="190" style="fill:var(--ink)">F_att</text>
+          <line class="ln ln-h ln-bold" x1="140" y1="220" x2="98" y2="210" marker-end="url(#f9h)"/>
+          <text class="lbl lbl-h" x="92" y="204" text-anchor="end">F_rep</text>
+          <line class="ln ln-rs" x1="140" y1="220" x2="230" y2="164" marker-end="url(#f9r)" style="stroke-width:2.6"/>
+          <text class="lbl lbl-r" x="226" y="154" text-anchor="end">command</text>
+          <circle class="dot-r" cx="140" cy="220" r="6"/>
+          <text class="lbl" x="140" y="244" text-anchor="middle" style="fill:var(--ink)">drone</text>
+
+          <text class="band-t" x="610" y="22">THEN, EVERY TICK OF THE 50 HZ LOOP</text>
+          <g>
+            <rect class="bx bx-r" x="610" y="36" width="400" height="28" rx="4"/><text class="lbl" x="622" y="54" style="fill:var(--ink)">APF velocity (or ORCA)</text>
+            <rect class="bx" x="610" y="76" width="400" height="28" rx="4"/><text class="lbl" x="622" y="94" style="fill:var(--ink)">floor and ceiling guard (min_z, max_z)</text>
+            <rect class="bx" x="610" y="116" width="400" height="28" rx="4"/><text class="lbl" x="622" y="134" style="fill:var(--ink)">damping near obstacles</text>
+            <rect class="bx" x="610" y="156" width="400" height="28" rx="4"/><text class="lbl" x="622" y="174" style="fill:var(--ink)">service-radius containment</text>
+            <rect class="bx" x="610" y="196" width="400" height="28" rx="4"/><text class="lbl" x="622" y="214" style="fill:var(--ink)">braking envelope, horizontal and vertical apart</text>
+            <rect class="bx" x="610" y="236" width="400" height="28" rx="4"/><text class="lbl" x="622" y="254" style="fill:var(--ink)">acceleration ≤ 1 m/s² · speed ≤ 4 m/s</text>
+            <rect class="bx bx-r bx-fill-r" x="610" y="276" width="400" height="28" rx="4"/><text class="mi" x="622" y="294">swarm/{id}/cmd_vel</text>
+          </g>
+          <g class="ln">
+            <line x1="810" y1="64" x2="810" y2="74" marker-end="url(#f9a)"/>
+            <line x1="810" y1="104" x2="810" y2="114" marker-end="url(#f9a)"/>
+            <line x1="810" y1="144" x2="810" y2="154" marker-end="url(#f9a)"/>
+            <line x1="810" y1="184" x2="810" y2="194" marker-end="url(#f9a)"/>
+            <line x1="810" y1="224" x2="810" y2="234" marker-end="url(#f9a)"/>
+            <line x1="810" y1="264" x2="810" y2="274" marker-end="url(#f9a)"/>
+          </g>
+        </svg>

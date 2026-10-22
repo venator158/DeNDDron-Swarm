@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="460" class="dg" viewBox="0 0 1040 460" role="img" aria-label="Top view to scale: the ship with its 50 m no-fly zone, stations between 55 and 95 m, a threat track from about 186 m out, the earliest feasible engagement point at 100 m, the 55 m fallback point and the CPA; a drone on the far side routes tangent, arc, tangent around the zone. Inset: a two-drone vertical stack with the 8 m kill radius and 12 m keep-out.">
+<style>
+:root{--surface:#FFFFFF;--group:#E6ECEF;--ink:#14212B;--ink-2:#3B4B58;--muted:#5D6D79;--line:#C6D0D6;
+--accent:#0A6A8A;--accent-soft:rgba(10,106,138,0.09);--hot:#B3431B;--hot-soft:rgba(179,67,27,0.10);--f-sans:"IBM Plex Sans","Helvetica Neue",Helvetica,Arial,sans-serif;--f-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){:root{--surface:#15202A;--group:#18242E;--ink:#E2E9EE;--ink-2:#A7B6C1;--muted:#8696A2;--line:#2C3B47;
+--accent:#52B5D5;--accent-soft:rgba(82,181,213,0.13);--hot:#EE8A5E;--hot-soft:rgba(238,138,94,0.14);}}
+svg.dg{font-family:var(--f-sans)}
+.dg .bg{fill:var(--surface)}
+
+.dg text { fill: var(--ink); font-size: 12px; }
+.dg .h { font-weight: 600; font-size: 12.5px; }
+.dg .s { fill: var(--muted); font-size: 10.5px; }
+.dg .m { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.dg .mi { font-family: var(--f-mono); font-size: 11px; fill: var(--ink); }
+.dg .lbl { font-size: 10.5px; fill: var(--ink-2); }
+.dg .lbl-r { fill: var(--accent); }
+.dg .lbl-h { fill: var(--hot); }
+.dg .band-t { font-family: var(--f-mono); font-size: 10.5px; letter-spacing: 0.05em; fill: var(--muted); }
+.dg .halo { paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.dg .bx { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.2; }
+.dg .bx-r { stroke: var(--accent); stroke-width: 1.5; }
+.dg .bx-h { stroke: var(--hot); stroke-width: 1.5; }
+.dg .bx-fill-r { fill: var(--accent-soft); }
+.dg .bx-fill-h { fill: var(--hot-soft); }
+.dg .grp { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ctr { fill: none; stroke: var(--line); stroke-width: 1.4; stroke-dasharray: 5 4; }
+.dg .band-r { fill: var(--accent-soft); stroke: none; }
+.dg .note { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ln { stroke: var(--ink-2); stroke-width: 1.3; fill: none; }
+.dg .ln-thin { stroke-width: 1; opacity: 0.75; }
+.dg .ln-r { stroke: var(--accent); stroke-dasharray: 6 4; }
+.dg .ln-rs { stroke: var(--accent); }
+.dg .ln-h { stroke: var(--hot); }
+.dg .ln-d { stroke-dasharray: 2 3; }
+.dg .ln-dash { stroke-dasharray: 5 4; }
+.dg .ln-bold { stroke-width: 2.2; }
+.dg .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+.dg .grid { stroke: var(--line); stroke-width: 1; }
+.dg .mk { fill: var(--ink-2); }
+.dg .mk-r { fill: var(--accent); }
+.dg .mk-h { fill: var(--hot); }
+.dg .dot-r { fill: var(--accent); }
+.dg .dot-h { fill: var(--hot); }
+.dg .dot-i { fill: var(--ink); }
+.dg .zone { fill: var(--hot-soft); stroke: var(--hot); stroke-width: 1.3; stroke-dasharray: 5 4; }
+.dg .ring { fill: none; stroke: var(--accent-soft); }
+.dg .faint { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 3 4; }
+.dg .hull { fill: var(--ink-2); }
+
+</style>
+<rect class="bg" x="0" y="0" width="1040" height="460" rx="8"/>
+          <defs>
+            <marker id="f6a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="f6r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk-r" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="f6h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk-h" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <text class="band-t" x="20" y="22">TOP VIEW · 1.35 PX PER METRE</text>
+          <!-- rings -->
+          <circle class="faint" cx="290" cy="235" r="189"/>
+          <text class="s" x="290" y="440" text-anchor="middle">140 m: max intercept range</text>
+          <circle cx="290" cy="235" r="101.25" fill="none" stroke-width="54" style="stroke:var(--accent-soft)"/>
+          <circle class="zone" cx="290" cy="235" r="67.5"/>
+          <circle class="faint" cx="290" cy="235" r="74.25"/>
+          <rect class="hull" x="269.1" y="228.25" width="41.85" height="13.5" rx="4"/>
+          <text class="s" x="290" y="262" text-anchor="middle" style="fill:var(--ink)">ship</text>
+          <text class="lbl lbl-h" x="236" y="186" text-anchor="middle">no-fly 50 m</text>
+          <text class="lbl lbl-r" x="128" y="152">stations 55–95 m</text>
+          <!-- threat track -->
+          <line class="ln ln-h ln-bold" x1="506" y1="106.75" x2="401.5" y2="159" marker-end="url(#f6h)"/>
+          <line class="ln ln-h ln-dash" x1="401.5" y1="159" x2="282.2" y2="218.7"/>
+          <circle class="dot-h" cx="506" cy="106.75" r="4"/>
+          <text class="lbl lbl-h" x="512" y="100">threat detected ~186 m out</text>
+          <circle cx="401.5" cy="159" r="6.5" stroke-width="2" style="fill:var(--surface);stroke:var(--accent)"/>
+          <text class="lbl" x="412" y="176" style="fill:var(--ink)">engagement point</text>
+          <text class="s" x="412" y="190">earliest feasible, 100 m</text>
+          <circle class="dot-i" cx="346" cy="186.7" r="3.5"/>
+          <text class="s" x="352" y="216">fallback: 55 m crossing</text>
+          <line class="ln ln-thin" x1="348" y1="190" x2="356" y2="205"/>
+          <circle class="dot-h" cx="282.2" cy="218.7" r="3"/>
+          <text class="s" x="270" y="212" text-anchor="end">CPA 13 m</text>
+          <!-- drone route around zone -->
+          <circle class="dot-r" cx="209" cy="309.25" r="5"/>
+          <text class="lbl lbl-r" x="203" y="330" text-anchor="end">drone on station</text>
+          <path class="ln ln-rs ln-bold" d="M209 309.25 L292.4 306.5 A71.55 71.55 0 0 0 355.5 263.8 L398 167" marker-end="url(#f6r)"/>
+          <line class="ln ln-thin ln-d" x1="209" y1="309.25" x2="401.5" y2="159"/>
+          <text class="lbl lbl-r" x="368" y="300">tangent · arc · tangent</text>
+          <text class="s" x="368" y="314">at R + 3 m, shorter way round</text>
+          <circle class="dot-r" cx="425" cy="228.25" r="5"/>
+          <line class="ln ln-rs" x1="425" y1="228.25" x2="404" y2="166" marker-end="url(#f6r)"/>
+          <text class="lbl lbl-r" x="432" y="246">second drone</text>
+
+          <!-- inset: side view -->
+          <rect class="grp" x="640" y="30" width="385" height="410" rx="8"/>
+          <text class="band-t" x="656" y="52">SIDE VIEW AT THE POINT · 8 PX PER METRE</text>
+          <circle class="faint" cx="832" cy="240" r="96"/>
+          <circle cx="832" cy="240" r="64" stroke-width="1.2" style="fill:var(--hot-soft);stroke:var(--hot)"/>
+          <line class="ln ln-h" x1="660" y1="240" x2="1005" y2="240" marker-end="url(#f6h)"/>
+          <path class="dot-h" d="M690 234 L708 240 L690 246 Z"/>
+          <text class="lbl lbl-h" x="672" y="228">threat</text>
+          <circle cx="832" cy="224" r="6" class="dot-r"/>
+          <circle cx="832" cy="256" r="6" class="dot-r"/>
+          <text class="lbl" x="844" y="222">slot 0 · z + 2 m</text>
+          <text class="lbl" x="844" y="262">slot 1 · z − 2 m</text>
+          <line class="ln ln-thin" x1="900" y1="224" x2="900" y2="256"/>
+          <text class="s" x="906" y="244">4 m</text>
+          <text class="lbl lbl-h" x="832" y="172" text-anchor="middle">8 m kill radius</text>
+          <text class="s" x="832" y="134" text-anchor="middle">12 m keep-out for other jobs</text>
+          <text class="s" x="832" y="370" text-anchor="middle">3 drones: −4, 0, +4 m</text>
+          <text class="s" x="832" y="386" text-anchor="middle">avoidance is planar, so stacked</text>
+          <text class="s" x="832" y="402" text-anchor="middle">mates never repel each other</text>
+        </svg>

@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="316" class="dg" viewBox="0 0 1040 316" role="img" aria-label="Left: the four-timestamp exchange between a drone's heartbeat and the ship's roster, giving offset without knowing the one-way delay. Right: consensus, where the ship is a pinned leader and drones beacon to each other, converging to ship time through one or two hops.">
+<style>
+:root{--surface:#FFFFFF;--group:#E6ECEF;--ink:#14212B;--ink-2:#3B4B58;--muted:#5D6D79;--line:#C6D0D6;
+--accent:#0A6A8A;--accent-soft:rgba(10,106,138,0.09);--hot:#B3431B;--hot-soft:rgba(179,67,27,0.10);--f-sans:"IBM Plex Sans","Helvetica Neue",Helvetica,Arial,sans-serif;--f-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){:root{--surface:#15202A;--group:#18242E;--ink:#E2E9EE;--ink-2:#A7B6C1;--muted:#8696A2;--line:#2C3B47;
+--accent:#52B5D5;--accent-soft:rgba(82,181,213,0.13);--hot:#EE8A5E;--hot-soft:rgba(238,138,94,0.14);}}
+svg.dg{font-family:var(--f-sans)}
+.dg .bg{fill:var(--surface)}
+
+.dg text { fill: var(--ink); font-size: 12px; }
+.dg .h { font-weight: 600; font-size: 12.5px; }
+.dg .s { fill: var(--muted); font-size: 10.5px; }
+.dg .m { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.dg .mi { font-family: var(--f-mono); font-size: 11px; fill: var(--ink); }
+.dg .lbl { font-size: 10.5px; fill: var(--ink-2); }
+.dg .lbl-r { fill: var(--accent); }
+.dg .lbl-h { fill: var(--hot); }
+.dg .band-t { font-family: var(--f-mono); font-size: 10.5px; letter-spacing: 0.05em; fill: var(--muted); }
+.dg .halo { paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.dg .bx { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.2; }
+.dg .bx-r { stroke: var(--accent); stroke-width: 1.5; }
+.dg .bx-h { stroke: var(--hot); stroke-width: 1.5; }
+.dg .bx-fill-r { fill: var(--accent-soft); }
+.dg .bx-fill-h { fill: var(--hot-soft); }
+.dg .grp { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ctr { fill: none; stroke: var(--line); stroke-width: 1.4; stroke-dasharray: 5 4; }
+.dg .band-r { fill: var(--accent-soft); stroke: none; }
+.dg .note { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ln { stroke: var(--ink-2); stroke-width: 1.3; fill: none; }
+.dg .ln-thin { stroke-width: 1; opacity: 0.75; }
+.dg .ln-r { stroke: var(--accent); stroke-dasharray: 6 4; }
+.dg .ln-rs { stroke: var(--accent); }
+.dg .ln-h { stroke: var(--hot); }
+.dg .ln-d { stroke-dasharray: 2 3; }
+.dg .ln-dash { stroke-dasharray: 5 4; }
+.dg .ln-bold { stroke-width: 2.2; }
+.dg .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+.dg .grid { stroke: var(--line); stroke-width: 1; }
+.dg .mk { fill: var(--ink-2); }
+.dg .mk-r { fill: var(--accent); }
+.dg .mk-h { fill: var(--hot); }
+.dg .dot-r { fill: var(--accent); }
+.dg .dot-h { fill: var(--hot); }
+.dg .dot-i { fill: var(--ink); }
+.dg .zone { fill: var(--hot-soft); stroke: var(--hot); stroke-width: 1.3; stroke-dasharray: 5 4; }
+.dg .ring { fill: none; stroke: var(--accent-soft); }
+.dg .faint { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 3 4; }
+.dg .hull { fill: var(--ink-2); }
+
+</style>
+<rect class="bg" x="0" y="0" width="1040" height="316" rx="8"/>
+          <defs>
+            <marker id="f12r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk-r" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <text class="band-t" x="20" y="22">MASTER MODE · TWO-WAY EXCHANGE</text>
+          <text class="h" x="120" y="44" text-anchor="middle">drone clock</text>
+          <text class="h" x="420" y="44" text-anchor="middle">ship clock</text>
+          <line class="ln" x1="120" y1="54" x2="120" y2="256"/>
+          <line class="ln" x1="420" y1="54" x2="420" y2="256"/>
+          <line class="ln ln-r" x1="120" y1="80" x2="418" y2="120" marker-end="url(#f12r)"/>
+          <text class="lbl lbl-r halo" x="270" y="90" text-anchor="middle">heartbeat carries t1</text>
+          <line class="ln ln-r" x1="420" y1="190" x2="122" y2="240" marker-end="url(#f12r)"/>
+          <text class="lbl lbl-r halo" x="270" y="203" text-anchor="middle">roster echoes [t1, t2, t3]</text>
+          <g class="mi">
+            <text x="110" y="84" text-anchor="end">t1</text>
+            <text x="430" y="124">t2</text>
+            <text x="430" y="194">t3</text>
+            <text x="110" y="244" text-anchor="end">t4</text>
+          </g>
+          <line class="ln ln-thin" x1="412" y1="120" x2="428" y2="120"/>
+          <line class="ln ln-thin" x1="412" y1="190" x2="428" y2="190"/>
+          <line class="ln ln-thin" x1="112" y1="80" x2="128" y2="80"/>
+          <line class="ln ln-thin" x1="112" y1="240" x2="128" y2="240"/>
+          <text class="mi" x="270" y="284" text-anchor="middle">θ = ((t2 − t1) + (t3 − t4)) / 2</text>
+          <text class="mi" x="270" y="304" text-anchor="middle">δ = (t4 − t1) − (t3 − t2)</text>
+
+          <text class="band-t" x="600" y="22">CONSENSUS MODE · SHIP IS A PINNED LEADER</text>
+          <line class="ln ln-r" x1="830" y1="90" x2="712" y2="168"/>
+          <line class="ln ln-r" x1="830" y1="90" x2="948" y2="168"/>
+          <line class="ln ln-r" x1="722" y1="180" x2="938" y2="180"/>
+          <line class="ln ln-r" x1="712" y1="194" x2="818" y2="250"/>
+          <line class="ln ln-r" x1="948" y1="194" x2="842" y2="250"/>
+          <rect class="bx bx-r bx-fill-r" x="785" y="66" width="90" height="34" rx="6"/>
+          <text class="h" x="830" y="88" text-anchor="middle">ship</text>
+          <circle class="bx" cx="700" cy="180" r="22"/><text class="h" x="700" y="185" text-anchor="middle">d1</text>
+          <circle class="bx" cx="960" cy="180" r="22"/><text class="h" x="960" y="185" text-anchor="middle">d2</text>
+          <circle class="bx" cx="830" cy="262" r="22"/><text class="h" x="830" y="267" text-anchor="middle">d3</text>
+          <text class="lbl lbl-r halo" x="830" y="176" text-anchor="middle">beacons 0.5 Hz</text>
+          <text class="s" x="700" y="218" text-anchor="middle">1 hop</text>
+          <text class="s" x="960" y="218" text-anchor="middle">1 hop</text>
+          <text class="s" x="862" y="266">2 hops</text>
+          <text class="mi" x="830" y="306" text-anchor="middle">target = ½ · ship + ½ · mean(neighbours)</text>
+        </svg>

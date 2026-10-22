@@ -18,11 +18,9 @@ This README is the project's only documentation. Keep it up to date when behavio
 - [Distributed clock](#distributed-clock)
 - [Degraded communications](#degraded-communications) (and [sensing degradation](#sensing-and-ship-link-sweep))
 - [Instrumentation](#instrumentation)
-- [Implementation map](#implementation-map)
-- [Agent internals](#agent-internals)
+- [Implementation map](#implementation-map) (modules, technology, dependencies, where each feature lives)
 - [Configuration](#configuration)
 - [Testing](#testing)
-- [Repository layout](#repository-layout)
 - [Next steps](#next-steps)
 - [Known limitations](#known-limitations)
 
@@ -272,21 +270,40 @@ The latest acceptable point, used as a fallback, is the old rule, with the defen
 
 The assigned drones take up slots **stacked vertically** through that point, 4 m apart and centred on it: ±2 m for two drones, −4, 0, +4 m for three. Around the allocated time, the moment the threat should arrive, their **proximity fuze** arms, and each drone detonates as the threat passes closest; its job-mates fire with it (chain fire). With `--fuze off`, they detonate at the allocated time instead. Vertical stacking matters: obstacle avoidance is planar (radar contacts become points at the drone's own altitude, as the lidar's were), so stacked job-mates don't repel each other off their slots (a horizontal ring did). The ship assesses kills with its radar: a detonation within 8 m of the threat's true position counts as a hit. A threat is destroyed once it has `level` hits.
 
+![Top view to scale: the ship with its 50 m no-fly zone, stations at 55–95 m, a threat track from about 186 m out, the earliest feasible engagement point at 100 m, the 55 m fallback point and the CPA; a far-side drone routes tangent, arc, tangent around the zone. Inset: a two-drone vertical stack with the 8 m kill radius and the 12 m keep-out](docs/diagrams/engagement-geometry.svg)
+
+**Engagement geometry**, drawn to scale with the defaults. The far-side drone's straight path (dotted) would cross the zone, so its route detours. The ship's search (`deconflict.choose_intercept`), with the helpers it shares with the drones (`threats.py`):
+
+```text
+function CPA(p0, v, t0):                          # ship at the origin
+    s ← max(0, −(p0 · v) / |v|²)
+    return p0 + v·s, t0 + s
+
+function ETA(d, v_max = 4, a_max = 1):            # trapezoidal, rest to rest
+    if d ≥ v_max² / a_max: return d / v_max + v_max / a_max
+    return 2·√(d / a_max)
+
+function CHOOSE_INTERCEPT(track, now, t_latest, drones, L, reservations):
+    t ← now + slack                               # 4 s new order, 1 s after a manoeuvre
+    while t ≤ t_latest:
+        p ← track(t)
+        if R_nofly + 5 ≤ |p| ≤ 140 m and z within limits
+           and p is separated from every reserved slot:
+            rank ← sort(1.25 · ETA(|d − p|) for d in drones)   # cheap straight-line bound
+            if now + slack + rank[L] ≤ t:
+                routes ← PLAN_ROUTE(d → p) for the best L + 3
+                if L routes arrive by t
+                   and the new blast forces no hold on a drone flying another job:
+                    return (t, p)
+        t ← t + 0.5 s
+    return fallback: CPA, or first crossing of R_nofly + 5
+```
+
 ## Architecture
 
-```
-                 sim_net (Zenoh router "sim_bus")              radio_net (peer-to-peer, no router)
-                 = each drone's own sensors/actuators          = all communications
-  ┌──────────────────┐  altitude 50 Hz, radar 20 Hz,  ┌──────────┐   heartbeats, orders,   ┌──────────┐
-  │ Gazebo simulator │ ───── UWB ranges 2 Hz ───────▶ │ drone ×N │ ◀────bids, awards─────▶ │ drone ×N │
-  │ (C++ bridge,     │ ◀── cmd_vel, detonate, job ─── │ (Python) │                         └──────────┘
-  │ physics, truth)  │ ── sim clock ──┐                └──────────┘                              ▲
-  │                  │ ◀─ tracks ──┐  │                      ▲ roster, orders,   heartbeats,     │
-  └──────────────────┘             │  ▼                      │ jobs, zones       telemetry       │
-        │ sim/truth            ┌─────────────────────────────┐                                   │
-        ▼ (evaluation only)    │ ship: radar, C2, dashboard  │ ──────────────────────────────────┘
-  metrics node                 └─────────────────────────────┘
-```
+![Deployment: the simulator, metrics node, drones and ship meet on the onboard bus through one Zenoh router; drones and the ship talk over a separate peer-to-peer radio; the operator reaches the ship over HTTP](docs/diagrams/deployment.svg)
+
+**Deployment.** Solid lines are the onboard bus (`sim_net`), dashed teal lines the radio (`radio_net`), dotted lines HTTP to the operator. Drones never subscribe to `sim/truth`; it feeds only the metrics node. Heartbeats go to the ship only, so radio load grows with N rather than N².
 
 - **Two links per node** (`src/common/links.py`).
   - The *onboard bus* goes through a Zenoh router on `sim_net`. It stands in for a drone's own wiring (sensors, actuators, detonation), and for the ship's radar truth. It is not communications.
@@ -304,7 +321,17 @@ The assigned drones take up slots **stacked vertically** through that point, 4 m
 - **Ship** (`src/ship/ship.py`): radar simulation, threat queue, roster, feasibility, orders, kill assessment, instrumentation aggregation, and the dashboard (`dashboard.html`).
 - **Drones** (`src/agent/`): localization (UWB EKF and cooperative fusion), radar perception and the fuze, planning, the 50 Hz control loop, decentralized allocation, heartbeat and telemetry.
 
+### Launch pipeline
+
+![Launch pipeline: run_swarm.sh calls generate_swarm_config.py, which merges the hardware record into swarm_runtime.json; docker compose starts the services from prebuilt images; sweeps launch once per run and collect the results](docs/diagrams/launch-pipeline.svg)
+
+The hardware record is the single source of every sensor and airframe parameter; the simulator, drones and ship read it from `swarm_runtime.json`. Agent replicas are identical containers, so each claims the lowest free `drone_N` from `config/agent_registry.json` under a file lock.
+
 ### Drone pipeline
+
+![Data flow inside agent.py: onboard sensors feed localization, the radio feeds engagement, radar contacts feed obstacles and the fuze; localization, engagement and obstacles feed the 50 Hz reflex loop that commands velocity; the fuze issues the detonation request](docs/diagrams/drone-dataflow.svg)
+
+The simulator withholds x, y and horizontal velocity, so the EKF's estimate replaces them in the pose everything else uses. Its uncertainty σ widens the no-fly barrier, the fuze gate (+3σ) and the final intruder check. Idle drones skip perception; avoidance uses relative radar positions, so it does not depend on localization. Simulation time drives physics integration and wall-clock time drives sensor freshness (`timing.py`): with stale sensor data the drone commands zero velocity.
 
 One drone, from sensors to detonation (`src/agent/agent.py` unless noted):
 
@@ -320,6 +347,30 @@ One drone, from sensors to detonation (`src/agent/agent.py` unless noted):
 | **Fuze** | records mates, tracks contacts, gates on the predicted threat (+3σ), fires at closest approach inside `t_engage` ± 2 s; mates chain-fire | `_on_contacts`, `_fuze_decision`, `_on_mate_blast`, `_check_engagement`; `fuze.py` |
 | **Detonation** | the drone asks (`drone/{id}/detonate`, with its estimated position); the simulator places the blast at its true position and applies friendly fire | `_detonate_now`; `GazeboSimulator.cpp` (`apply_detonations`) |
 | **Clocks** | every protocol time (`t_engage`, zones, holds) is ship time: the drone's hardware clock read through its sync mode | `_proto_now`, `_inbound_job`; `localclock.py`, `timesync.py` |
+
+### Planner and reflex loop
+
+![APF forces on one drone: attraction toward the goal, repulsion from radar obstacle points and the no-fly boundary, their sum as the command; the command then passes through six safety stages before cmd_vel](docs/diagrams/planner.svg)
+
+Radar contacts become points where 32 planar rays from the drone meet a 3 m circle around each contact, exactly what the legacy lidar returned, so the planners did not change with the sensor. Returns from the ship's hull are dropped (the planner treats the ship and its zone itself), and the points expire after 0.5 s. APF (`path_planning.py`, `APFStrategy.compute_velocity`) is the default; ORCA builds a half-plane constraint per neighbour and the ship and projects greedily. An untasked drone holds station: zero velocity, and back to its hold point after drifting 1 m.
+
+```text
+function APF(p, goal, obstacles, σ):
+    d_g ← |goal − p|
+    if d_g ≤ tolerance: return 0
+    F_att ← k_att · (goal − p) / d_g
+    F_rep ← Σ over obstacles o with d = |p − o| ≤ r_infl:
+                (p − o)/d · k_rep · e^(−a·d) / (b·d²)
+    d_b ← |p_xy| − (R_nofly + margin + 2σ)           # no-fly barrier
+    F_rep += same law at max(d_b, 0.3), radially out
+    F_rep ← F_max · tanh(|F_rep| / F_max) · F̂_rep     # soft saturation
+    if d_g < 10 m: F_rep ← F_rep · (d_g / 10)²        # fade near the goal
+    dir ← (F_att + F_rep) / |F_att + F_rep|
+    v ← dir · v_base · clamp((d_g − tol) / r_brake, 0, 1)
+    v ← (1 − α)·v_prev + α·v                          # smoothing
+    if barely moved for N ticks: k_att grows (≤ 10×)  # stuck escape
+    return v
+```
 
 ### Topics
 
@@ -362,6 +413,10 @@ Every absolute time on the radio (`t_engage`, `t_cpa`, `track.t0`, `time`, `sync
 
 The allocation is decentralized (`src/agent/auction.py`).
 
+![Sequence of one engagement: detection, operator approval, intercept choice, order, bids, deterministic assignment, award, ship arbitration, ACK and job updates, flight, fuze, detonation in the simulator and kill assessment; decision latency about 1.4 s](docs/diagrams/engagement-sequence.svg)
+
+**One engagement, end to end** (dashed teal = radio, solid = onboard bus, dotted = HTTP; L is the threat level). The steps:
+
 1. The ship publishes an engagement order on `swarm/threats`. It carries the engagement point, the detonation time, and `required` drones. Each order is sent 3 times, 0.15 s apart (`ORDER_COPIES`); drones ignore repeats. Often only one or two drones can reach the intercept in time, and a lost order to them lost the threat, because a re-announcement comes 3 s later.
 2. Each **free** drone (idle, localized, not waiting on another order) bids its ETA to the point, sending the bid 3 times, 0.2 s apart (receivers keep the latest per drone). The ETA uses a trapezoidal speed profile at 4 m/s and 1 m/s², times a 1.25 margin. A drone only bids if it can arrive before the detonation time.
 3. After a 1 s bid window (sim time), every drone runs the same deterministic assignment:
@@ -390,6 +445,33 @@ The allocation is decentralized (`src/agent/auction.py`).
    A drone that is not within 8 m of its slot at the detonation time aborts, publishes `missed`, and holds position. With the fuze, a drone whose window closes with no detection holds and publishes `no_detection` (`--fuze-fallback timed`: detonates then instead).
 
 Decision latency, from approval until every drone the threat needs is confirmed, is about 1.4 s: the 1 s bid window, the 0.3 s confirmation window, and radio round trips.
+
+![A drone's job lifecycle: free, bidding, tentative, confirmed, expended, with the paths back to free when it loses the auction, is refused or yields, or is released](docs/diagrams/job-states.svg)
+
+**A drone's job lifecycle.** The assignment every drone computes identically (`auction.py`), and the ship's confirmation (`jobs.py`):
+
+```text
+function ASSIGN(threats, bids):                   # bids: drone → {threat: ETA}
+    taken ← ∅;  result ← {}
+    for T in threats by level, highest first:
+        C ← sort[(cost, id) for each drone ∉ taken that bid on T]
+        if |C| < T.required:
+            result[T] ← []                        # all-or-nothing: decline
+        else:
+            W ← first T.required of C
+            taken ← taken ∪ W;  result[T] ← W
+    return result
+
+function MUST_YIELD(me, holders, T):              # until confirmed
+    return |{h ∈ holders[T] : (cost_h, h) < (cost_me, me)}| ≥ T.level
+
+function ARBITRATE(pending, confirmed, need, n_slots):   # ship, 0.3 s after the first award
+    free ← slots not held by confirmed drones
+    ranked ← pending sorted by (cost, id), minus confirmed
+    winners ← first min(need, |free|) of ranked
+    rejected ← the rest                           # → NACK
+    return zip(sort_by_id(winners), free), rejected
+```
 
 Measured (8 drones, `--rtf 3`):
 - **Ship-link loss** (inbox, heartbeat answers, order copies; 15 drones, 8 threats, one run each, 2026-10-04): `ship_loss30` 8/8 (before: 4/8, then 3/8 and 4/8 in two diagnosis runs), every engagement confirmed within 1.2 s, no re-announcement; `ship_outage` 8/8; `combined` 8/8 (before: 4/8). In the `ship_loss30` run, 4 drones whose award was lost were confirmed from their heartbeats.
@@ -425,6 +507,37 @@ Drones localize themselves instead of receiving their true x,y, and avoid each o
 - counting hops instead of times let a jammed swarm pass "anchored" around in a loop.
 
 Absolute position is only observable through the anchors: with every anchor jammed, no chain is fresher than another, nobody uses peers, and each drone dead-reckons with its learned wind while its covariance grows.
+
+![Localization loop: IMU delta-velocity drives the EKF prediction; anchor ranges pass a gate and Huber weighting before a Kalman update; peer ranges are used only along fresher anchor chains with the peer's uncertainty added; GNSS is a comparator while anchors are fresh and a fallback otherwise; every correction writes back into the shared state](docs/diagrams/localization.svg)
+
+**One drone's localization filter** (`localization.py`, `coop.py`; GNSS below). `LOCALIZATION=rdl` replaces the peer row with RDL's joint update.
+
+```text
+on frame(dt, Δv):                                 # prediction, every sensor frame
+    p ← p + v·dt + Δv·dt/2 − (bias term)
+    v ← v + Δv − b·dt;     b ← e^(−dt/τ)·b
+    P ← F P Fᵀ + Q(noise density, 10 × scale factor, timing within the frame)
+
+on anchor_range(r, aₖ):                           # robust update
+    h ← ‖(x, y, z) − aₖ‖;   H ← [(x − aₓ)/h, (y − a_y)/h, 0, 0, 0, 0]
+    σ ← median of the last 40 innovations, clamped to [0.1, 2] m
+    S ← H P Hᵀ + σ²;        e ← r − h
+    if the drift monitor flags only aₖ: skip      # |mean|·√n > 3.3
+    if (e > 0 and e² > 3.29²·S) or (e < 0 and e² > 8²·S):
+        reject; if 5 in a row: RELOCK; return
+    if e² > 2.5²·S: σ ← σ / √w,  w = 2.5 / |e/√S|  # Huber
+    K ← P Hᵀ / S;  x ← x + K·e
+    P ← (I − KH) P (I − KH)ᵀ + K σ² Kᵀ             # Joseph form
+
+on peer_range(r, j):                              # coop
+    if anchored(me) or anchor_t(j) ≤ anchor_t(me): skip
+    u ← line-of-sight unit vector to j
+    update with σ_eff² = σ² + uᵀ Pⱼ u
+    raise uᵀ P u to at least uᵀ Pⱼ u + σ²          # j's error is a bias, not fresh noise
+
+RELOCK: multilaterate from ≥ 3 anchors; accept only if χ² (99 %) passes;
+        with 4 anchors also try leaving each one out
+```
 
 **Recursive decentralized localization (`LOCALIZATION=rdl`, `rdl.py`; Luft et al. 2018).** Peers are fused consistently by tracking the cross-covariance between drones that have exchanged ranges, in factored form:
 - **Factors:** each drone keeps a 6×6 factor per peer, and the cross-covariance is the product of the two drones' factors. Its own predictions and anchor updates multiply only its own factors (a `Localizer` listener), so no drone needs the swarm's joint covariance.
@@ -547,6 +660,28 @@ Timed detonation depends on every drone's clock and on the drone sitting exactly
 - **Chain fire** (`_on_blast`). A detonation from the same job fires this drone at once if its fuze is armed and it is within 8 m of its slot; otherwise it does not fire, and survives. The detonation topic stands in for a job-selective trigger, and its delivery delay is logged (`chain_delay_s`), not hidden.
 - **Evaluation.** Each `detonation_eval` also records the reason (`fuze`, `chain`, `timed`, `fallback_timed`), the chain delay and who fired first, and, for fuze fires, how far the contact that fired it was from the true threat (`trigger_to_threat_m`, `trigger_is_threat` within 1 m). `/api/summary` adds `det_reasons`, `chain_fires`, `chain_delay_s_*`, `fuze_false_triggers` and `fuze_no_detection`.
 
+![Fuze state machine: tracking, mates recorded, armed in a window around t_engage, then fire on a new track in the gate at closest approach or on a mate's blast; if the window closes with no detection the drone holds](docs/diagrams/fuze.svg)
+
+**The fuze as a state machine.** `Fuze.update` runs once per radar scan:
+
+```text
+on scan(t, own, contacts, t_engage, predict):
+    associate contacts with tracks: nearest within 1 m + 10 m/s · Δt
+    if not recorded and (|predict(t) − own| ≤ range + 2 m or t ≥ t_engage − W):
+        mark every current track known; recorded ← true
+    if t < t_engage − W: return
+    if t > t_engage + W: return fallback (hold → no_detection | timed → fire)
+    p̂ ← predict(t)                               # from job updates: follows manoeuvres
+    for each track k updated now and not known:
+        if |k.pos − p̂| ≤ 5 m + 3σ_own:
+            v ← least-squares velocity over the last 0.3 s
+            if |k.pos − own| ≤ 8 m and (k.pos − own) · v ≥ 0:
+                return FIRE                       # closest approach just passed
+
+on a job-mate's detonation:
+    if in the window and |own − slot| ≤ 8 m: FIRE (chain)
+```
+
 Measured with the legacy setup and the 10 m fuze sensor (`--rtf 3`, one run each; timing error is the geometric one, see [Distributed clock](#distributed-clock)). With the current defaults, 8 drones and 4 uav: 4/4 by the fuze, misses 1.2 / 2.4 m (mean / max), timing error +0.06 ± 0.09 s:
 
 | Scenario | Fuze | Destroyed | What fired | Timing error (mean ± sd) | Miss mean / max | Other |
@@ -582,6 +717,33 @@ Protocol decisions read the clock at the latest sensor frame (50 Hz), as before,
 | `ttg` (time-to-go) | the ship stamps every message that carries absolute times with its send time (`sent`); the drone anchors each time on receipt, `local_rx + (t − sent)`, and keeps its protocol times on its local clock. Every job update (2 Hz) and zone update (1 Hz) re-anchors. The unknown one-way delay becomes error. | one field per message |
 | `master` (ship master) | two-way exchange, NTP-style: the drone's heartbeat carries its send stamp t1; the ship stamps its receipt t2, and its 1 Hz roster echoes `[t1, t2, t3]` for every drone, t3 being the roster's send stamp; the drone stamps the roster's arrival t4. offset = ((t2 − t1) + (t3 − t4)) / 2. A Kalman filter on offset and rate weighs each sample by its round trip (an exchange is off by at most half of it), rejects outliers once settled, and the rate estimate carries the clock through gaps. | no new messages: ~12 B per heartbeat, ~45 B per drone in each roster |
 | `consensus` (ship-anchored, ATS-style) | every node keeps a virtual clock `v = α·local + o` and moves its rate α and its virtual time toward the aggregate of its neighbours'; the ship is a pinned leader that never adjusts, so drones connected to it, directly or through peers, converge to ship time, and without it they keep agreeing with each other. Details below. | drone beacons at `CLOCK_BEACON_HZ` (0.5), ~130 B each, received by every drone: O(N²) swarm-wide (measured below); the ship's beacon rides in its roster |
+
+![Left: the four-timestamp exchange between a drone's heartbeat and the ship's roster. Right: consensus, where the ship is a pinned leader and drones beacon to each other, converging to ship time through one or two hops](docs/diagrams/clock-sync.svg)
+
+**`master` and `consensus`.** The exchange needs no delay estimate: it is exact for symmetric paths, and an asymmetry costs half of it. In consensus, d3 never hears the ship but converges through d1 and d2. In `timesync.py`:
+
+```text
+# master, on each roster
+θ ← ((t2 − t1) + (t3 − t4)) / 2;    δ ← (t4 − t1) − (t3 − t2)
+if δ < −5 ms: discard                             # impossible round trip: bad stamps
+Kalman update on [offset, rate], the sample weighted by δ
+if settled and the innovation is too large: reject
+if 5 rejections in a row: re-acquire
+
+# consensus, Consensus.step before each own beacon
+function STEP(local):
+    S ← fresh sources with a two-way exchange
+    if any source in S is anchored: S ← anchored ones only
+    for j in S:
+        η_j ← robust line fit of j's raw stamps against ours
+        v_j ← α_j · (τ_j + η_j·(local − sent_j)) + o_j
+    target ← mean(own, v_j)
+    if I hear the ship: target ← 0.5·ship + 0.5·target
+    if anchored and |target − own| > 50 ms: own ← target        # step
+    else: own ← own + 0.5·(target − own)                        # slew
+    α ← α + 0.5·(target_rate − α)
+    bound ← hops·5 ms + 50 ppm·(time since anchor) + residual
+```
 
 **Relayed drones (`master`).** The ship hears a drone that needs help through a peer, which forwards its heartbeat once a second, so the heartbeat can sit up to 1 s at the relay. The relay adds how long it held it (`relay_resid`, a PTP-style transparent clock) and the ship subtracts that from t2. The roster still reaches the drone directly. A drone that hears no roster keeps its last offset and rate.
 
@@ -926,6 +1088,27 @@ A detonation destroys any drone within 8 m (friendly fire), and the drones have 
 - **Final check.** At detonation, a drone counts non-job drones within 12 m. If there are any, it detonates anyway: the target comes first.
 - **Friendly fire is modelled.** A detonation of another job within 8 m destroys a drone (`sim/damage`). A job's own blasts never hurt its drones, also after a drone has aborted or given the job back (`_last_job`; this replaced a special case for aborts). `ZONE_KEEPOUT=0` turns prevention off for experiments.
 
+![Distance along the route against time: another job's blast occupies 25–49 m during 12–16 s; the straight flight would be inside it, so the planned route stops at 22 m, holds until 16 s, then arrives at 29.5 s, before its own detonation time](docs/diagrams/route-holds.svg)
+
+**A route that holds outside another job's blast** (a 60 m leg at 4 m/s and 1 m/s², to scale). The hold point lies beyond the drone's stopping distance and clear of every other blast that goes off while it waits. `deconflict.plan_route`:
+
+```text
+function PLAN_ROUTE(start, goal, t0, blasts, v0):
+    legs ← detour(start, goal, R_nofly + 3) + [goal]     # tangent, arc, tangent
+    for each leg (up to 12 holds):
+        b ← first blast the straight segment enters while that blast's window is open
+        if none: fly the leg; arrival += travel_time(d, v0)
+        elif inside b now:
+            leave radially if possible before b opens, wait outside
+        else:
+            s_hold ← entry distance − 3 m
+            if s_hold < stop_distance(v0): mark b exposed (cannot stop short)
+            else:
+                while the hold point is inside another live blast: s_hold ← s_hold − 3 m
+                append Leg(hold point, release = b.window.end)
+    cost ← 1.25 × travel + holds                          # this is the bid
+```
+
 Results, 50 drones, 25 threats, real time, APF planner:
 
 | | Before (CPA/defended-radius intercepts) | Now |
@@ -1057,6 +1240,39 @@ Measured at 8 drones: about 1.5% CPU per drone, loop p99 about 20–26 ms, perce
 
 ## Implementation map
 
+### Modules
+
+| Module | Files | Technology | What it does and how |
+|---|---|---|---|
+| **Launcher and config** | `scripts/run_swarm.sh`, `generate_swarm_config.py`, `swarm_instance.py` | Bash, Python 3, JSON | Parses the run options, places stations on a seeded ring at R+5 … R+45 m, merges the hardware record and planner defaults into `config/swarm_runtime.json`, warns when the host ARP table is too small for the radio mesh (≈ N² entries), maps `--instance K` to its own subnets and ports. |
+| **Containers and networks** | `docker-compose.yml`, `docker/*.Dockerfile` | Docker Compose v2, Ubuntu 22.04, `python:3.10-slim`; zenoh-c/cpp 1.0.4 built with Rust 1.75 | Five services on two bridge networks (`sim_net`, `radio_net`); the agent service scaled to N identical replicas; healthchecks and clean SIGTERM shutdown; images shared across instances. |
+| **Hardware record** | `hardware/hardware.json`, `src/common/hardware.py` | JSON, Python | Device classes (airframe, warhead, UWB, anchors, mmWave radar, GNSS, BMI088-class IMU, AHRS, C2 radio) and the simulation parameters derived from them (see [Hardware record](#hardware-record)). |
+| **Simulator bridge** | `sim/GazeboSimulator.cpp/.hpp`, `simulator_main.cpp`, `ocean.world` | C++17, Gazebo 11 transport, zenoh-cpp, nlohmann/json, CMake | First-order command response from `cmd_vel` plus wind and gusts; sensor models (pose, IMU Δv, UWB, radar, GNSS); owns detonations and friendly fire; publishes `sim/truth`; runs K× real time. |
+| **Links and radio** | `src/common/links.py`, `radio_process.py`, `radio_tls/` | Zenoh 1.10.1 (Python), UDP + QUIC/TLS, `multiprocessing` | Onboard session to the router; peer-to-peer radio with best-effort data over UDP and control messages over QUIC; the radio in a child process behind a watchdog. |
+| **Clocks** | `src/common/simclock.py`, `localclock.py`, `timesync.py` | Python; Kalman filter, robust line fit | Truth, per-node oscillators and synchronized ship time kept apart; sync modes `none`, `ttg`, `master`, `consensus`. |
+| **Ship C2** | `src/ship/ship.py`, `threat_queue.py`, `dashboard.html` | Python threads, `ThreadingHTTPServer`, Server-Sent Events, `heapq`; HTML/JS | Radar simulation, TCPA min-heap, roster, feasibility, orders, confirmation, zones, kill assessment, event log; serves `/api/state`, `/api/summary`, `/api/stream`, `/api/approve`, `/api/auto_approve`. |
+| **Job confirmation** | `src/common/jobs.py` | Pure Python | `arbitrate()` confirms the best awards and hands out slots in drone-ID order; `heartbeat_answer()` repairs lost ACKs, awards and releases. |
+| **Threat geometry** | `src/common/threats.py` | Pure Python | Threat types, CPA/TCPA, legacy engagement point, vertical slots, trapezoidal ETA, TTI. |
+| **Spatial deconfliction** | `src/common/deconflict.py` | Pure Python | Blast reservations in space and time, routes with holds, detours around the no-fly zone, earliest feasible intercept. |
+| **Agent core** | `src/agent/main.py`, `agent.py`, `timing.py`, `telemetry.py` | Python threads, NumPy | ID claim, both links, 50 Hz reflex loop, heartbeat with job state, peer relay, telemetry. |
+| **Localization** | `src/agent/localization.py`, `coop.py`, `rdl.py`, `gnss.py` | NumPy EKF | Robust UWB EKF with IMU prediction, cooperative fusion along anchor chains, RDL (opt-in), GNSS comparator and fallback. |
+| **Perception** | `src/agent/radar_obstacles.py`, `voxel_map.py` (legacy) | Python; NumPy for the voxel map | Radar contacts to planar obstacle points; the legacy sparse 0.5 m occupancy grid with batched ray tracing. |
+| **Planning** | `src/agent/path_planning.py` | NumPy | APF (default) and ORCA. |
+| **Allocation** | `src/agent/auction.py` | Pure Python | Deterministic, priority-ordered, all-or-nothing assignment; yields to better awards until confirmed. |
+| **Proximity fuze** | `src/agent/fuze.py` | Pure Python | Contact tracking, mate record, arming window, gate, closest-approach firing, fallback, chain fire. |
+| **Metrics node** | `src/metrics/main.py` | Python, spatial hash | Estimates vs truth (error, NEES, 95 % ellipse), collisions and close calls in O(N), distance flown. |
+| **Tests and tools** | `tests/`, `tools/comms/`, `experiments/` | pytest, tc netem, Docker network operations, py-spy | Unit tests on the pure modules, validation scripts, radio probes, sweeps with a stand-in operator, reproducible experiment scripts. |
+
+`config/` holds generated runtime files and is not tracked.
+
+### Module dependencies
+
+![Import graph: agent.py imports eleven drone modules and eight shared modules; ship.py imports seven shared modules plus threat_queue; the simulator and metrics node have no project imports and connect only through Zenoh topics](docs/diagrams/module-dependencies.svg)
+
+Python imports between project modules (arrow = "imports"). `src/common` is shared, so the drones and the ship compute ETAs, routes and engagement geometry with the same code and agree on feasibility. The algorithm modules (auction, fuze, localization, deconflict, jobs, timesync) have no Zenoh dependency, which is what makes them unit-testable.
+
+### Features
+
 Where each implemented feature lives.
 
 | Area | Feature | Files |
@@ -1117,30 +1333,6 @@ Where each implemented feature lives.
 | | ship: reason, trigger label, chain delay, no-detection count | `ship.py` (`_evaluate_detonation`, `_on_award`, `summary`) |
 | **Tests / tools** | unit tests and validation scripts | `tests/` (see [Testing](#testing)) |
 | | degraded-comms probes, radio cut, chaos, stand-in operator, radio degradation, sweep | `tools/comms/` |
-
-## Agent internals
-
-`src/agent/agent.py`:
-
-1. **Position: `localization.py`, `coop.py`.** An EKF on position, velocity and wind, predicted with the commanded velocity and corrected by UWB ranges to the ship's anchors and, out of their reach, to peers with fresher anchor chains. Its uncertainty (σ) widens the no-fly barrier, the fuze gate and the intruder check. See [Localization and perception](#localization-and-perception).
-2. **Eyes: `radar_obstacles.py`.**
-   - Radar contacts become planar obstacle points: 32 rays, each contact a 3 m circle at the drone's altitude, ship returns dropped.
-   - Updated only while the drone has a goal; points expire.
-   - The legacy lidar mode uses `voxel_map.py` instead: a sparse 0.5 m occupancy grid, ray-traced in vectorized batches, with expiry.
-3. **Reflexes: `path_planning.py` and the 50 Hz loop.**
-   - Planning uses APF (default) or ORCA against the obstacle points, the ship and the no-fly zone.
-   - The loop then applies:
-     - a floor/ceiling guard,
-     - damping near obstacles,
-     - service-radius containment,
-     - a braking envelope,
-     - acceleration and speed limits.
-
-     Arrival latches (within 0.5 m of the goal's altitude) and the drone holds position, re-approaching if wind pushes it more than 1 m beyond where it latched.
-   - An untasked drone holds station: zero velocity, and back to its hold point after drifting 1 m.
-4. **Timing: `timing.py`.** Simulation time drives the physics integration. Wall-clock time drives sensor freshness. If sensor data is stale, the drone commands zero velocity.
-5. **Engagement: `auction.py` + `src/common/threats.py` + `fuze.py`.** Covers bidding, assignment, slots, the detonation time and the proximity fuze. See [Engagement protocol](#engagement-protocol).
-6. **Telemetry: `telemetry.py`.**
 
 ## Configuration
 
@@ -1223,24 +1415,6 @@ python3 tests/run_all_validations.py       # validation suite, ~75 s; writes pre
 | `test_simclock.py` | protocol clock follows the measured sim rate, never goes backwards, survives restarts; `truth_now` extrapolation |
 | `test_metrics_spatial_hash.py` | spatial-hash collision check matches brute force |
 | `benchmark_voxelmap.py`, `validate_*.py` | throughput, planner scenarios, timing, metrics overhead, worker lifecycle |
-
-## Repository layout
-
-```
-config/                 generated runtime files — not tracked
-docker/                 base (zenoh-c/cpp), gazebo, agent, ship, metrics images
-scripts/run_swarm.sh    launcher;  scripts/generate_swarm_config.py
-sim/                    GazeboSimulator (C++ bridge, kinematics, markers), simulator_main.cpp, ocean.world
-src/common/             threat model and geometry (threats.py), Zenoh links (links.py), radio process (radio_process.py),
-                        spatial queue (deconflict.py), jobs (jobs.py), clocks (simclock.py, localclock.py, timesync.py)
-src/agent/              drone: agent, localization (EKF) and coop, radar obstacles, fuze, auction, planners, timing,
-                        telemetry; legacy voxel map
-hardware/hardware.json  device-class record: every simulation parameter comes from it
-src/ship/               ship C2 (ship.py), threat min-heap (threat_queue.py), dashboard.html
-src/metrics/main.py     metrics node (truth vs estimates, separations, distance)
-tests/                  unit tests and validation scripts
-tools/comms/            degraded-comms probes, radio cut helper, chaos script, stand-in operator
-```
 
 ## Next steps
 

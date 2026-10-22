@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="480" class="dg" viewBox="0 0 1040 480" role="img" aria-label="Data flow inside agent.py: onboard sensors feed localization, the radio feeds engagement, radar contacts feed obstacles and the fuze; localization, engagement and obstacles feed the 50 Hz reflex loop that commands velocity; the fuze issues the detonation request.">
+<style>
+:root{--surface:#FFFFFF;--group:#E6ECEF;--ink:#14212B;--ink-2:#3B4B58;--muted:#5D6D79;--line:#C6D0D6;
+--accent:#0A6A8A;--accent-soft:rgba(10,106,138,0.09);--hot:#B3431B;--hot-soft:rgba(179,67,27,0.10);--f-sans:"IBM Plex Sans","Helvetica Neue",Helvetica,Arial,sans-serif;--f-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+@media (prefers-color-scheme: dark){:root{--surface:#15202A;--group:#18242E;--ink:#E2E9EE;--ink-2:#A7B6C1;--muted:#8696A2;--line:#2C3B47;
+--accent:#52B5D5;--accent-soft:rgba(82,181,213,0.13);--hot:#EE8A5E;--hot-soft:rgba(238,138,94,0.14);}}
+svg.dg{font-family:var(--f-sans)}
+.dg .bg{fill:var(--surface)}
+
+.dg text { fill: var(--ink); font-size: 12px; }
+.dg .h { font-weight: 600; font-size: 12.5px; }
+.dg .s { fill: var(--muted); font-size: 10.5px; }
+.dg .m { font-family: var(--f-mono); font-size: 10.5px; fill: var(--muted); }
+.dg .mi { font-family: var(--f-mono); font-size: 11px; fill: var(--ink); }
+.dg .lbl { font-size: 10.5px; fill: var(--ink-2); }
+.dg .lbl-r { fill: var(--accent); }
+.dg .lbl-h { fill: var(--hot); }
+.dg .band-t { font-family: var(--f-mono); font-size: 10.5px; letter-spacing: 0.05em; fill: var(--muted); }
+.dg .halo { paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.dg .bx { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.2; }
+.dg .bx-r { stroke: var(--accent); stroke-width: 1.5; }
+.dg .bx-h { stroke: var(--hot); stroke-width: 1.5; }
+.dg .bx-fill-r { fill: var(--accent-soft); }
+.dg .bx-fill-h { fill: var(--hot-soft); }
+.dg .grp { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ctr { fill: none; stroke: var(--line); stroke-width: 1.4; stroke-dasharray: 5 4; }
+.dg .band-r { fill: var(--accent-soft); stroke: none; }
+.dg .note { fill: var(--group); stroke: var(--line); stroke-width: 1; }
+.dg .ln { stroke: var(--ink-2); stroke-width: 1.3; fill: none; }
+.dg .ln-thin { stroke-width: 1; opacity: 0.75; }
+.dg .ln-r { stroke: var(--accent); stroke-dasharray: 6 4; }
+.dg .ln-rs { stroke: var(--accent); }
+.dg .ln-h { stroke: var(--hot); }
+.dg .ln-d { stroke-dasharray: 2 3; }
+.dg .ln-dash { stroke-dasharray: 5 4; }
+.dg .ln-bold { stroke-width: 2.2; }
+.dg .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+.dg .grid { stroke: var(--line); stroke-width: 1; }
+.dg .mk { fill: var(--ink-2); }
+.dg .mk-r { fill: var(--accent); }
+.dg .mk-h { fill: var(--hot); }
+.dg .dot-r { fill: var(--accent); }
+.dg .dot-h { fill: var(--hot); }
+.dg .dot-i { fill: var(--ink); }
+.dg .zone { fill: var(--hot-soft); stroke: var(--hot); stroke-width: 1.3; stroke-dasharray: 5 4; }
+.dg .ring { fill: none; stroke: var(--accent-soft); }
+.dg .faint { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 3 4; }
+.dg .hull { fill: var(--ink-2); }
+
+</style>
+<rect class="bg" x="0" y="0" width="1040" height="480" rx="8"/>
+        <defs>
+          <marker id="f5a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="f5r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk-r" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="f5h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="mk-h" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <text class="band-t" x="20" y="22">INPUTS</text>
+        <text class="band-t" x="240" y="22">AGENT.PY MODULES</text>
+        <text class="band-t" x="800" y="22">OUTPUTS</text>
+        <!-- inputs -->
+        <rect class="bx" x="20" y="40" width="165" height="44" rx="5"/><text class="mi" x="30" y="58">drone/{id}/sensors</text><text class="s" x="30" y="75">50 Hz · z, attitude, IMU Δv</text>
+        <rect class="bx" x="20" y="96" width="165" height="44" rx="5"/><text class="mi" x="30" y="114">drone/{id}/uwb</text><text class="s" x="30" y="131">2 Hz · anchor + peer ranges</text>
+        <rect class="bx" x="20" y="152" width="165" height="44" rx="5"/><text class="mi" x="30" y="170">drone/{id}/gnss</text><text class="s" x="30" y="187">5 Hz · fix</text>
+        <rect class="bx bx-r" x="20" y="226" width="165" height="84" rx="5"/><text class="h" x="30" y="246">radio process</text><text class="s" x="30" y="264">in: orders, ACK, jobs,</text><text class="s" x="30" y="279">zones, roster</text><text class="s" x="30" y="296">out: bids, awards, HB</text>
+        <rect class="bx" x="20" y="360" width="165" height="44" rx="5"/><text class="mi" x="30" y="378">drone/{id}/radar</text><text class="s" x="30" y="395">20 Hz · unlabelled contacts</text>
+
+        <!-- localization -->
+        <rect class="bx" x="240" y="30" width="210" height="176" rx="6"/>
+        <text class="h" x="252" y="50">Localization</text>
+        <text class="s" x="252" y="70">EKF [x, y, vx, vy, bx, by]</text>
+        <text class="s" x="252" y="87">predict: IMU Δv each frame</text>
+        <text class="s" x="252" y="104">correct: anchor ranges (Huber)</text>
+        <text class="s" x="252" y="121">peers: coop chain or RDL</text>
+        <text class="s" x="252" y="138">GNSS: spoof check, fallback</text>
+        <text class="m" x="252" y="168">localization.py · coop.py</text>
+        <text class="m" x="252" y="184">rdl.py · gnss.py</text>
+        <!-- engagement -->
+        <rect class="bx" x="240" y="220" width="210" height="96" rx="6"/>
+        <text class="h" x="252" y="240">Engagement</text>
+        <text class="s" x="252" y="258">auction.py: ETA bids, assign()</text>
+        <text class="s" x="252" y="274">inbox: ACK, job updates</text>
+        <text class="s" x="252" y="290">deconflict.plan_route + holds</text>
+        <text class="s" x="252" y="306">times in ship time (timesync)</text>
+        <!-- perception + fuze -->
+        <rect class="bx bx-h" x="240" y="346" width="210" height="110" rx="6"/>
+        <text class="h" x="252" y="366">Radar contacts</text>
+        <text class="s" x="252" y="384">radar_obstacles: 32-ray points</text>
+        <text class="s" x="252" y="401">fuze.py: tracks, gate, CPA</text>
+        <text class="s" x="252" y="418">armed t_engage ± 2 s</text>
+        <text class="s" x="252" y="435">chain fire on a mate's blast</text>
+        <line class="ln" x1="345" y1="316" x2="345" y2="344" marker-end="url(#f5a)"/>
+        <text class="lbl" x="353" y="335">t_engage · track</text>
+
+        <!-- reflex -->
+        <rect class="bx bx-r" x="530" y="130" width="210" height="260" rx="6"/>
+        <text class="h" x="542" y="150">Reflex loop · 50 Hz</text>
+        <text class="s" x="542" y="172">arrival latch (0.5 m in z)</text>
+        <text class="s" x="542" y="190">path_planning: APF or ORCA</text>
+        <text class="s" x="542" y="208">no-fly barrier widened by 2σ</text>
+        <text class="s" x="542" y="226">floor and ceiling guard</text>
+        <text class="s" x="542" y="244">damping near obstacles</text>
+        <text class="s" x="542" y="262">service-radius limit</text>
+        <text class="s" x="542" y="280">braking envelope</text>
+        <text class="s" x="542" y="298">accel 1 m/s², speed 4 m/s</text>
+        <text class="s" x="542" y="316">station keeping in wind</text>
+        <text class="m" x="542" y="344">timing.py: stale sensors</text>
+        <text class="m" x="542" y="360">→ zero velocity</text>
+
+        <!-- outputs -->
+        <rect class="bx" x="800" y="40" width="220" height="44" rx="5"/><text class="mi" x="810" y="58">drone/{id}/uwb_tx</text><text class="s" x="810" y="75">own state + peers to range</text>
+        <rect class="bx bx-r" x="800" y="238" width="220" height="44" rx="5"/><text class="mi" x="810" y="256">swarm/{id}/cmd_vel</text><text class="s" x="810" y="273">velocity to the simulator</text>
+        <rect class="bx bx-h" x="800" y="408" width="220" height="44" rx="5"/><text class="mi" x="810" y="426">drone/{id}/detonate</text><text class="s" x="810" y="443">request; the simulator places it</text>
+
+        <!-- edges -->
+        <line class="ln" x1="185" y1="62" x2="238" y2="62" marker-end="url(#f5a)"/>
+        <line class="ln" x1="185" y1="118" x2="238" y2="118" marker-end="url(#f5a)"/>
+        <line class="ln" x1="185" y1="174" x2="238" y2="174" marker-end="url(#f5a)"/>
+        <line class="ln ln-r" x1="185" y1="268" x2="238" y2="268" marker-start="url(#f5r)" marker-end="url(#f5r)"/>
+        <line class="ln" x1="185" y1="382" x2="238" y2="382" marker-end="url(#f5a)"/>
+
+        <line class="ln" x1="450" y1="60" x2="798" y2="60" marker-end="url(#f5a)"/>
+        <text class="lbl" x="624" y="52" text-anchor="middle">own state for peers</text>
+        <line class="ln" x1="450" y1="170" x2="528" y2="170" marker-end="url(#f5a)"/>
+        <text class="lbl" x="489" y="163" text-anchor="middle">x, y, σ</text>
+        <line class="ln" x1="450" y1="268" x2="528" y2="268" marker-end="url(#f5a)"/>
+        <text class="lbl" x="489" y="261" text-anchor="middle">goal / hold</text>
+        <line class="ln" x1="450" y1="370" x2="528" y2="370" marker-end="url(#f5a)"/>
+        <text class="lbl" x="489" y="363" text-anchor="middle">obstacles</text>
+        <line class="ln ln-rs" x1="740" y1="260" x2="798" y2="260" marker-end="url(#f5r)"/>
+        <text class="lbl" x="769" y="252" text-anchor="middle">velocity</text>
+        <line class="ln ln-h" x1="450" y1="430" x2="798" y2="430" marker-end="url(#f5h)"/>
+        <text class="lbl lbl-h" x="624" y="422" text-anchor="middle">fire (fuze or chain)</text>
+      </svg>
